@@ -1,0 +1,17 @@
+.gradle/
+.idea/
+.tmp-api/
+build/
+local.properties
+keystore.properties
+keystore/
+*.jks
+*.keystore
+
+*.apk
+*.ap_
+*.dex
+*.iml
+
+app/build/
+logs/

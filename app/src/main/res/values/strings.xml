@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Miui Back Gesture Hook</string>
+    <string name="module_description">Hooks Xiaomi back gesture behavior with LSPosed API 102.</string>
+</resources>

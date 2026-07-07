@@ -1,0 +1,78 @@
+plugins {
+    id "com.android.application"
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.isFile()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+
+def signingProperty = { name ->
+    def value = keystoreProperties.getProperty(name)
+    return value == null || value.isBlank() ? null : value
+}
+
+def localKeystoreFile = signingProperty("storeFile")
+def localKeystorePassword = signingProperty("storePassword")
+def localKeyAlias = signingProperty("keyAlias")
+def localKeyPassword = signingProperty("keyPassword")
+def hasLocalSigningConfig = [
+        localKeystoreFile,
+        localKeystorePassword,
+        localKeyAlias,
+        localKeyPassword
+].every { it != null }
+
+def envKeystoreFile = System.getenv("SIGNING_KEY")
+def envKeystorePassword = System.getenv("KEYSTORE_PASSWORD")
+def envAlias = System.getenv("ALIAS")
+def envKeyPassword = System.getenv("KEY_PASSWORD")
+def hasEnvSigningConfig = [
+        envKeystoreFile,
+        envKeystorePassword,
+        envAlias,
+        envKeyPassword
+].every { it != null && !it.isBlank() }
+
+android {
+    namespace "dev.codex.miuibackgesturehook"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "dev.codex.miuibackgesturehook"
+        minSdk 35
+        targetSdk 36
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    signingConfigs {
+        release {
+            if (hasLocalSigningConfig) {
+                storeFile rootProject.file(localKeystoreFile)
+                storePassword localKeystorePassword
+                keyAlias localKeyAlias
+                keyPassword localKeyPassword
+            } else if (hasEnvSigningConfig) {
+                storeFile file(envKeystoreFile)
+                storePassword envKeystorePassword
+                keyAlias envAlias
+                keyPassword envKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasLocalSigningConfig || hasEnvSigningConfig) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+}
+
+dependencies {
+    compileOnly "io.github.libxposed:api:102.0.0"
+    compileOnly project(":hidden-api")
+}

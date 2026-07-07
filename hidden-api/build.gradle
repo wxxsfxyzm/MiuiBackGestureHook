@@ -1,0 +1,22 @@
+plugins {
+    id "java-library"
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+def sdkDir = localProperties.getProperty("sdk.dir")
+def androidJar = sdkDir == null ? null : file("${sdkDir}/platforms/android-36/android.jar")
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    if (androidJar != null && androidJar.exists()) {
+        compileOnly files(androidJar)
+    }
+}
