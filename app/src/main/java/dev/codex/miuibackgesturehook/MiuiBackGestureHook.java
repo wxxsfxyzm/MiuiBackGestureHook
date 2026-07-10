@@ -27,6 +27,9 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowMetrics;
+import android.window.BackMotionEvent;
+import android.window.BackNavigationInfo;
+import android.window.BackTouchTracker;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
@@ -47,7 +50,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v56-pilfer-on-down-test";
+    private static final String BUILD_MARK = "systemui-aosp-back-v59-hidden-api-hotpath";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -1131,6 +1134,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     "shell_back_finishBackNavigation");
             hookNoArgTrace(controllerClass, "onBackAnimationFinished",
                     "shell_back_onBackAnimationFinished");
+            hookOptionalNoArgTrace(controllerClass, "finishBackAnimation",
+                    "shell_back_finishBackAnimation");
             hookBackNavigationInfoReceived(controllerClass);
             hookRegistryUpdate(classLoader);
             hookCrossActivityDiagnostics(classLoader);
@@ -1231,6 +1236,15 @@ public final class MiuiBackGestureHook extends XposedModule {
         hookMethodTrace(method, hookId);
     }
 
+    private void hookOptionalNoArgTrace(Class<?> ownerClass, String methodName, String hookId) {
+        try {
+            hookNoArgTrace(ownerClass, methodName, hookId);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Optional Shell method unavailable: " + methodName,
+                    throwable);
+        }
+    }
+
     private void hookMethodTrace(Method method, String hookId) {
         method.setAccessible(true);
         recordHookHandle(hook(method)
@@ -1256,6 +1270,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             logCrossActivityState("before " + hookId, chain.getThisObject(), chain.getArgs());
         }
         Object result = chain.proceed();
+        if ("shell_back_onBackAnimationFinished".equals(hookId)
+                || "shell_back_finishBackAnimation".equals(hookId)) {
+            notifyShellAnimationFinished(chain.getThisObject(), hookId);
+        }
         switch (hookId) {
             case "systemui_edge_back_setBackAnimation":
                 installBackInputOverlay(chain.getThisObject(), chain.getArg(0));
@@ -1276,6 +1294,16 @@ public final class MiuiBackGestureHook extends XposedModule {
         log(Log.INFO, TAG, "after " + hookId
                 + ", result=" + shortObject(result));
         return result;
+    }
+
+    private void notifyShellAnimationFinished(Object controller, String reason) {
+        for (NativeBackInputMonitor monitor
+                : new ArrayList<>(nativeInputMonitors.values())) {
+            monitor.onShellAnimationFinished(controller, reason);
+        }
+        for (SystemUiBackInputOverlay overlay : new ArrayList<>(overlays.values())) {
+            overlay.onShellAnimationFinished(controller, reason);
+        }
     }
 
     private Object traceCrossActivityApplyTransform(XposedInterface.Chain chain)
@@ -1732,23 +1760,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             return "none";
         }
         try {
-            Object touchX = invokeAnyMethod(event, "getTouchX", new Object[0]);
-            Object touchY = invokeAnyMethod(event, "getTouchY", new Object[0]);
-            Object progress = invokeAnyMethod(event, "getProgress", new Object[0]);
-            Object triggerBack = invokeAnyMethod(event, "getTriggerBack", new Object[0]);
-            Object swipeEdge = invokeAnyMethod(event, "getSwipeEdge", new Object[0]);
-            Object departing = null;
-            try {
-                departing = invokeAnyMethod(event, "getDepartingAnimationTarget",
-                        new Object[0]);
-            } catch (Throwable ignored) {
-            }
-            return "{touchX=" + touchX
-                    + ", touchY=" + touchY
-                    + ", progress=" + progress
-                    + ", triggerBack=" + triggerBack
-                    + ", swipeEdge=" + swipeEdge
-                    + ", departing=" + describeRemoteTarget(departing) + "}";
+            BackMotionEvent motionEvent = (BackMotionEvent) event;
+            return "{touchX=" + motionEvent.getTouchX()
+                    + ", touchY=" + motionEvent.getTouchY()
+                    + ", progress=" + motionEvent.getProgress()
+                    + ", triggerBack=" + motionEvent.getTriggerBack()
+                    + ", swipeEdge=" + motionEvent.getSwipeEdge()
+                    + ", departing=" + describeRemoteTarget(
+                    motionEvent.getDepartingAnimationTarget()) + "}";
         } catch (Throwable throwable) {
             return "error:" + throwable.getClass().getSimpleName();
         }
@@ -1892,11 +1911,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         try {
-            Object type = invokeMethod(info, "getType", new Class<?>[0], new Object[0]);
-            Object prepare = invokeMethod(info, "isPrepareRemoteAnimation",
-                    new Class<?>[0], new Object[0]);
-            Object callback = invokeMethod(info, "getOnBackInvokedCallback",
-                    new Class<?>[0], new Object[0]);
+            BackNavigationInfo navigationInfo = (BackNavigationInfo) info;
+            int type = navigationInfo.getType();
+            boolean prepare = navigationInfo.isPrepareRemoteAnimation();
+            Object callback = navigationInfo.getOnBackInvokedCallback();
             log(Log.INFO, TAG, "BackNavigationInfo detail: type=" + type
                     + ", prepareRemoteAnimation=" + prepare
                     + ", callback=" + shortObject(callback));
@@ -1910,9 +1928,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         try {
-            Object type = invokeMethod(info, "getType", new Class<?>[0], new Object[0]);
-            if (type instanceof Integer && ((Integer) type).intValue() == TYPE_CALLBACK) {
-                invokeAnyMethod(info, "disableAppProgressGenerationAllowed", new Object[0]);
+            BackNavigationInfo navigationInfo = (BackNavigationInfo) info;
+            if (navigationInfo.getType() == TYPE_CALLBACK) {
+                navigationInfo.disableAppProgressGenerationAllowed();
                 log(Log.INFO, TAG,
                         "Disabled app-generated progress for TYPE_CALLBACK; SystemUI will dispatch progress");
             }
@@ -1939,7 +1957,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             throw new IllegalStateException("monitorGestureInput returned "
                     + shortObject(monitor));
         }
-        Object inputChannel = invokeAnyMethod(monitor, "getInputChannel", new Object[0]);
+        Object inputChannel = ((InputMonitor) monitor).getInputChannel();
         if (!(inputChannel instanceof InputChannel)) {
             throw new IllegalStateException("InputMonitor channel is "
                     + shortObject(inputChannel));
@@ -1995,6 +2013,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             driver.updateBackAnimation(newBackAnimationImpl);
         }
 
+        void onShellAnimationFinished(Object finishedController, String reason) {
+            driver.onShellAnimationFinished(finishedController, reason);
+        }
+
         @Override
         public void onInputEvent(InputEvent event) {
             boolean handled = false;
@@ -2035,7 +2057,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             activeEdge = edge;
             downX = event.getRawX();
             downY = event.getRawY();
-            driver.handleTouch(event, activeEdge);
+            if (!driver.handleTouch(event, activeEdge)) {
+                resetCandidate();
+                return false;
+            }
             pilferPointers(0.0f);
             log(Log.INFO, TAG, "Native SystemUI back candidate started"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
@@ -2062,7 +2087,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!pilfered && distance > dp(PILFER_THRESHOLD_DP)) {
                 pilferPointers(distance);
             }
-            driver.handleTouch(event, activeEdge);
+            if (!driver.handleTouch(event, activeEdge)) {
+                resetCandidate();
+                return false;
+            }
             return pilfered;
         }
 
@@ -2070,7 +2098,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 inputMonitor.pilferPointers();
                 pilfered = true;
-                driver.onPointersPilfered(distance);
                 log(Log.INFO, TAG, "Native SystemUI back pilfered pointers"
                         + ", distance=" + distance + ", edge=" + activeEdge);
             } catch (Throwable throwable) {
@@ -2307,6 +2334,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean thresholdCrossed;
         private boolean nativePanelActive;
         private boolean triggerBack;
+        private boolean shellGestureStarted;
+        private boolean gestureSuppressed;
         private int activeEdge;
         private float downX;
         private float downY;
@@ -2405,26 +2434,41 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private boolean onDown(MotionEvent event, int edge) throws Exception {
+            if (!isShellReadyForGesture()) {
+                gestureActive = true;
+                shellGestureStarted = false;
+                gestureSuppressed = true;
+                activeEdge = edge;
+                downX = event.getRawX();
+                downY = event.getRawY();
+                log(Log.WARN, TAG, "Suppressed SystemUI back while Shell is busy"
+                        + ", state=" + describeShellState());
+                return true;
+            }
             gestureActive = true;
+            shellGestureStarted = false;
+            gestureSuppressed = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
             activeEdge = edge;
             downX = event.getRawX();
             downY = event.getRawY();
-            syncAospProgressThresholds();
-            invokeAnyMethod(controller, "onGestureStarted",
-                    new Object[]{Float.valueOf(downX), Float.valueOf(downY),
-                            Integer.valueOf(activeEdge)});
-            syncAospProgressThresholds();
             dispatchToEdgePlugin(event, activeEdge);
-            log(Log.INFO, TAG, "SystemUI overlay onGestureStarted"
+            log(Log.INFO, TAG, "SystemUI overlay gesture candidate"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
         }
 
         private boolean onMove(MotionEvent event) throws Exception {
             if (!gestureActive) {
+                return false;
+            }
+            if (gestureSuppressed) {
+                return true;
+            }
+            if (!shellGestureStarted && !startShellGesture()) {
+                cancelLocalGesture(event, "BackNavigationInfo unavailable");
                 return false;
             }
             dispatchToEdgePlugin(event, activeEdge);
@@ -2443,14 +2487,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             return true;
         }
 
-        private void onPointersPilfered(float distance) {
-            try {
-                crossIntentThreshold(distance);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to notify Shell of pilfer threshold", throwable);
-            }
-        }
-
         private void crossIntentThreshold(float distance) throws Exception {
             if (thresholdCrossed) {
                 return;
@@ -2465,6 +2501,16 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean onUp(MotionEvent event, boolean allowTrigger) throws Exception {
             if (!gestureActive) {
                 return false;
+            }
+            if (gestureSuppressed) {
+                gestureActive = false;
+                gestureSuppressed = false;
+                log(Log.INFO, TAG, "Finished suppressed SystemUI back gesture");
+                return true;
+            }
+            if (!shellGestureStarted) {
+                cancelLocalGesture(event, "released before first MOVE");
+                return true;
             }
             dispatchToEdgePlugin(event, activeEdge);
             updateActiveTracker(event.getRawX(), event.getRawY());
@@ -2502,10 +2548,124 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.INFO, TAG, "SystemUI overlay finish, trigger=" + trigger
                     + ", edge=" + activeEdge);
             gestureActive = false;
+            shellGestureStarted = false;
+            gestureSuppressed = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
             return true;
+        }
+
+        private boolean startShellGesture() throws Exception {
+            syncAospProgressThresholds();
+            invokeAnyMethod(controller, "onGestureStarted",
+                    new Object[]{Float.valueOf(downX), Float.valueOf(downY),
+                            Integer.valueOf(activeEdge)});
+            syncAospProgressThresholds();
+            Object info = readField(controller, "mBackNavigationInfo");
+            boolean receivedNull = Boolean.TRUE.equals(
+                    readField(controller, "mReceivedNullNavigationInfo"));
+            if (info == null || receivedNull) {
+                log(Log.WARN, TAG, "Shell rejected back navigation"
+                        + ", info=" + shortObject(info)
+                        + ", receivedNull=" + receivedNull
+                        + ", state=" + describeShellState());
+                cleanupRejectedShellGesture();
+                return false;
+            }
+            shellGestureStarted = true;
+            log(Log.INFO, TAG, "SystemUI overlay onGestureStarted"
+                    + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
+            return true;
+        }
+
+        private boolean isShellReadyForGesture() {
+            try {
+                if (Boolean.TRUE.equals(readField(controller,
+                        "mPostCommitAnimationInProgress"))) {
+                    return false;
+                }
+                if (Boolean.TRUE.equals(readField(controller, "mBackGestureStarted"))) {
+                    return false;
+                }
+                if (readField(controller, "mBackNavigationInfo") != null
+                        || readField(controller, "mBackAnimationFinishedCallback") != null) {
+                    return false;
+                }
+                Object current = readField(controller, "mCurrentTracker");
+                Object queued = readField(controller, "mQueuedTracker");
+                return isTrackerInitial(current) && isTrackerInitial(queued);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to inspect Shell readiness; rejecting gesture",
+                        throwable);
+                return false;
+            }
+        }
+
+        private boolean isTrackerInitial(Object tracker) throws Exception {
+            return tracker == null || ((BackTouchTracker) tracker).isInInitialState();
+        }
+
+        private String describeShellState() {
+            try {
+                return "postCommit=" + readField(controller, "mPostCommitAnimationInProgress")
+                        + ", backStarted=" + readField(controller, "mBackGestureStarted")
+                        + ", info=" + shortObject(readField(controller, "mBackNavigationInfo"))
+                        + ", finishedCallback=" + shortObject(
+                        readField(controller, "mBackAnimationFinishedCallback"))
+                        + ", current=" + shortObject(readField(controller, "mCurrentTracker"))
+                        + ", queued=" + shortObject(readField(controller, "mQueuedTracker"));
+            } catch (Throwable throwable) {
+                return "unavailable:" + throwable.getClass().getSimpleName();
+            }
+        }
+
+        private void cleanupRejectedShellGesture() {
+            try {
+                writeField(controller, "mBackGestureStarted", Boolean.FALSE);
+                Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
+                if (tracker != null) {
+                    ((BackTouchTracker) tracker).reset();
+                }
+                invokeAnyMethod(controller, "finishBackNavigation",
+                        new Object[]{Boolean.FALSE});
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to clean rejected Shell gesture", throwable);
+            }
+        }
+
+        private void cancelLocalGesture(MotionEvent event, String reason) {
+            try {
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                dispatchToEdgePlugin(cancel, activeEdge);
+                cancel.recycle();
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to cancel local edge panel", throwable);
+            }
+            gestureActive = false;
+            shellGestureStarted = false;
+            gestureSuppressed = false;
+            thresholdCrossed = false;
+            nativePanelActive = false;
+            triggerBack = false;
+            log(Log.INFO, TAG, "Cancelled local SystemUI back gesture, reason=" + reason);
+        }
+
+        private void onShellAnimationFinished(Object finishedController, String reason) {
+            if (controller != finishedController) {
+                return;
+            }
+            if (gestureActive) {
+                gestureActive = false;
+                shellGestureStarted = false;
+                gestureSuppressed = false;
+                thresholdCrossed = false;
+                nativePanelActive = false;
+                triggerBack = false;
+                log(Log.WARN, TAG, "Cleared local gesture after Shell animation completion"
+                        + ", reason=" + reason);
+            }
         }
 
         private boolean startRemotePostCommitIfNeeded(Object tracker) {
@@ -2518,6 +2678,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                 writeField(controller, "mPointersPilfered", Boolean.FALSE);
                 writeField(controller, "mBackGestureStarted", Boolean.FALSE);
                 setTrackerState(tracker, "FINISHED");
+                if (isRemoteAnimationWaiting(info)) {
+                    scheduleShellAnimationTimeout();
+                    log(Log.INFO, TAG, "SystemUI overlay waiting for remote animation start"
+                            + ", type=" + ((BackNavigationInfo) info).getType());
+                    return true;
+                }
                 invokeAnyMethod(controller, "startPostCommitAnimation", new Object[0]);
                 return true;
             } catch (Throwable throwable) {
@@ -2526,27 +2692,48 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        private boolean isRemoteAnimationWaiting(Object info) {
+            try {
+                int type = ((BackNavigationInfo) info).getType();
+                Object registry = readField(controller, "mShellBackAnimationRegistry");
+                Object definitions = readField(registry, "mAnimationDefinition");
+                Object runner = invokeAnyMethod(definitions, "get",
+                        new Object[]{Integer.valueOf(type)});
+                return runner != null
+                        && Boolean.TRUE.equals(readField(runner, "mWaitingAnimation"));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to inspect remote animation waiting state",
+                        throwable);
+                return false;
+            }
+        }
+
+        private void scheduleShellAnimationTimeout() {
+            try {
+                Object executor = readField(controller, "mShellExecutor");
+                Object timeout = readField(controller, "mAnimationTimeoutRunnable");
+                invokeAnyMethod(executor, "executeDelayed",
+                        new Object[]{timeout, Long.valueOf(2000L)});
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to schedule Shell animation timeout", throwable);
+            }
+        }
+
         private boolean isPreparedRemoteAnimation(Object info) {
             if (info == null) {
                 return false;
             }
             try {
-                Object prepare = invokeAnyMethod(info, "isPrepareRemoteAnimation",
-                        new Object[0]);
-                return Boolean.TRUE.equals(prepare);
+                return ((BackNavigationInfo) info).isPrepareRemoteAnimation();
             } catch (Throwable throwable) {
                 return false;
             }
         }
 
         private void setTrackerState(Object tracker, String stateName) throws Exception {
-            Object currentState = readField(tracker, "mState");
-            if (!(currentState instanceof Enum<?>)) {
-                return;
-            }
-            @SuppressWarnings({"rawtypes", "unchecked"})
-            Enum<?> state = Enum.valueOf((Class) currentState.getClass(), stateName);
-            invokeAnyMethod(tracker, "setState", new Object[]{state});
+            BackTouchTracker.TouchTrackerState state =
+                    BackTouchTracker.TouchTrackerState.valueOf(stateName);
+            ((BackTouchTracker) tracker).setState(state);
         }
 
         private float dp(float value) {
@@ -2557,7 +2744,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 writeField(controller, "mBackGestureStarted", Boolean.FALSE);
                 if (tracker != null) {
-                    invokeAnyMethod(tracker, "reset", new Object[0]);
+                    ((BackTouchTracker) tracker).reset();
                 }
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to reset back gesture state", throwable);
@@ -2601,7 +2788,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void applyProgressThresholds(Object tracker) throws Exception {
+        private void applyProgressThresholds(Object tracker) {
             float maxDistance = Math.max(1.0f,
                     context.getResources().getDisplayMetrics().widthPixels);
             float linearThreshold = readFloatFieldOrDefault(edgeBackGestureHandler,
@@ -2609,9 +2796,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             float linearDistance = Math.min(maxDistance, linearThreshold);
             float nonLinearFactor = readFloatFieldOrDefault(edgeBackGestureHandler,
                     "mNonLinearFactor", 0.0f);
-            invokeAnyMethod(tracker, "setProgressThresholds",
-                    new Object[]{Float.valueOf(linearDistance), Float.valueOf(maxDistance),
-                            Float.valueOf(nonLinearFactor)});
+            ((BackTouchTracker) tracker).setProgressThresholds(
+                    linearDistance, maxDistance, nonLinearFactor);
         }
 
         private void updateActiveTracker(float rawX, float rawY) {
@@ -2621,8 +2807,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     return;
                 }
                 applyProgressThresholds(tracker);
-                invokeAnyMethod(tracker, "update",
-                        new Object[]{Float.valueOf(rawX), Float.valueOf(rawY)});
+                ((BackTouchTracker) tracker).update(rawX, rawY);
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to update active back tracker", throwable);
             }
@@ -2637,14 +2822,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object callback = readField(controller, "mActiveCallback");
                 float progress = Math.max(0.0f,
                         Math.min(1.0f, distance / Math.max(1.0f, progressDistancePx())));
-                Object progressEvent;
-                try {
-                    progressEvent = invokeAnyMethod(tracker, "createProgressEvent",
-                            new Object[]{Float.valueOf(progress)});
-                } catch (Throwable ignored) {
-                    progressEvent = invokeAnyMethod(tracker, "createProgressEvent",
-                            new Object[0]);
-                }
+                BackMotionEvent progressEvent =
+                        ((BackTouchTracker) tracker).createProgressEvent(progress);
                 invokeAnyMethod(controller, "dispatchOnBackProgressed",
                         new Object[]{callback, progressEvent});
             } catch (Throwable throwable) {
@@ -2659,8 +2838,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private void dispatchRealBack() {
             try {
                 Object info = readField(controller, "mBackNavigationInfo");
-                Object callback = info == null ? null : invokeAnyMethod(info,
-                        "getOnBackInvokedCallback", new Object[0]);
+                Object callback = info == null ? null
+                        : ((BackNavigationInfo) info).getOnBackInvokedCallback();
                 if (callback != null) {
                     try {
                         invokeAnyMethod(controller, "dispatchOnBackInvoked",
@@ -2681,8 +2860,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private void dispatchCancelBack() {
             try {
                 Object info = readField(controller, "mBackNavigationInfo");
-                Object callback = info == null ? null : invokeAnyMethod(info,
-                        "getOnBackInvokedCallback", new Object[0]);
+                Object callback = info == null ? null
+                        : ((BackNavigationInfo) info).getOnBackInvokedCallback();
                 if (callback != null) {
                     try {
                         invokeAnyMethod(controller, "tryDispatchOnBackCancelled",

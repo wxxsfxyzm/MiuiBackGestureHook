@@ -231,6 +231,79 @@ Current AOSP indicator direction:
 - Avoid Xiaomi/MiuiHome arrow drawing paths.
 - Avoid custom-drawn fallback indicators unless debugging native indicator attachment.
 
+## AOSP 16 QPR0 Alignment Status
+
+The authoritative local AOSP reference is now:
+
+```text
+D:/code/aosp-windowmanager/base
+tag: android-16.0.0_r1
+commit: 99b01a65cc4c104933788b3143285ab6bae65827
+```
+
+Do not treat the previously checked-out 2025-03 `main` snapshot, or the current
+checked-in `refs/aosp_back/shell/BackAnimationController.java`, as an exact Android
+16 QPR0 copy. The checked-in controller snippet has known differences from r1.
+
+The current implementation is not a completely native AOSP input pipeline. Its
+remote-animation completion sequence is substantially aligned with Android 16 QPR0,
+but the following module-specific differences remain:
+
+- Input is owned by a module-created SystemUI `InputMonitor` and a custom
+  `SystemUiBackInputOverlay`, rather than flowing entirely through the stock
+  `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)` path.
+- The module pilfers on `ACTION_DOWN` to prevent the MiuiHome indicator from briefly
+  appearing. AOSP QPR0 normally starts the gestural Shell path on a later MOVE and
+  pilfers according to its threshold state.
+- When Shell is still busy, the module pilfers and silently suppresses the new
+  gesture. AOSP supports a second gesture through `mQueuedTracker`; do not describe
+  the current suppression behavior as native AOSP queuing.
+- Release handling reflectively marks the tracker `FINISHED`, checks the backing
+  `BackAnimationRunner.mWaitingAnimation`, and starts or waits for post-commit. It
+  reproduces the relevant QPR0 behavior but does not directly execute the complete
+  private AOSP `onGestureFinished()` method.
+- `TYPE_CALLBACK` still calls
+  `BackNavigationInfo.disableAppProgressGenerationAllowed()` because the module-owned
+  input monitor pilfers the app touch stream.
+- Callback progress uses display width, while the commit threshold remains the
+  module's fixed `48dp` stable baseline.
+- Xiaomi registry definitions and the system_server compatibility hooks for
+  TaskFragment promotion/unified predictive-back transitions remain module-specific.
+- The MiuiHome gesture-line progress binder callback remains blocked.
+
+Hidden API optimization boundary:
+
+- Compile-only stubs for boot-classpath hidden APIs such as
+  `android.window.BackNavigationInfo`, `BackTouchTracker`, and `BackMotionEvent`
+  have been tested successfully. They can be referenced directly because the
+  module ClassLoader delegates these framework classes to the boot classpath.
+- Do not add a normal compile-only stub and static type reference for
+  `com.android.wm.shell.back.BackAnimationController` or other SystemUI/WM Shell
+  implementation classes. Those classes live in the SystemUI APK ClassLoader,
+  not the module or boot ClassLoader. The v60 experiment compiled but failed at
+  runtime with `NoClassDefFoundError` from the module ClassLoader even though the
+  object existed in SystemUI.
+- Continue accessing SystemUI/WM Shell implementation classes through the real
+  package ClassLoader and reflection. Optimize hot calls by resolving and caching
+  `Method`/`Field` objects, rather than introducing static Shell type references.
+- The failed v60 Shell-controller-stub experiment was not committed. The stable
+  committed baseline is v59 (`91776ee`).
+
+The currently aligned remote-animation behavior includes:
+
+- A remote gesture released while its runner is waiting leaves the tracker
+  `FINISHED` and waits for remote animation start instead of starting post-commit
+  prematurely.
+- Runner completion reaches `onBackAnimationFinished()` and then
+  `finishBackNavigation(...)`; the old repeated 2-second timeout path is no longer
+  the normal completion path.
+- Null navigation is cancelled and cleaned with `finishBackNavigation(false)`; it
+  does not continue into a visual commit or inject a fallback back key.
+- Default cross-activity post-commit lasts about `450ms`, matching AOSP 16 QPR0
+  `POST_COMMIT_DURATION`. During that transition WM still owns input, so the newly
+  exposed activity is not clickable until animation completion. This is expected
+  AOSP behavior, not the former 2-second stuck state.
+
 ## Repository State
 
 Important files:
@@ -277,7 +350,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v55-chrome-gesture-insets-stable
+systemui-aosp-back-v59-hidden-api-hotpath
 ```
 
 ## LSPosed API 102 Notes
