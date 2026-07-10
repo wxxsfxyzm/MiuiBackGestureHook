@@ -47,7 +47,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v55-chrome-gesture-insets-stable";
+    private static final String BUILD_MARK = "systemui-aosp-back-v56-pilfer-on-down-test";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -2036,9 +2036,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             downX = event.getRawX();
             downY = event.getRawY();
             driver.handleTouch(event, activeEdge);
+            pilferPointers(0.0f);
             log(Log.INFO, TAG, "Native SystemUI back candidate started"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
-            return true;
+            return pilfered;
         }
 
         private boolean onNativeMove(MotionEvent event) {
