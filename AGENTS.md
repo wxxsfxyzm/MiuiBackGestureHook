@@ -277,7 +277,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v50-no-miui-home-scope
+systemui-aosp-back-v55-chrome-gesture-insets-stable
 ```
 
 ## LSPosed API 102 Notes

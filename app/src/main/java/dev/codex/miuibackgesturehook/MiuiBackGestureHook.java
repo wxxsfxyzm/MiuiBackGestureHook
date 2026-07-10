@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Gravity;
@@ -27,6 +28,7 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowMetrics;
 
+import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -36,13 +38,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v50-no-miui-home-scope";
+    private static final String BUILD_MARK = "systemui-aosp-back-v55-chrome-gesture-insets-stable";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -52,6 +57,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.systemui.recents.MiuiOverviewProxy";
     private static final String LAUNCHER_PROXY_SERVICE =
             "com.android.systemui.recents.LauncherProxyService";
+    private static final String NAVIGATION_BAR =
+            "com.android.systemui.navigationbar.views.NavigationBar";
     private static final String BACK_ANIMATION_CONTROLLER =
             "com.android.wm.shell.back.BackAnimationController";
     private static final String SHELL_BACK_ANIMATION_REGISTRY =
@@ -98,6 +105,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final float PILFER_THRESHOLD_DP = 8.0f;
     private static final float TRIGGER_THRESHOLD_DP = 48.0f;
     private static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
+    private static final String MIUI_SIDEBAR_BOUNDS = "sidebar_bounds";
+    private static final float MIUI_SIDEBAR_EXCLUSION_PADDING_DP = 8.0f;
 
     private final List<XposedInterface.HookHandle> hookHandles = new ArrayList<>();
     private final Map<Object, SystemUiBackInputOverlay> overlays =
@@ -160,6 +169,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadEnforceVisibleHook = false;
         boolean hadActivityVisibilityHook = false;
         boolean hadSurfaceTransactionLayerHook = false;
+        boolean hadNavigationBarGestureInsetsHook = false;
         boolean hadAnyServerHook = false;
         ClassLoader hotReloadClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
@@ -186,6 +196,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if (oldHandle.getId() != null
                         && oldHandle.getId().startsWith("server_surface_transaction_")) {
                     hadSurfaceTransactionLayerHook = true;
+                } else if ("systemui_navigation_bar_gesture_insets".equals(
+                        oldHandle.getId())) {
+                    hadNavigationBarGestureInsetsHook = true;
                 }
                 if (hotReloadClassLoader == null
                         && oldHandle.getExecutable() != null
@@ -244,6 +257,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 && hotReloadClassLoader != null) {
             hookCrossActivityApplyTransformDiagnostics(hotReloadClassLoader);
         }
+        if (SYSTEM_UI.equals(processName) && !hadNavigationBarGestureInsetsHook
+                && hotReloadClassLoader != null) {
+            hookNavigationBarGestureInsets(hotReloadClassLoader);
+        }
         log(Log.INFO, TAG, "Hot reloaded, build=" + BUILD_MARK
                 + ", process=" + processName
                 + ", oldHooksReplaced=" + replaced
@@ -256,6 +273,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("systemui_block_miui_gesture_line_progress".equals(hookId)) {
             return this::interceptMiuiOverviewProxyTransact;
+        }
+        if ("systemui_navigation_bar_gesture_insets".equals(hookId)) {
+            return this::restoreNavigationBarGestureInsets;
         }
         if (hookId.startsWith("miui_home_disable_")) {
             return chain -> {
@@ -888,6 +908,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookMiuiOverviewProxy(classLoader);
             hookLauncherProxyService(classLoader);
             hookEdgeBackGestureHandler(classLoader);
+            hookNavigationBarGestureInsets(classLoader);
             hookShellBackAnimation(classLoader);
             log(Log.INFO, TAG, "Installed SystemUI AOSP back restoration hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
@@ -998,6 +1019,100 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler", throwable);
         }
+    }
+
+    private void hookNavigationBarGestureInsets(ClassLoader classLoader) {
+        try {
+            Class<?> navigationBarClass = Class.forName(NAVIGATION_BAR, false, classLoader);
+            Method method = navigationBarClass.getDeclaredMethod(
+                    "getBarLayoutParamsForRotation", int.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("systemui_navigation_bar_gesture_insets")
+                    .intercept(this::restoreNavigationBarGestureInsets));
+            log(Log.INFO, TAG, "Hooked NavigationBar system gesture Insets restoration");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook NavigationBar gesture Insets", throwable);
+        }
+    }
+
+
+    private Object restoreNavigationBarGestureInsets(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        if (!(result instanceof WindowManager.LayoutParams)) {
+            return result;
+        }
+
+        Object navigationBar = chain.getThisObject();
+        Object edgeBackGestureHandler = readField(navigationBar, "mEdgeBackGestureHandler");
+        Object inGestureNavMode = readField(edgeBackGestureHandler, "mInGestureNavMode");
+        Object backGestureAllowed = readField(edgeBackGestureHandler,
+                "mIsBackGestureAllowed");
+        if (!Boolean.TRUE.equals(inGestureNavMode)
+                || !Boolean.TRUE.equals(backGestureAllowed)) {
+            log(Log.INFO, TAG, "Kept system gesture Insets empty"
+                    + ", gesturalMode=" + inGestureNavMode
+                    + ", backAllowed=" + backGestureAllowed);
+            return result;
+        }
+
+        Context context = (Context) readField(navigationBar, "mContext");
+        int fallbackWidth = Math.max(1, Math.round(EDGE_TOUCH_WIDTH_DP
+                * context.getResources().getDisplayMetrics().density));
+        int leftWidth = readIntFieldOrDefault(edgeBackGestureHandler,
+                "mEdgeWidthLeft", fallbackWidth);
+        int rightWidth = readIntFieldOrDefault(edgeBackGestureHandler,
+                "mEdgeWidthRight", fallbackWidth);
+        if (leftWidth <= 0) {
+            leftWidth = fallbackWidth;
+        }
+        if (rightWidth <= 0) {
+            rightWidth = fallbackWidth;
+        }
+
+        Object providers = readField(result, "providedInsets");
+        if (providers == null || !providers.getClass().isArray()) {
+            log(Log.WARN, TAG, "NavigationBar LayoutParams has no providedInsets array");
+            return result;
+        }
+
+        int restored = 0;
+        int systemGestureType = WindowInsets.Type.systemGestures();
+        for (int i = 0; i < Array.getLength(providers); i++) {
+            Object provider = Array.get(providers, i);
+            if (provider == null) {
+                continue;
+            }
+            Object type = invokeAnyMethod(provider, "getType", new Object[0]);
+            if (!(type instanceof Number)
+                    || ((Number) type).intValue() != systemGestureType) {
+                continue;
+            }
+            Object index = invokeAnyMethod(provider, "getIndex", new Object[0]);
+            if (!(index instanceof Number)) {
+                continue;
+            }
+            int providerIndex = ((Number) index).intValue();
+            Insets size;
+            if (providerIndex == 0) {
+                size = Insets.of(leftWidth, 0, 0, 0);
+            } else if (providerIndex == 1) {
+                size = Insets.of(0, 0, rightWidth, 0);
+            } else {
+                continue;
+            }
+            invokeAnyMethod(provider, "setInsetsSize", new Object[]{size});
+            invokeAnyMethod(provider, "setMinimalInsetsSizeInDisplayCutoutSafe",
+                    new Object[]{size});
+            restored++;
+        }
+        log(restored == 2 ? Log.INFO : Log.WARN, TAG,
+                "Restored NavigationBar system gesture Insets"
+                        + ", left=" + leftWidth
+                        + ", right=" + rightWidth
+                        + ", providers=" + restored);
+        return result;
     }
 
     private void hookShellBackAnimation(ClassLoader classLoader) {
@@ -1709,6 +1824,18 @@ public final class MiuiBackGestureHook extends XposedModule {
         return defaultValue;
     }
 
+    private static int readIntFieldOrDefault(Object target, String fieldName,
+                                             int defaultValue) {
+        try {
+            Object value = readField(target, fieldName);
+            if (value instanceof Number) {
+                return ((Number) value).intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return defaultValue;
+    }
+
     private static void writeField(Object target, String fieldName, Object value)
             throws NoSuchFieldException, IllegalAccessException {
         Field field = findField(target.getClass(), fieldName);
@@ -1942,6 +2069,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 inputMonitor.pilferPointers();
                 pilfered = true;
+                driver.onPointersPilfered(distance);
                 log(Log.INFO, TAG, "Native SystemUI back pilfered pointers"
                         + ", distance=" + distance + ", edge=" + activeEdge);
             } catch (Throwable throwable) {
@@ -1970,7 +2098,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!gestureCandidate) {
                 return false;
             }
-            if (allowTrigger) {
+            if (allowTrigger && pilfered) {
                 driver.handleTouch(event, activeEdge);
             } else {
                 MotionEvent cancel = MotionEvent.obtain(event);
@@ -2011,6 +2139,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             if (isInImeRegion(event)) {
                 log(Log.INFO, TAG, "Ignored native back inside visible IME region"
+                        + ", x=" + event.getRawX() + ", y=" + event.getRawY());
+                return false;
+            }
+            if (isInMiuiSidebarRegion(event)) {
+                log(Log.INFO, TAG, "Ignored native back inside MIUI sidebar bounds"
                         + ", x=" + event.getRawX() + ", y=" + event.getRawY());
                 return false;
             }
@@ -2104,6 +2237,45 @@ public final class MiuiBackGestureHook extends XposedModule {
                     return true;
                 }
             } catch (Throwable ignored) {
+            }
+            return false;
+        }
+
+        private boolean isInMiuiSidebarRegion(MotionEvent event) {
+            String encoded;
+            try {
+                encoded = Settings.Secure.getString(context.getContentResolver(),
+                        MIUI_SIDEBAR_BOUNDS);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to read MIUI sidebar bounds", throwable);
+                return false;
+            }
+            if (encoded == null || encoded.trim().isEmpty()) {
+                return false;
+            }
+            int x = Math.round(event.getRawX());
+            int y = Math.round(event.getRawY());
+            int padding = Math.max(0, Math.round(dp(MIUI_SIDEBAR_EXCLUSION_PADDING_DP)));
+            try {
+                JSONArray bounds = new JSONArray(encoded);
+                for (int i = 0; i < bounds.length(); i++) {
+                    JSONObject item = bounds.optJSONObject(i);
+                    if (item == null) {
+                        continue;
+                    }
+                    Rect rect = new Rect(item.optInt("l", -1), item.optInt("t", -1),
+                            item.optInt("r", -1), item.optInt("b", -1));
+                    if (rect.isEmpty()) {
+                        continue;
+                    }
+                    rect.inset(-padding, -padding);
+                    if (rect.contains(x, y)) {
+                        return true;
+                    }
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to parse MIUI sidebar bounds: " + encoded,
+                        throwable);
             }
             return false;
         }
@@ -2259,16 +2431,34 @@ public final class MiuiBackGestureHook extends XposedModule {
             float distance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            dispatchExplicitProgress(distance);
-            boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
-            if (!thresholdCrossed && shouldTrigger) {
-                thresholdCrossed = true;
-                nativePanelActive = true;
-                invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
-                log(Log.INFO, TAG, "SystemUI overlay threshold crossed, distance=" + distance);
+            if (!thresholdCrossed && distance > dp(PILFER_THRESHOLD_DP)) {
+                crossIntentThreshold(distance);
             }
+            if (thresholdCrossed) {
+                dispatchExplicitProgress(distance);
+            }
+            boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
             updateTriggerBack(shouldTrigger);
             return true;
+        }
+
+        private void onPointersPilfered(float distance) {
+            try {
+                crossIntentThreshold(distance);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to notify Shell of pilfer threshold", throwable);
+            }
+        }
+
+        private void crossIntentThreshold(float distance) throws Exception {
+            if (thresholdCrossed) {
+                return;
+            }
+            thresholdCrossed = true;
+            nativePanelActive = true;
+            invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
+            log(Log.INFO, TAG, "SystemUI overlay intent threshold crossed, distance="
+                    + distance);
         }
 
         private boolean onUp(MotionEvent event, boolean allowTrigger) throws Exception {
@@ -2280,8 +2470,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             float releaseDistance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            dispatchExplicitProgress(releaseDistance);
-            boolean trigger = allowTrigger && triggerBack;
+            if (thresholdCrossed) {
+                dispatchExplicitProgress(releaseDistance);
+            }
+            boolean trigger = allowTrigger
+                    && thresholdCrossed
+                    && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
             updateTriggerBack(trigger);
             Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
             if (tracker != null) {
