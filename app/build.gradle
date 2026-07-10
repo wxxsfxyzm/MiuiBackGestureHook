@@ -2,6 +2,15 @@ plugins {
     id "com.android.application"
 }
 
+def gitCommitCount = providers.exec {
+    workingDir rootProject.projectDir
+    commandLine "git", "rev-list", "--count", "HEAD"
+}.standardOutput.asText.map { it.trim() }
+
+def gitVersionCode = gitCommitCount.map { count ->
+    Integer.parseInt(count)
+}
+
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 if (keystorePropertiesFile.isFile()) {
@@ -41,10 +50,10 @@ android {
 
     defaultConfig {
         applicationId "dev.codex.miuibackgesturehook"
-        minSdk 35
+        minSdk 36
         targetSdk 36
-        versionCode 1
-        versionName "0.1.0"
+        versionCode gitVersionCode.get()
+        versionName "0.2.0"
     }
 
     signingConfigs {
@@ -65,6 +74,10 @@ android {
 
     buildTypes {
         release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles "proguard-rules.pro"
+
             if (hasLocalSigningConfig || hasEnvSigningConfig) {
                 signingConfig signingConfigs.release
             }
