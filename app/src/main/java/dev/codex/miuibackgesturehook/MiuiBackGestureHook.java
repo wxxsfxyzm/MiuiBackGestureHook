@@ -54,7 +54,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v67-miui-overview-state";
+    private static final String BUILD_MARK = "systemui-aosp-back-v69-sidebar-transient-coordinates";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -92,6 +92,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.server.wm.WindowContainer";
     private static final String WINDOW_STATE_ANIMATOR =
             "com.android.server.wm.WindowStateAnimator";
+    private static final String DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
     private static final String ACTIVITY_RECORD =
             "com.android.server.wm.ActivityRecord";
     private static final String SURFACE_CONTROL_TRANSACTION =
@@ -406,6 +407,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookBackNavigationMonitoringDiagnostics(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
             hookMiuiHomeEdgeStubVisibility(serverClassLoader);
+            hookSecuritySidebarTransientBars(serverClassLoader);
             hookServerLeashDiagnostics(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
@@ -450,6 +452,89 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook MiuiHome edge-stub visibility", throwable);
         }
+    }
+
+    private void hookSecuritySidebarTransientBars(ClassLoader classLoader) {
+        try {
+            Class<?> policyClass = Class.forName(DISPLAY_POLICY, false, classLoader);
+            for (Method method : policyClass.getDeclaredMethods()) {
+                if (!"requestTransientBars".equals(method.getName())
+                        || method.getParameterCount() != 2
+                        || method.getParameterTypes()[1] != boolean.class) {
+                    continue;
+                }
+                method.setAccessible(true);
+                recordHookHandle(hook(method)
+                        .setId("server_security_sidebar_transient_bars")
+                        .intercept(chain -> {
+                            if (isSidebarTransientGesture(chain.getThisObject())) {
+                                log(Log.INFO, TAG, "Blocked transient bars from sidebar bounds");
+                                return null;
+                            }
+                            Object swipeTarget = chain.getArg(0);
+                            String owner = String.valueOf(invokeAnyMethod(
+                                    swipeTarget, "getOwningPackage", new Object[0]));
+                            String window = String.valueOf(swipeTarget);
+                            String lower = window.toLowerCase();
+                            if ("com.miui.securitycenter".equals(owner)
+                                    && (lower.contains("sidebar")
+                                    || lower.contains("game")
+                                    || lower.contains("toolbox"))) {
+                                log(Log.INFO, TAG, "Blocked transient bars from security sidebar"
+                                        + ", target=" + shortObject(swipeTarget));
+                                return null;
+                            }
+                            return chain.proceed();
+                        }));
+                log(Log.INFO, TAG, "Hooked DisplayPolicy security-sidebar transient bars");
+                return;
+            }
+            log(Log.WARN, TAG, "DisplayPolicy.requestTransientBars(WindowState,boolean) not found");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook security-sidebar transient bars", throwable);
+        }
+    }
+
+    private boolean isSidebarTransientGesture(Object displayPolicy) {
+        try {
+            Context context = (Context) readField(displayPolicy, "mContext");
+            Object gestures = readField(displayPolicy, "mSystemGestures");
+            float[] downXs = (float[]) readField(gestures, "mDownX");
+            float[] downYs = (float[]) readField(gestures, "mDownY");
+            if (context == null || downXs == null || downYs == null
+                    || downXs.length == 0 || downYs.length == 0) {
+                return false;
+            }
+            String encoded = Settings.Secure.getString(context.getContentResolver(),
+                    MIUI_SIDEBAR_BOUNDS);
+            if (encoded == null || encoded.trim().isEmpty()) {
+                return false;
+            }
+            int x = Math.round(downXs[0]);
+            int y = Math.round(downYs[0]);
+            int padding = Math.max(0, Math.round(MIUI_SIDEBAR_EXCLUSION_PADDING_DP
+                    * context.getResources().getDisplayMetrics().density));
+            JSONArray bounds = new JSONArray(encoded);
+            for (int i = 0; i < bounds.length(); i++) {
+                JSONObject item = bounds.optJSONObject(i);
+                if (item == null) {
+                    continue;
+                }
+                Rect rect = new Rect(item.optInt("l", -1), item.optInt("t", -1),
+                        item.optInt("r", -1), item.optInt("b", -1));
+                if (!rect.isEmpty()) {
+                    rect.inset(-padding, -padding);
+                    if (rect.contains(x, y)) {
+                        log(Log.INFO, TAG, "Matched sidebar transient gesture"
+                                + ", x=" + x + ", y=" + y + ", bounds=" + rect);
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to inspect sidebar transient gesture", throwable);
+        }
+        return false;
     }
 
     private void hookBackNavigationMonitoringDiagnostics(ClassLoader classLoader) {
@@ -2358,6 +2443,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", overviewVisible=false");
                 return false;
             }
+            if (areSystemBarsHidden() && !isNavBarShownTransiently()) {
+                log(Log.INFO, TAG, "Deferred native back to immersive transient bars"
+                        + ", edge=" + edge + ", x=" + event.getRawX()
+                        + ", y=" + event.getRawY());
+                return false;
+            }
             if (!isBackGestureAllowedBySystemUiState()) {
                 log(Log.INFO, TAG, "Ignored native back while SystemUI state disallows back");
                 return false;
@@ -2378,6 +2469,28 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return false;
             }
             return true;
+        }
+
+        private boolean isNavBarShownTransiently() {
+            try {
+                return Boolean.TRUE.equals(readField(edgeBackGestureHandler,
+                        "mIsNavBarShownTransiently"));
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+
+        private boolean areSystemBarsHidden() {
+            try {
+                WindowManager windowManager = context.getSystemService(WindowManager.class);
+                WindowInsets insets = windowManager.getCurrentWindowMetrics().getWindowInsets();
+                return insets != null
+                        && !insets.isVisible(WindowInsets.Type.statusBars())
+                        && !insets.isVisible(WindowInsets.Type.navigationBars());
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to inspect immersive system bars", throwable);
+                return false;
+            }
         }
 
         private boolean isBackGestureAllowedBySystemUiState() {
