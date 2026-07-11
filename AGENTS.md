@@ -304,6 +304,28 @@ The currently aligned remote-animation behavior includes:
   exposed activity is not clickable until animation completion. This is expected
   AOSP behavior, not the former 2-second stuck state.
 
+Server cleanup finding after v59:
+
+- Logs spanning a SystemUI restart showed the old SystemUI completing remote
+  animations normally, followed by the new SystemUI receiving
+  `BackNavigationInfo=null` for every gesture. This is consistent with
+  `BackNavigationController.isMonitoringFinishTransition()` remaining true in
+  system_server even though the local Shell controller was recreated.
+- Android 16 QPR0 does not skip all of
+  `ScheduleAnimationBuilder.prepareTransitionIfNeeded(...)` when unified back
+  transitions are disabled; it can still create a prepare-back transition used
+  by the normal server cleanup chain. The module's v43 blanket skip is therefore
+  not a complete QPR0 reproduction.
+- v61 keeps the v43 skip to avoid the previously confirmed Xiaomi surface
+  reparent conflict only when Xiaomi's `unifyBackNavigationTransition()` is true;
+  when it is false, allow the original `setLaunchBehind()` path. Xiaomi's compiled
+  navigation-done method is named `lambda$startBackNavigation$4(Bundle,int)` even
+  though JADX displays it as `onBackNavigationDone(...)`. v61 adds a narrow
+  completion cleanup there: after a committed navigation, call
+  `clearBackAnimations(false)` only when the
+  handler is still composed and both prepared-open and prepared-close transition
+  fields are null. Normal transition-owned cleanup is left untouched.
+
 ## Repository State
 
 Important files:
@@ -350,7 +372,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v59-hidden-api-hotpath
+systemui-aosp-back-v67-miui-overview-state
 ```
 
 ## LSPosed API 102 Notes
