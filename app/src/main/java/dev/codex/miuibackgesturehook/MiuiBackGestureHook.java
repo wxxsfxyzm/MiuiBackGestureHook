@@ -112,6 +112,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int TYPE_CALLBACK = 4;
     private static final boolean INSTALL_MIUI_HOME_STUB_HOOKS = false;
     private static final boolean INSTALL_WINDOW_INPUT_OVERLAY = false;
+    // Debug builds retain frame-level diagnostics; release builds keep lifecycle/error logs only.
+    private static final boolean ENABLE_VERBOSE_DIAGNOSTICS = BuildConfig.DEBUG;
     private static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     private static final float PILFER_THRESHOLD_DP = 8.0f;
     private static final float TRIGGER_THRESHOLD_DP = 48.0f;
@@ -687,12 +689,14 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private void hookServerLeashDiagnostics(ClassLoader classLoader) {
         hookBackWindowStartAnimation(classLoader);
-        hookSurfaceAnimatorCreateAnimationLeash(classLoader);
-        hookScheduleAnimationPreview(classLoader);
         hookScheduleAnimationPrepareTransition(classLoader);
-        hookWindowContainerEnforceSurfaceVisible(classLoader);
-        hookActivityRecordSetVisibility(classLoader);
-        hookSurfaceTransactionLayerDiagnostics(classLoader);
+        if (ENABLE_VERBOSE_DIAGNOSTICS) {
+            hookSurfaceAnimatorCreateAnimationLeash(classLoader);
+            hookScheduleAnimationPreview(classLoader);
+            hookWindowContainerEnforceSurfaceVisible(classLoader);
+            hookActivityRecordSetVisibility(classLoader);
+            hookSurfaceTransactionLayerDiagnostics(classLoader);
+        }
     }
 
     private void hookBackWindowStartAnimation(ClassLoader classLoader) {
@@ -1021,6 +1025,9 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Object traceSurfaceTransactionLayerCall(XposedInterface.Chain chain)
             throws Throwable {
+        if (!ENABLE_VERBOSE_DIAGNOSTICS) {
+            return chain.proceed();
+        }
         if (!isRecentPredictiveBackServerTrace()
                 || !isInterestingSurfaceTransaction(chain.getArgs())) {
             return chain.proceed();
@@ -1231,8 +1238,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (reply != null) {
             reply.writeNoException();
         }
-        log(Log.INFO, TAG, "Blocked MiuiOverviewProxy.onGestureLineProgress; "
-                + "gesture progress should stay in SystemUI/AOSP path");
         return Boolean.TRUE;
     }
 
@@ -1502,11 +1507,16 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Object traceHook(XposedInterface.Chain chain, String hookId) throws Throwable {
         if ("cross_activity_applyTransform".equals(hookId)) {
+            if (!ENABLE_VERBOSE_DIAGNOSTICS) {
+                return chain.proceed();
+            }
             return traceCrossActivityApplyTransform(chain);
         }
-        log(Log.INFO, TAG, "before " + hookId
-                + ", this=" + shortObject(chain.getThisObject())
-                + ", args=" + describeArgs(chain));
+        if (ENABLE_VERBOSE_DIAGNOSTICS) {
+            log(Log.INFO, TAG, "before " + hookId
+                    + ", this=" + shortObject(chain.getThisObject())
+                    + ", args=" + describeArgs(chain));
+        }
         if ("shell_back_onBackNavigationInfoReceived".equals(hookId)) {
             ensureAospBackAnimations(chain.getThisObject(), "beforeNavigationInfo");
             forceSystemUiCallbackProgress(chain.getArg(0));
@@ -1514,7 +1524,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean b = hookId.startsWith("cross_activity_")
                 || hookId.startsWith("default_cross_activity_")
                 || hookId.startsWith("custom_cross_activity_");
-        if (b) {
+        if (b && ENABLE_VERBOSE_DIAGNOSTICS) {
             logCrossActivityState("before " + hookId, chain.getThisObject(), chain.getArgs());
         }
         Object result = chain.proceed();
@@ -1536,11 +1546,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                 logBackNavigationInfo(chain.getArg(0));
                 break;
         }
-        if (b) {
+        if (b && ENABLE_VERBOSE_DIAGNOSTICS) {
             logCrossActivityState("after " + hookId, chain.getThisObject(), chain.getArgs());
         }
-        log(Log.INFO, TAG, "after " + hookId
-                + ", result=" + shortObject(result));
+        if (ENABLE_VERBOSE_DIAGNOSTICS) {
+            log(Log.INFO, TAG, "after " + hookId
+                    + ", result=" + shortObject(result));
+        }
         return result;
     }
 

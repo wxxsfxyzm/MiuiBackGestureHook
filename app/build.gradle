@@ -48,12 +48,16 @@ android {
     namespace "dev.codex.miuibackgesturehook"
     compileSdk 36
 
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId "dev.codex.miuibackgesturehook"
         minSdk 36
         targetSdk 36
         versionCode gitVersionCode.get()
-        versionName "0.3.0"
+        versionName "0.4.0"
     }
 
     signingConfigs {
