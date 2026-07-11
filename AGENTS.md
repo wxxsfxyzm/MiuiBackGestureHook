@@ -372,7 +372,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v69-sidebar-transient-coordinates
+systemui-aosp-back-v70-clear-overview-on-back
 ```
 
 ## LSPosed API 102 Notes

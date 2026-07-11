@@ -54,7 +54,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v69-sidebar-transient-coordinates";
+    private static final String BUILD_MARK = "systemui-aosp-back-v70-clear-overview-on-back";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -2855,6 +2855,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
             updateTriggerBack(trigger);
+            if (trigger && miuiOverviewVisible && isMiuiHomeTopActivity()) {
+                miuiOverviewVisible = false;
+                log(Log.INFO, TAG, "Cleared Miui overview state after committed Recents back");
+            }
             Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
             if (tracker != null) {
                 if (startRemotePostCommitIfNeeded(tracker)) {
@@ -2885,6 +2889,21 @@ public final class MiuiBackGestureHook extends XposedModule {
             nativePanelActive = false;
             triggerBack = false;
             return true;
+        }
+
+        private boolean isMiuiHomeTopActivity() {
+            try {
+                ActivityManager activityManager = context.getSystemService(ActivityManager.class);
+                List<ActivityManager.RunningTaskInfo> tasks = activityManager.getRunningTasks(1);
+                if (tasks == null || tasks.isEmpty()) {
+                    return false;
+                }
+                ComponentName top = tasks.get(0).topActivity;
+                return top != null && MIUI_HOME.equals(top.getPackageName());
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to inspect Recents back top activity", throwable);
+                return false;
+            }
         }
 
         private boolean startShellGesture() throws Exception {
