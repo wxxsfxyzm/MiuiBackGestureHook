@@ -3,9 +3,6 @@ package dev.codex.miuibackgesturehook;
 import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.BroadcastReceiver;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.PixelFormat;
@@ -54,7 +51,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v70-clear-overview-on-back";
+    private static final String BUILD_MARK = "systemui-aosp-back-v71-launcher-owned-home";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -90,8 +87,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.server.wm.SurfaceAnimator";
     private static final String WINDOW_CONTAINER =
             "com.android.server.wm.WindowContainer";
-    private static final String WINDOW_STATE_ANIMATOR =
-            "com.android.server.wm.WindowStateAnimator";
     private static final String DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
     private static final String ACTIVITY_RECORD =
             "com.android.server.wm.ActivityRecord";
@@ -102,7 +97,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int EDGE_LEFT = 0;
     private static final int EDGE_RIGHT = 1;
     private static final int TYPE_NAVIGATION_BAR_PANEL = 2024;
-    private static final int TYPE_MAGNIFICATION_OVERLAY = 2027;
     private static final int PRIVATE_FLAG_TRUSTED_OVERLAY = 0x00000010;
     private static final int KEY_ACTION_UP = 1;
     private static final int KEY_ACTION_DOWN = 0;
@@ -126,9 +120,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
-    private volatile boolean miuiOverviewVisible;
-    private Context miuiOverviewReceiverContext;
-    private BroadcastReceiver miuiOverviewReceiver;
     private String processName;
     private ClassLoader systemUiClassLoader;
     private boolean nativePluginDiagnosticsLogged;
@@ -408,51 +399,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookBackNavigationControllerDiagnostics(serverClassLoader);
             hookBackNavigationMonitoringDiagnostics(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
-            hookMiuiHomeEdgeStubVisibility(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookServerLeashDiagnostics(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install system_server hooks", throwable);
-        }
-    }
-
-    private void hookMiuiHomeEdgeStubVisibility(ClassLoader classLoader) {
-        try {
-            Class<?> animatorClass = Class.forName(WINDOW_STATE_ANIMATOR, false, classLoader);
-            for (Method method : animatorClass.getDeclaredMethods()) {
-                if (!"showRobustly".equals(method.getName()) || method.getParameterCount() != 1) {
-                    continue;
-                }
-                method.setAccessible(true);
-                recordHookHandle(hook(method)
-                        .setId("server_hide_miui_home_edge_stub")
-                        .intercept(chain -> {
-                            Object animator = chain.getThisObject();
-                            Object window = readField(animator, "mWin");
-                            Object attrs = readField(window, "mAttrs");
-                            Object type = readField(attrs, "type");
-                            Object width = readField(attrs, "width");
-                            String owner = String.valueOf(invokeAnyMethod(
-                                    window, "getOwningPackage", new Object[0]));
-                            if (MIUI_HOME.equals(owner)
-                                    && Integer.valueOf(TYPE_MAGNIFICATION_OVERLAY).equals(type)
-                                    && width instanceof Integer
-                                    && Math.abs(((Integer) width).intValue()) <= 200) {
-                                log(Log.INFO, TAG, "Suppressed MiuiHome edge back-stub surface"
-                                        + ", window=" + shortObject(window)
-                                        + ", width=" + width);
-                                return null;
-                            }
-                            return chain.proceed();
-                        }));
-                log(Log.INFO, TAG, "Hooked server-side MiuiHome edge-stub visibility");
-                return;
-            }
-            log(Log.WARN, TAG, "WindowStateAnimator.showRobustly not found");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook MiuiHome edge-stub visibility", throwable);
         }
     }
 
@@ -1605,7 +1557,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object controller = readField(backAnimationImpl, "this$0");
                 ensureAospBackAnimations(controller, "setBackAnimation");
                 Context context = (Context) readField(edgeBackGestureHandler, "mContext");
-                ensureMiuiOverviewStateReceiver(context);
                 ensureNativeEdgeBackPlugin(edgeBackGestureHandler, context);
                 NativeBackInputMonitor existing = nativeInputMonitors.get(edgeBackGestureHandler);
                 if (existing != null) {
@@ -1641,35 +1592,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install SystemUI back input overlay", throwable);
         }
-    }
-
-    private void ensureMiuiOverviewStateReceiver(Context context) {
-        if (miuiOverviewReceiver != null || context == null) {
-            return;
-        }
-        Context appContext = context.getApplicationContext();
-        miuiOverviewReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context receiverContext, Intent intent) {
-                String state = intent == null ? null : intent.getStringExtra("state");
-                if ("toRecents".equals(state)) {
-                    miuiOverviewVisible = true;
-                } else if ("toHome".equals(state)
-                        || "toAnotherApp".equals(state)
-                        || "toCurrentApp".equals(state)
-                        || "finishRecentDirectly".equals(state)) {
-                    miuiOverviewVisible = false;
-                } else {
-                    return;
-                }
-                log(Log.INFO, TAG, "Miui fullscreen state changed"
-                        + ", state=" + state + ", overviewVisible=" + miuiOverviewVisible);
-            }
-        };
-        IntentFilter filter = new IntentFilter("com.miui.fullscreen_state_change");
-        appContext.registerReceiver(miuiOverviewReceiver, filter, Context.RECEIVER_EXPORTED);
-        miuiOverviewReceiverContext = appContext;
-        log(Log.INFO, TAG, "Registered Miui fullscreen-state receiver");
     }
 
     private void ensureBackInputInstalledFromHandler(Object edgeBackGestureHandler,
@@ -2347,10 +2269,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             activeEdge = edge;
             downX = event.getRawX();
             downY = event.getRawY();
-            // Pilfer before entering BackAnimationController/startBackNavigation.  In Recents,
-            // MiuiHome owns another gesture consumer and can draw its indicator while the
-            // synchronous Shell/WM call is still in progress.
-            pilferPointers(0.0f);
             if (!driver.handleTouch(event, activeEdge)) {
                 resetCandidate();
                 return false;
@@ -2450,9 +2368,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (event.getPointerCount() != 1) {
                 return false;
             }
-            if (isLauncherTopActivity() && !miuiOverviewVisible) {
-                log(Log.INFO, TAG, "Ignored native back on launcher Home"
-                        + ", overviewVisible=false");
+            if (isLauncherTopActivity()) {
+                log(Log.INFO, TAG, "Ignored native back on launcher top activity");
                 return false;
             }
             if (areSystemBarsHidden() && !isNavBarShownTransiently()) {
@@ -2855,10 +2772,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
             updateTriggerBack(trigger);
-            if (trigger && miuiOverviewVisible && isMiuiHomeTopActivity()) {
-                miuiOverviewVisible = false;
-                log(Log.INFO, TAG, "Cleared Miui overview state after committed Recents back");
-            }
             Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
             if (tracker != null) {
                 if (startRemotePostCommitIfNeeded(tracker)) {
@@ -2889,21 +2802,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             nativePanelActive = false;
             triggerBack = false;
             return true;
-        }
-
-        private boolean isMiuiHomeTopActivity() {
-            try {
-                ActivityManager activityManager = context.getSystemService(ActivityManager.class);
-                List<ActivityManager.RunningTaskInfo> tasks = activityManager.getRunningTasks(1);
-                if (tasks == null || tasks.isEmpty()) {
-                    return false;
-                }
-                ComponentName top = tasks.get(0).topActivity;
-                return top != null && MIUI_HOME.equals(top.getPackageName());
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to inspect Recents back top activity", throwable);
-                return false;
-            }
         }
 
         private boolean startShellGesture() throws Exception {
