@@ -52,7 +52,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v72-preempt-miui-indicator";
+    private static final String BUILD_MARK = "systemui-aosp-back-v87-stable-cleanup";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -68,16 +68,20 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.wm.shell.back.BackAnimationController";
     private static final String SHELL_BACK_ANIMATION_REGISTRY =
             "com.android.wm.shell.back.ShellBackAnimationRegistry";
+    private static final String DEFAULT_TRANSITION_HANDLER =
+            "com.android.wm.shell.transition.DefaultTransitionHandler";
+    private static final String DEFAULT_TRANSITION_IMPL =
+            "com.android.wm.shell.common.transition.DefaultTransitionImpl";
     private static final String CROSS_ACTIVITY_BACK_ANIMATION =
             "com.android.wm.shell.back.CrossActivityBackAnimation";
     private static final String DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION =
             "com.android.wm.shell.back.DefaultCrossActivityBackAnimation";
     private static final String CUSTOM_CROSS_ACTIVITY_BACK_ANIMATION =
             "com.android.wm.shell.back.CustomCrossActivityBackAnimation";
-    private static final String MIUI_BASE_RECENTS_IMPL =
-            "com.miui.home.recents.BaseRecentsImpl";
     private static final String BACK_NAVIGATION_CONTROLLER =
             "com.android.server.wm.BackNavigationController";
+    private static final String TRANSITION_CONTROLLER_IMPL =
+            "com.android.server.wm.TransitionControllerImpl";
     private static final String BACK_ANIMATION_HANDLER =
             "com.android.server.wm.BackNavigationController$AnimationHandler";
     private static final String BACK_WINDOW_ANIMATION_ADAPTOR =
@@ -105,7 +109,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int TYPE_CROSS_ACTIVITY = 2;
     private static final int TYPE_CROSS_TASK = 3;
     private static final int TYPE_CALLBACK = 4;
-    private static final boolean INSTALL_MIUI_HOME_STUB_HOOKS = false;
     private static final boolean INSTALL_WINDOW_INPUT_OVERLAY = false;
     // Debug builds retain frame-level diagnostics; release builds keep lifecycle/error logs only.
     private static final boolean ENABLE_VERBOSE_DIAGNOSTICS = BuildConfig.DEBUG;
@@ -122,10 +125,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private final Map<Object, Boolean> defaultTransitionHandlers =
+            Collections.synchronizedMap(new WeakHashMap<>());
     private String processName;
     private ClassLoader systemUiClassLoader;
     private boolean nativePluginDiagnosticsLogged;
     private volatile long lastPredictiveBackServerTraceUptime;
+    private volatile long lastMiuiTransitionReverseUptime;
+    private volatile long suppressDuplicateBackUntilUptime;
+    private final ThreadLocal<Boolean> moduleLegacyBackInjection = new ThreadLocal<>();
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
@@ -293,12 +301,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("systemui_navigation_bar_gesture_insets".equals(hookId)) {
             return this::restoreNavigationBarGestureInsets;
         }
-        if (hookId.startsWith("miui_home_disable_")) {
-            return chain -> {
-                log(Log.INFO, TAG, "Blocked MiuiHome " + chain.getExecutable().getName()
-                        + "; SystemUI owns side back input");
-                return null;
-            };
+        if (hookId.startsWith("miui_home_")
+                || "systemui_default_animation_reverse_frames".equals(hookId)) {
+            // Retired experiments may still exist during API 102 hot reload. Replace them with
+            // transparent hooks until the next process restart instead of retaining old behavior.
+            return XposedInterface.Chain::proceed;
         }
         if ("server_back_promote_to_tf_if_needed".equals(hookId)) {
             return this::interceptPromoteToTaskFragmentIfNeeded;
@@ -377,8 +384,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (SYSTEM_UI.equals(processName)) {
             systemUiClassLoader = param.getDefaultClassLoader();
             installSystemUiHooks(systemUiClassLoader);
-        } else if (MIUI_HOME.equals(processName) && INSTALL_MIUI_HOME_STUB_HOOKS) {
-            installMiuiHomeHooks(param.getDefaultClassLoader());
         }
     }
 
@@ -402,6 +407,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookBackNavigationMonitoringDiagnostics(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
+            hookTransitionOpenClosePairDiagnostics(serverClassLoader);
             hookServerLeashDiagnostics(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
@@ -432,13 +438,20 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 if (argument == null) {
                                     continue;
                                 }
-                                String owner = String.valueOf(invokeAnyMethod(
-                                        argument, "getOwningPackage", new Object[0]));
                                 String lower = String.valueOf(argument).toLowerCase();
-                                if ("com.miui.securitycenter".equals(owner)
-                                        && (lower.contains("sidebar")
-                                        || lower.contains("game")
-                                        || lower.contains("toolbox"))) {
+                                if (!lower.contains("sidebar")
+                                        && !lower.contains("game")
+                                        && !lower.contains("toolbox")) {
+                                    continue;
+                                }
+                                String owner;
+                                try {
+                                    owner = String.valueOf(invokeAnyMethod(
+                                            argument, "getOwningPackage", new Object[0]));
+                                } catch (NoSuchMethodException ignored) {
+                                    continue;
+                                }
+                                if ("com.miui.securitycenter".equals(owner)) {
                                     log(Log.INFO, TAG,
                                             "Blocked transient bars from security sidebar"
                                                     + ", target=" + shortObject(argument));
@@ -1141,6 +1154,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookEdgeBackGestureHandler(classLoader);
             hookNavigationBarGestureInsets(classLoader);
             hookShellBackAnimation(classLoader);
+            hookBackAnimationSendBackEvent(classLoader);
+            hookDefaultTransitionHandler(classLoader);
+            hookDefaultTransitionImplMerge(classLoader);
             log(Log.INFO, TAG, "Installed SystemUI AOSP back restoration hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
@@ -1148,41 +1164,60 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private void installMiuiHomeHooks(ClassLoader classLoader) {
+    private void hookTransitionOpenClosePairDiagnostics(ClassLoader classLoader) {
         try {
-            Class<?> recentsClass = Class.forName(MIUI_BASE_RECENTS_IMPL, false, classLoader);
-            hookMiuiHomeNoArgNoOp(recentsClass, "addBackStubWindow",
-                    "miui_home_disable_addBackStubWindow");
-            hookMiuiHomeNoArgNoOp(recentsClass, "showBackStubWindow",
-                    "miui_home_disable_showBackStubWindow_0");
-            Method showWithArg = recentsClass.getDeclaredMethod("showBackStubWindow",
-                    boolean.class);
-            showWithArg.setAccessible(true);
-            recordHookHandle(hook(showWithArg)
-                    .setId("miui_home_disable_showBackStubWindow_1")
+            Class<?> implementationClass = Class.forName(TRANSITION_CONTROLLER_IMPL, false,
+                    classLoader);
+            Method pairMethod = null;
+            for (Method method : implementationClass.getDeclaredMethods()) {
+                if ("isPairOpenAndClose".equals(method.getName())
+                        && method.getParameterCount() == 2) {
+                    pairMethod = method;
+                    break;
+                }
+            }
+            if (pairMethod == null) {
+                throw new NoSuchMethodException(TRANSITION_CONTROLLER_IMPL
+                        + ".isPairOpenAndClose/2");
+            }
+            pairMethod.setAccessible(true);
+            recordHookHandle(hook(pairMethod)
+                    .setId("server_transition_open_close_pair")
                     .intercept(chain -> {
-                        log(Log.INFO, TAG, "Blocked MiuiHome showBackStubWindow(boolean); "
-                                + "SystemUI owns side back input");
-                        return null;
+                        Object running = chain.getArg(0);
+                        Object incoming = chain.getArg(1);
+                        Object result = chain.proceed();
+                        log(Log.INFO, TAG, "TransitionControllerImpl.isPairOpenAndClose"
+                                + ", running=" + describeServerTransition(running)
+                                + ", incoming=" + describeServerTransition(incoming)
+                                + ", result=" + shortObject(result));
+                        return result;
                     }));
-            log(Log.INFO, TAG, "Installed MiuiHome side back stub disable hooks"
-                    + ", hooks=" + hookHandles.size());
+            log(Log.INFO, TAG, "Hooked TransitionControllerImpl.isPairOpenAndClose");
         } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to install MiuiHome side back hooks", throwable);
+            log(Log.ERROR, TAG,
+                    "Failed to hook TransitionControllerImpl.isPairOpenAndClose", throwable);
         }
     }
 
-    private void hookMiuiHomeNoArgNoOp(Class<?> ownerClass, String methodName, String hookId)
-            throws NoSuchMethodException {
-        Method method = ownerClass.getDeclaredMethod(methodName);
-        method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId(hookId)
-                .intercept(chain -> {
-                    log(Log.INFO, TAG, "Blocked MiuiHome " + methodName
-                            + "; SystemUI owns side back input");
-                    return null;
-                }));
+    private String describeServerTransition(Object transition) {
+        if (transition == null) {
+            return "null";
+        }
+        try {
+            Object type = readField(transition, "mType");
+            Object syncId = readField(transition, "mSyncId");
+            Object targets = readField(transition, "mTargets");
+            int targetCount = targets instanceof List ? ((List<?>) targets).size() : -1;
+            return "{type=" + shortObject(type)
+                    + ",syncId=" + shortObject(syncId)
+                    + ",targetCount=" + targetCount
+                    + ",targets=" + shortObject(targets) + "}";
+        } catch (Throwable throwable) {
+            return "{object=" + shortObject(transition)
+                    + ",error=" + throwable.getClass().getSimpleName()
+                    + ": " + throwable.getMessage() + "}";
+        }
     }
 
     private void hookMiuiOverviewProxy(ClassLoader classLoader) {
@@ -1198,6 +1233,398 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook MiuiOverviewProxy", throwable);
         }
+    }
+
+    private void hookDefaultTransitionHandler(ClassLoader classLoader) {
+        try {
+            Class<?> handlerClass = Class.forName(DEFAULT_TRANSITION_HANDLER, false,
+                    classLoader);
+            Method startAnimation = null;
+            for (Method method : handlerClass.getDeclaredMethods()) {
+                if ("startAnimation".equals(method.getName())
+                        && method.getParameterCount() == 5) {
+                    startAnimation = method;
+                    break;
+                }
+            }
+            if (startAnimation == null) {
+                throw new NoSuchMethodException(DEFAULT_TRANSITION_HANDLER
+                        + ".startAnimation/5");
+            }
+            startAnimation.setAccessible(true);
+            recordHookHandle(hook(startAnimation)
+                    .setId("systemui_default_transition_start")
+                    .intercept(chain -> {
+                        Object handler = chain.getThisObject();
+                        Object token = chain.getArg(0);
+                        Object info = chain.getArg(1);
+                        defaultTransitionHandlers.put(handler, Boolean.TRUE);
+                        log(Log.INFO, TAG, "DefaultTransitionHandler.startAnimation before"
+                                + ", token=" + shortObject(token)
+                                + ", type=" + readTransitionType(info)
+                                + ", debugId=" + readTransitionDebugId(info)
+                                + ", state=" + describeDefaultTransitionState(handler, token));
+                        Object result = chain.proceed();
+                        log(Log.INFO, TAG, "DefaultTransitionHandler.startAnimation after"
+                                + ", token=" + shortObject(token)
+                                + ", result=" + shortObject(result)
+                                + ", state=" + describeDefaultTransitionState(handler, token));
+                        return result;
+                    }));
+            log(Log.INFO, TAG, "Hooked DefaultTransitionHandler.startAnimation");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook DefaultTransitionHandler", throwable);
+        }
+    }
+
+    private void hookDefaultTransitionImplMerge(ClassLoader classLoader) {
+        try {
+            Class<?> implementationClass = Class.forName(DEFAULT_TRANSITION_IMPL, false,
+                    classLoader);
+            Method mergeAnimation = null;
+            Method reverseRunnable = null;
+            for (Method method : implementationClass.getDeclaredMethods()) {
+                if ("mergeAnimation".equals(method.getName())
+                        && method.getParameterCount() == 8) {
+                    mergeAnimation = method;
+                } else if ("lambda$mergeAnimation$4".equals(method.getName())
+                        && method.getParameterCount() == 6) {
+                    reverseRunnable = method;
+                }
+            }
+            if (mergeAnimation == null) {
+                throw new NoSuchMethodException(DEFAULT_TRANSITION_IMPL
+                        + ".mergeAnimation/8");
+            }
+            mergeAnimation.setAccessible(true);
+            recordHookHandle(hook(mergeAnimation)
+                    .setId("systemui_default_transition_merge")
+                    .intercept(chain -> {
+                        Object incomingInfo = chain.getArg(3);
+                        Object animators = chain.getArg(4);
+                        Object runningInfo = chain.getArg(5);
+                        log(Log.INFO, TAG, "DefaultTransitionImpl.mergeAnimation before"
+                                + ", runningType=" + readTransitionType(runningInfo)
+                                + ", runningDebugId=" + readTransitionDebugId(runningInfo)
+                                + ", incomingType=" + readTransitionType(incomingInfo)
+                                + ", incomingDebugId=" + readTransitionDebugId(incomingInfo)
+                                + ", interruptedSyncId="
+                                + readInAppInterruptedSyncId(incomingInfo)
+                                + ", animators=" + describeAnimatorList(animators));
+                        Object result = chain.proceed();
+                        if (Boolean.TRUE.equals(result)) {
+                            lastMiuiTransitionReverseUptime = SystemClock.uptimeMillis();
+                            suppressDuplicateBackUntilUptime =
+                                    lastMiuiTransitionReverseUptime + 700L;
+                        }
+                        log(Log.INFO, TAG, "DefaultTransitionImpl.mergeAnimation after"
+                                + ", runningDebugId=" + readTransitionDebugId(runningInfo)
+                                + ", incomingDebugId=" + readTransitionDebugId(incomingInfo)
+                                + ", result=" + shortObject(result)
+                                + ", animators=" + describeAnimatorList(animators));
+                        return result;
+                    }));
+            log(Log.INFO, TAG, "Hooked DefaultTransitionImpl.mergeAnimation");
+            if (reverseRunnable == null) {
+                throw new NoSuchMethodException(DEFAULT_TRANSITION_IMPL
+                        + ".lambda$mergeAnimation$4/6");
+            }
+            reverseRunnable.setAccessible(true);
+            recordHookHandle(hook(reverseRunnable)
+                    .setId("systemui_default_transition_reverse_execution")
+                    .intercept(chain -> {
+                        Object animator = chain.getArg(2);
+                        log(Log.INFO, TAG, "DefaultTransitionImpl reverse task before"
+                                + ", animator=" + describeAnimatorDeep(animator));
+                        Object result = chain.proceed();
+                        log(Log.INFO, TAG, "DefaultTransitionImpl reverse task after"
+                                + ", animator=" + describeAnimatorDeep(animator));
+                        return result;
+                    }));
+            log(Log.INFO, TAG,
+                    "Hooked DefaultTransitionImpl.lambda$mergeAnimation$4");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook DefaultTransitionImpl.mergeAnimation",
+                    throwable);
+        }
+    }
+
+    private void hookBackAnimationSendBackEvent(ClassLoader classLoader) {
+        try {
+            Class<?> controllerClass = Class.forName(BACK_ANIMATION_CONTROLLER, false,
+                    classLoader);
+            Method sendBackEvent = controllerClass.getDeclaredMethod("sendBackEvent",
+                    int.class);
+            sendBackEvent.setAccessible(true);
+            recordHookHandle(hook(sendBackEvent)
+                    .setId("systemui_back_send_event_guard")
+                    .intercept(chain -> {
+                        int action = ((Number) chain.getArg(0)).intValue();
+                        boolean moduleInjection = Boolean.TRUE.equals(
+                                moduleLegacyBackInjection.get());
+                        long remaining = suppressDuplicateBackUntilUptime
+                                - SystemClock.uptimeMillis();
+                        if (!moduleInjection && remaining > 0) {
+                            log(Log.WARN, TAG,
+                                    "Suppressed duplicate Shell BACK during MIUI reverse"
+                                            + ", action=" + action
+                                            + ", remaining=" + remaining
+                                            + ", controller="
+                                            + shortObject(chain.getThisObject()));
+                            return null;
+                        }
+                        log(Log.INFO, TAG, "BackAnimationController.sendBackEvent"
+                                + ", action=" + action
+                                + ", moduleLegacyInjection=" + moduleInjection);
+                        return chain.proceed();
+                    }));
+            log(Log.INFO, TAG, "Hooked BackAnimationController.sendBackEvent guard");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook BackAnimationController.sendBackEvent", throwable);
+        }
+    }
+
+    private String readFieldSafely(Object object, String fieldName) {
+        return shortObject(readFieldSafelyRaw(object, fieldName));
+    }
+
+    private Object readFieldSafelyRaw(Object object, String fieldName) {
+        try {
+            return readField(object, fieldName);
+        } catch (Throwable throwable) {
+            return "<" + throwable.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private String describeAnimatorDeep(Object animator) {
+        if (animator == null) {
+            return "null";
+        }
+        StringBuilder description = new StringBuilder("{")
+                .append(animator.getClass().getName());
+        appendAnimatorValue(description, animator, "isStarted");
+        appendAnimatorValue(description, animator, "isRunning");
+        appendAnimatorValue(description, animator, "getCurrentPlayTime");
+        appendAnimatorValue(description, animator, "getDuration");
+        appendAnimatorValue(description, animator, "getStartDelay");
+        try {
+            Object listeners = readField(animator, "mUpdateListeners");
+            description.append(",updateListeners=");
+            if (listeners instanceof Iterable) {
+                description.append('[');
+                boolean firstListener = true;
+                for (Object listener : (Iterable<?>) listeners) {
+                    if (!firstListener) {
+                        description.append(';');
+                    }
+                    firstListener = false;
+                    description.append(describeCapturedObject(listener));
+                }
+                description.append(']');
+            } else {
+                description.append(shortObject(listeners));
+            }
+        } catch (Throwable throwable) {
+            description.append(",updateListenersError=")
+                    .append(throwable.getClass().getSimpleName());
+        }
+        return description.append('}').toString();
+    }
+
+    private void appendAnimatorValue(StringBuilder description, Object animator,
+            String methodName) {
+        try {
+            description.append(',').append(methodName).append('=')
+                    .append(shortObject(invokeAnyMethod(animator, methodName,
+                            new Object[0])));
+        } catch (Throwable throwable) {
+            description.append(',').append(methodName).append("=<")
+                    .append(throwable.getClass().getSimpleName()).append('>');
+        }
+    }
+
+    private String describeCapturedObject(Object object) {
+        if (object == null) {
+            return "null";
+        }
+        if (object.getClass().getName().contains("DefaultAnimationAdapter")) {
+            return describeDefaultAnimationAdapter(object);
+        }
+        StringBuilder description = new StringBuilder(object.getClass().getName())
+                .append('(');
+        boolean first = true;
+        for (Field field : object.getClass().getDeclaredFields()) {
+            if (!field.isSynthetic() && !field.getName().startsWith("f$")) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                if (!first) {
+                    description.append(',');
+                }
+                first = false;
+                description.append(field.getName()).append('=')
+                        .append(shortObject(field.get(object)));
+            } catch (Throwable ignored) {
+            }
+        }
+        return description.append(')').toString();
+    }
+
+    private String describeDefaultAnimationAdapter(Object adapter) {
+        StringBuilder description = new StringBuilder(adapter.getClass().getName())
+                .append('(');
+        appendReflectedField(description, adapter, "mLeash");
+        appendReflectedField(description, adapter, "mAnim");
+        appendReflectedField(description, adapter, "mPosition");
+        appendReflectedField(description, adapter, "mClipRect");
+        appendReflectedField(description, adapter, "mAnimClipRect");
+        appendReflectedField(description, adapter, "mCornerRadius");
+        appendReflectedField(description, adapter, "mWindowBottom");
+        try {
+            Object animation = readField(adapter, "mAnim");
+            description.append(",animation=").append(describeViewAnimation(animation));
+        } catch (Throwable throwable) {
+            description.append(",animationError=")
+                    .append(throwable.getClass().getSimpleName());
+        }
+        return description.append(')').toString();
+    }
+
+    private void appendReflectedField(StringBuilder description, Object object,
+            String fieldName) {
+        try {
+            if (description.charAt(description.length() - 1) != '(') {
+                description.append(',');
+            }
+            description.append(fieldName).append('=')
+                    .append(shortObject(readField(object, fieldName)));
+        } catch (Throwable throwable) {
+            description.append(',').append(fieldName).append("=<")
+                    .append(throwable.getClass().getSimpleName()).append('>');
+        }
+    }
+
+    private String describeViewAnimation(Object animation) {
+        if (animation == null) {
+            return "null";
+        }
+        StringBuilder description = new StringBuilder(animation.getClass().getName());
+        try {
+            description.append("{duration=")
+                    .append(shortObject(invokeAnyMethod(animation, "getDuration",
+                            new Object[0])))
+                    .append(",startOffset=")
+                    .append(shortObject(invokeAnyMethod(animation, "getStartOffset",
+                            new Object[0])));
+            Object children = invokeAnyMethod(animation, "getAnimations", new Object[0]);
+            if (children instanceof Iterable) {
+                description.append(",children=[");
+                boolean first = true;
+                for (Object child : (Iterable<?>) children) {
+                    if (!first) {
+                        description.append(';');
+                    }
+                    first = false;
+                    description.append(describeViewAnimation(child));
+                }
+                description.append(']');
+            }
+            description.append('}');
+        } catch (Throwable ignored) {
+            description.append('{').append(shortObject(animation)).append('}');
+        }
+        return description.toString();
+    }
+
+    private int readInAppInterruptedSyncId(Object info) {
+        try {
+            Object miuiInfo = info == null ? null
+                    : invokeAnyMethod(info, "getMiuiTransitionInfo", new Object[0]);
+            Object value = miuiInfo == null ? null
+                    : invokeAnyMethod(miuiInfo, "getInAppInterruptedSyncId", new Object[0]);
+            return value instanceof Number ? ((Number) value).intValue() : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private int readTransitionType(Object info) {
+        try {
+            Object value = info == null ? null
+                    : invokeAnyMethod(info, "getType", new Object[0]);
+            return value instanceof Number ? ((Number) value).intValue() : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private int readTransitionDebugId(Object info) {
+        try {
+            Object value = info == null ? null
+                    : invokeAnyMethod(info, "getDebugId", new Object[0]);
+            return value instanceof Number ? ((Number) value).intValue() : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private String describeDefaultTransitionState(Object handler, Object focusToken) {
+        try {
+            Object transitionsObject = readField(handler, "mTransitions");
+            Object animationsObject = readField(handler, "mAnimations");
+            if (!(transitionsObject instanceof Map) || !(animationsObject instanceof Map)) {
+                return "unsupported{transitions=" + shortObject(transitionsObject)
+                        + ", animations=" + shortObject(animationsObject) + "}";
+            }
+            Map<?, ?> transitions = (Map<?, ?>) transitionsObject;
+            Map<?, ?> animations = (Map<?, ?>) animationsObject;
+            StringBuilder state = new StringBuilder("maps{transitions=")
+                    .append(transitions.size()).append(", animations=")
+                    .append(animations.size()).append(", entries=[");
+            boolean first = true;
+            for (Map.Entry<?, ?> entry : transitions.entrySet()) {
+                if (!first) {
+                    state.append("; ");
+                }
+                first = false;
+                Object token = entry.getKey();
+                Object animatorList = animations.get(token);
+                state.append(token == focusToken ? "focus:" : "")
+                        .append("type=").append(readTransitionType(entry.getValue()))
+                        .append(",debugId=").append(readTransitionDebugId(entry.getValue()))
+                        .append(",animators=").append(describeAnimatorList(animatorList));
+            }
+            return state.append("]}").toString();
+        } catch (Throwable throwable) {
+            return "error{" + throwable.getClass().getSimpleName() + ": "
+                    + throwable.getMessage() + "}";
+        }
+    }
+
+    private String describeAnimatorList(Object animatorList) {
+        if (!(animatorList instanceof Iterable)) {
+            return shortObject(animatorList);
+        }
+        int count = 0;
+        int running = 0;
+        int reversible = 0;
+        for (Object animator : (Iterable<?>) animatorList) {
+            count++;
+            try {
+                if (Boolean.TRUE.equals(invokeAnyMethod(animator,
+                        "isRunning", new Object[0]))) {
+                    running++;
+                }
+                if (Boolean.TRUE.equals(invokeAnyMethod(animator,
+                        "canReverse", new Object[0]))) {
+                    reversible++;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return count + "(running=" + running + ",canReverse=" + reversible + ")";
     }
 
     private Object interceptMiuiOverviewProxyTransact(XposedInterface.Chain chain)
@@ -2596,6 +3023,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean triggerBack;
         private boolean shellGestureStarted;
         private boolean gestureSuppressed;
+        private boolean legacyInterruptGesture;
         private int activeEdge;
         private float downX;
         private float downY;
@@ -2689,31 +3117,28 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "SystemUI back overlay touch failed", throwable);
                 gestureActive = false;
+                legacyInterruptGesture = false;
                 return false;
             }
         }
 
         private boolean onDown(MotionEvent event, int edge) throws Exception {
-            if (!isShellReadyForGesture()) {
-                gestureActive = true;
-                shellGestureStarted = false;
-                gestureSuppressed = true;
-                activeEdge = edge;
-                downX = event.getRawX();
-                downY = event.getRawY();
-                log(Log.WARN, TAG, "Suppressed SystemUI back while Shell is busy"
-                        + ", state=" + describeShellState());
-                return true;
-            }
             gestureActive = true;
             shellGestureStarted = false;
             gestureSuppressed = false;
+            legacyInterruptGesture = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
             activeEdge = edge;
             downX = event.getRawX();
             downY = event.getRawY();
+            if (!isShellReadyForGesture()) {
+                gestureSuppressed = true;
+                log(Log.WARN, TAG, "Suppressed SystemUI back while Shell is busy"
+                        + ", state=" + describeShellState());
+                return true;
+            }
             // Home and Recents share the same launcher Activity. Resolve the actual back target
             // before feeding DOWN to BackPanelController so idle Home never shows the indicator.
             if (!startShellGesture()) {
@@ -2736,19 +3161,22 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (gestureSuppressed) {
                 return true;
             }
-            if (!shellGestureStarted && !startShellGesture()) {
+            if (!legacyInterruptGesture
+                    && !shellGestureStarted && !startShellGesture()) {
                 cancelLocalGesture(event, "BackNavigationInfo unavailable");
                 return false;
             }
             dispatchToEdgePlugin(event, activeEdge);
-            updateActiveTracker(event.getRawX(), event.getRawY());
+            if (!legacyInterruptGesture) {
+                updateActiveTracker(event.getRawX(), event.getRawY());
+            }
             float distance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
             if (!thresholdCrossed && distance > dp(PILFER_THRESHOLD_DP)) {
                 crossIntentThreshold(distance);
             }
-            if (thresholdCrossed) {
+            if (thresholdCrossed && !legacyInterruptGesture) {
                 dispatchExplicitProgress(distance);
             }
             boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
@@ -2762,9 +3190,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             thresholdCrossed = true;
             nativePanelActive = true;
-            invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
-            log(Log.INFO, TAG, "SystemUI overlay intent threshold crossed, distance="
-                    + distance);
+            if (legacyInterruptGesture) {
+                log(Log.INFO, TAG, "MIUI in-app interrupt threshold crossed, distance="
+                        + distance);
+            } else {
+                invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
+                log(Log.INFO, TAG, "SystemUI overlay intent threshold crossed, distance="
+                        + distance);
+            }
         }
 
         private boolean onUp(MotionEvent event, boolean allowTrigger) throws Exception {
@@ -2774,8 +3207,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (gestureSuppressed) {
                 gestureActive = false;
                 gestureSuppressed = false;
+                legacyInterruptGesture = false;
                 log(Log.INFO, TAG, "Finished suppressed SystemUI back gesture");
                 return true;
+            }
+            if (legacyInterruptGesture) {
+                return finishLegacyInterruptGesture(event, allowTrigger);
             }
             if (!shellGestureStarted) {
                 cancelLocalGesture(event, "released before first MOVE");
@@ -2819,6 +3256,35 @@ public final class MiuiBackGestureHook extends XposedModule {
             gestureActive = false;
             shellGestureStarted = false;
             gestureSuppressed = false;
+            legacyInterruptGesture = false;
+            thresholdCrossed = false;
+            nativePanelActive = false;
+            triggerBack = false;
+            return true;
+        }
+
+        private boolean finishLegacyInterruptGesture(MotionEvent event, boolean allowTrigger)
+                throws Exception {
+            dispatchToEdgePlugin(event, activeEdge);
+            float releaseDistance = activeEdge == EDGE_LEFT
+                    ? event.getRawX() - downX
+                    : downX - event.getRawX();
+            boolean trigger = allowTrigger
+                    && thresholdCrossed
+                    && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
+            updateTriggerBack(trigger);
+            if (trigger) {
+                // A normal BACK creates the incoming CLOSE/TO_BACK transition. Xiaomi's
+                // TransitionControllerImpl tags a consecutive inverse transition pair and
+                // DefaultTransitionImpl.mergeAnimation() reverses the running OPEN animators.
+                dispatchRealBack();
+            }
+            log(Log.INFO, TAG, "Finished MIUI in-app interrupt gesture"
+                    + ", trigger=" + trigger + ", edge=" + activeEdge);
+            gestureActive = false;
+            shellGestureStarted = false;
+            gestureSuppressed = false;
+            legacyInterruptGesture = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
@@ -2826,6 +3292,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private boolean startShellGesture() throws Exception {
+            // A running Xiaomi OPEN transition is the native interruption source. Prefer it
+            // even when system_server can already return a valid predictive-back navigation;
+            // otherwise Shell starts a new cross-activity animation and misses reverse().
+            if (hasReversibleRunningOpenTransition()) {
+                legacyInterruptGesture = true;
+                log(Log.INFO, TAG, "Preferred running Xiaomi OPEN transition before predictive back");
+                return true;
+            }
             syncAospProgressThresholds();
             invokeAnyMethod(controller, "onGestureStarted",
                     new Object[]{Float.valueOf(downX), Float.valueOf(downY),
@@ -2840,12 +3314,78 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", receivedNull=" + receivedNull
                         + ", state=" + describeShellState());
                 cleanupRejectedShellGesture();
+                if (receivedNull && hasReversibleRunningOpenTransition()) {
+                    legacyInterruptGesture = true;
+                    log(Log.INFO, TAG, "Using SystemUI-owned legacy BACK for possible "
+                            + "MIUI in-app transition interruption");
+                    return true;
+                }
                 return false;
             }
             shellGestureStarted = true;
             log(Log.INFO, TAG, "SystemUI overlay onGestureStarted"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
+        }
+
+        private boolean hasReversibleRunningOpenTransition() {
+            synchronized (defaultTransitionHandlers) {
+                for (Object handler : new ArrayList<>(defaultTransitionHandlers.keySet())) {
+                    if (handler == null) {
+                        continue;
+                    }
+                    try {
+                        log(Log.INFO, TAG, "Inspecting Shell transitions for legacy interrupt"
+                                + ", state="
+                                + describeDefaultTransitionState(handler, null));
+                        Object transitionsObject = readField(handler, "mTransitions");
+                        Object animationsObject = readField(handler, "mAnimations");
+                        if (!(transitionsObject instanceof Map)
+                                || !(animationsObject instanceof Map)) {
+                            continue;
+                        }
+                        Map<?, ?> transitions = (Map<?, ?>) transitionsObject;
+                        Map<?, ?> animations = (Map<?, ?>) animationsObject;
+                        for (Map.Entry<?, ?> entry : transitions.entrySet()) {
+                            Object info = entry.getValue();
+                            Object type = info == null ? null
+                                    : invokeAnyMethod(info, "getType", new Object[0]);
+                            if (!(type instanceof Number)
+                                    || ((Number) type).intValue() != 1) {
+                                continue;
+                            }
+                            Object animatorList = animations.get(entry.getKey());
+                            if (!(animatorList instanceof Iterable)) {
+                                continue;
+                            }
+                            int count = 0;
+                            boolean reversible = true;
+                            for (Object animator : (Iterable<?>) animatorList) {
+                                count++;
+                                if (!Boolean.TRUE.equals(invokeAnyMethod(animator,
+                                        "canReverse", new Object[0]))
+                                        || !Boolean.TRUE.equals(invokeAnyMethod(animator,
+                                        "isRunning", new Object[0]))) {
+                                    reversible = false;
+                                    break;
+                                }
+                            }
+                            if (count > 0 && reversible) {
+                                log(Log.INFO, TAG, "Detected reversible running OPEN transition"
+                                        + ", animatorCount=" + count
+                                        + ", info=" + shortObject(info));
+                                return true;
+                            }
+                        }
+                    } catch (Throwable throwable) {
+                        if (ENABLE_VERBOSE_DIAGNOSTICS) {
+                            log(Log.WARN, TAG, "Failed to inspect running Shell transitions",
+                                    throwable);
+                        }
+                    }
+                }
+            }
+            return false;
         }
 
         private boolean isShellReadyForGesture() {
@@ -2915,6 +3455,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             gestureActive = false;
             shellGestureStarted = false;
             gestureSuppressed = false;
+            legacyInterruptGesture = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
@@ -2929,6 +3470,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 gestureActive = false;
                 shellGestureStarted = false;
                 gestureSuppressed = false;
+                legacyInterruptGesture = false;
                 thresholdCrossed = false;
                 nativePanelActive = false;
                 triggerBack = false;
@@ -3026,8 +3568,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             triggerBack = newTriggerBack;
             try {
-                invokeAnyMethod(controller, "setTriggerBack",
-                        new Object[]{Boolean.valueOf(newTriggerBack)});
+                if (!legacyInterruptGesture) {
+                    invokeAnyMethod(controller, "setTriggerBack",
+                            new Object[]{Boolean.valueOf(newTriggerBack)});
+                }
                 if (!newTriggerBack && nativePanelActive) {
                     nativePanelActive = false;
                 } else if (newTriggerBack && thresholdCrossed) {
@@ -3151,6 +3695,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             } catch (Throwable ignored) {
             }
+            moduleLegacyBackInjection.set(Boolean.TRUE);
             try {
                 invokeAnyMethod(controller, "sendBackEvent",
                         new Object[]{Integer.valueOf(KEY_ACTION_DOWN)});
@@ -3159,6 +3704,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.INFO, TAG, "Injected legacy back key via sendBackEvent");
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Failed to inject legacy back key", throwable);
+            } finally {
+                moduleLegacyBackInjection.remove();
             }
         }
 
