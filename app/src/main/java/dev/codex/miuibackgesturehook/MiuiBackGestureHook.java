@@ -15,6 +15,7 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.Pair;
 import android.view.Gravity;
@@ -51,7 +52,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v71-launcher-owned-home";
+    private static final String BUILD_MARK = "systemui-aosp-back-v72-preempt-miui-indicator";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -109,6 +110,7 @@ public final class MiuiBackGestureHook extends XposedModule {
     // Debug builds retain frame-level diagnostics; release builds keep lifecycle/error logs only.
     private static final boolean ENABLE_VERBOSE_DIAGNOSTICS = BuildConfig.DEBUG;
     private static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
+    private static final float MIUI_INDICATOR_PILFER_THRESHOLD_DP = 1.0f;
     private static final float PILFER_THRESHOLD_DP = 8.0f;
     private static final float TRIGGER_THRESHOLD_DP = 48.0f;
     private static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
@@ -411,39 +413,46 @@ public final class MiuiBackGestureHook extends XposedModule {
     private void hookSecuritySidebarTransientBars(ClassLoader classLoader) {
         try {
             Class<?> policyClass = Class.forName(DISPLAY_POLICY, false, classLoader);
+            int hooked = 0;
             for (Method method : policyClass.getDeclaredMethods()) {
-                if (!"requestTransientBars".equals(method.getName())
-                        || method.getParameterCount() != 2
-                        || method.getParameterTypes()[1] != boolean.class) {
+                if (!"requestTransientBars".equals(method.getName())) {
                     continue;
                 }
                 method.setAccessible(true);
+                int overload = hooked++;
                 recordHookHandle(hook(method)
-                        .setId("server_security_sidebar_transient_bars")
+                        .setId("server_security_sidebar_transient_bars_" + overload)
                         .intercept(chain -> {
                             if (isSidebarTransientGesture(chain.getThisObject())) {
-                                log(Log.INFO, TAG, "Blocked transient bars from sidebar bounds");
+                                log(Log.INFO, TAG, "Blocked transient bars from sidebar bounds"
+                                        + ", overload=" + method.toGenericString());
                                 return null;
                             }
-                            Object swipeTarget = chain.getArg(0);
-                            String owner = String.valueOf(invokeAnyMethod(
-                                    swipeTarget, "getOwningPackage", new Object[0]));
-                            String window = String.valueOf(swipeTarget);
-                            String lower = window.toLowerCase();
-                            if ("com.miui.securitycenter".equals(owner)
-                                    && (lower.contains("sidebar")
-                                    || lower.contains("game")
-                                    || lower.contains("toolbox"))) {
-                                log(Log.INFO, TAG, "Blocked transient bars from security sidebar"
-                                        + ", target=" + shortObject(swipeTarget));
-                                return null;
+                            for (Object argument : chain.getArgs()) {
+                                if (argument == null) {
+                                    continue;
+                                }
+                                String owner = String.valueOf(invokeAnyMethod(
+                                        argument, "getOwningPackage", new Object[0]));
+                                String lower = String.valueOf(argument).toLowerCase();
+                                if ("com.miui.securitycenter".equals(owner)
+                                        && (lower.contains("sidebar")
+                                        || lower.contains("game")
+                                        || lower.contains("toolbox"))) {
+                                    log(Log.INFO, TAG,
+                                            "Blocked transient bars from security sidebar"
+                                                    + ", target=" + shortObject(argument));
+                                    return null;
+                                }
                             }
                             return chain.proceed();
                         }));
-                log(Log.INFO, TAG, "Hooked DisplayPolicy security-sidebar transient bars");
-                return;
             }
-            log(Log.WARN, TAG, "DisplayPolicy.requestTransientBars(WindowState,boolean) not found");
+            if (hooked == 0) {
+                log(Log.WARN, TAG, "DisplayPolicy.requestTransientBars not found");
+            } else {
+                log(Log.INFO, TAG, "Hooked DisplayPolicy transient-bars overloads=" + hooked);
+            }
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook security-sidebar transient bars", throwable);
         }
@@ -455,8 +464,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             Object gestures = readField(displayPolicy, "mSystemGestures");
             float[] downXs = (float[]) readField(gestures, "mDownX");
             float[] downYs = (float[]) readField(gestures, "mDownY");
-            if (context == null || downXs == null || downYs == null
-                    || downXs.length == 0 || downYs.length == 0) {
+            long[] downTimes = (long[]) readField(gestures, "mDownTime");
+            int downPointers = ((Number) readField(gestures, "mDownPointers")).intValue();
+            if (context == null || downXs == null || downYs == null || downTimes == null
+                    || downPointers <= 0) {
                 return false;
             }
             String encoded = Settings.Secure.getString(context.getContentResolver(),
@@ -464,24 +475,34 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (encoded == null || encoded.trim().isEmpty()) {
                 return false;
             }
-            int x = Math.round(downXs[0]);
-            int y = Math.round(downYs[0]);
             int padding = Math.max(0, Math.round(MIUI_SIDEBAR_EXCLUSION_PADDING_DP
                     * context.getResources().getDisplayMetrics().density));
             JSONArray bounds = new JSONArray(encoded);
-            for (int i = 0; i < bounds.length(); i++) {
-                JSONObject item = bounds.optJSONObject(i);
-                if (item == null) {
+            int pointerCount = Math.min(downPointers,
+                    Math.min(downXs.length, Math.min(downYs.length, downTimes.length)));
+            long now = SystemClock.uptimeMillis();
+            for (int pointer = 0; pointer < pointerCount; pointer++) {
+                // Ignore stale slots left behind by an earlier system gesture.
+                if (downTimes[pointer] <= 0L || now - downTimes[pointer] > 2000L) {
                     continue;
                 }
-                Rect rect = new Rect(item.optInt("l", -1), item.optInt("t", -1),
-                        item.optInt("r", -1), item.optInt("b", -1));
-                if (!rect.isEmpty()) {
-                    rect.inset(-padding, -padding);
-                    if (rect.contains(x, y)) {
-                        log(Log.INFO, TAG, "Matched sidebar transient gesture"
-                                + ", x=" + x + ", y=" + y + ", bounds=" + rect);
-                        return true;
+                int x = Math.round(downXs[pointer]);
+                int y = Math.round(downYs[pointer]);
+                for (int i = 0; i < bounds.length(); i++) {
+                    JSONObject item = bounds.optJSONObject(i);
+                    if (item == null) {
+                        continue;
+                    }
+                    Rect rect = new Rect(item.optInt("l", -1), item.optInt("t", -1),
+                            item.optInt("r", -1), item.optInt("b", -1));
+                    if (!rect.isEmpty()) {
+                        rect.inset(-padding, -padding);
+                        if (rect.contains(x, y)) {
+                            log(Log.INFO, TAG, "Matched sidebar transient gesture"
+                                    + ", pointer=" + pointer + ", x=" + x + ", y=" + y
+                                    + ", bounds=" + rect);
+                            return true;
+                        }
                     }
                 }
             }
@@ -2295,7 +2316,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 cancelNativeCandidate(event, "vertical gesture before pilfer");
                 return false;
             }
-            if (!pilfered && distance > dp(PILFER_THRESHOLD_DP)) {
+            if (!pilfered && distance > dp(MIUI_INDICATOR_PILFER_THRESHOLD_DP)) {
                 pilferPointers(distance);
             }
             if (!driver.handleTouch(event, activeEdge)) {
