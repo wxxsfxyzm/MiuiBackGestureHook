@@ -77,12 +77,6 @@ android {
     }
 
     buildTypes {
-        debug {
-            if (hasLocalSigningConfig || hasEnvSigningConfig) {
-                signingConfig signingConfigs.release
-            }
-        }
-
         release {
             minifyEnabled true
             shrinkResources true
