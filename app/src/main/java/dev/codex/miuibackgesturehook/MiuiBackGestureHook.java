@@ -55,6 +55,9 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final String BUILD_MARK = "systemui-aosp-back-v72-preempt-miui-indicator";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
+    private static final String ANDROID_SETTINGS = "com.android.settings";
+    private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
+            "android.window.WindowOnBackInvokedDispatcher";
 
     private static final String EDGE_BACK_GESTURE_HANDLER =
             "com.android.systemui.navigationbar.gestural.EdgeBackGestureHandler";
@@ -377,6 +380,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (SYSTEM_UI.equals(processName)) {
             systemUiClassLoader = param.getDefaultClassLoader();
             installSystemUiHooks(systemUiClassLoader);
+        } else if (ANDROID_SETTINGS.equals(processName)) {
+            hookPredictiveBackOptInCheck(param.getDefaultClassLoader(), "settings");
         } else if (MIUI_HOME.equals(processName) && INSTALL_MIUI_HOME_STUB_HOOKS) {
             installMiuiHomeHooks(param.getDefaultClassLoader());
         }
@@ -401,12 +406,68 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookBackNavigationControllerDiagnostics(serverClassLoader);
             hookBackNavigationMonitoringDiagnostics(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
+            hookPredictiveBackOptInCheck(serverClassLoader, "system_server");
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookServerLeashDiagnostics(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install system_server hooks", throwable);
+        }
+    }
+
+    private void hookPredictiveBackOptInCheck(ClassLoader classLoader, String owner) {
+        try {
+            Class<?> dispatcherClass = Class.forName(
+                    WINDOW_ON_BACK_INVOKED_DISPATCHER, false, classLoader);
+            for (Method method : dispatcherClass.getDeclaredMethods()) {
+                if (!"isOnBackInvokedCallbackEnabled".equals(method.getName())
+                        || method.getParameterCount() != 3
+                        || !method.getParameterTypes()[0].getName()
+                        .equals("android.content.pm.ActivityInfo")
+                        || !method.getParameterTypes()[1].getName()
+                        .equals("android.content.pm.ApplicationInfo")) {
+                    continue;
+                }
+                method.setAccessible(true);
+                recordHookHandle(hook(method)
+                        .setId("predictive_opt_in_" + owner)
+                        .intercept(chain -> {
+                            Object activityInfo = chain.getArg(0);
+                            Object applicationInfo = chain.getArg(1);
+                            String packageName = readPackageName(activityInfo);
+                            if (packageName == null) {
+                                packageName = readPackageName(applicationInfo);
+                            }
+                            if (ANDROID_SETTINGS.equals(packageName)) {
+                                log(Log.INFO, TAG, "Forced predictive-back opt-in"
+                                        + ", owner=" + owner
+                                        + ", package=" + packageName
+                                        + ", activity=" + shortObject(activityInfo));
+                                return true;
+                            }
+                            return chain.proceed();
+                        }));
+                log(Log.INFO, TAG, "Hooked predictive-back opt-in check"
+                        + ", owner=" + owner);
+                return;
+            }
+            log(Log.WARN, TAG, "Predictive-back opt-in check not found, owner=" + owner);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook predictive-back opt-in check, owner=" + owner,
+                    throwable);
+        }
+    }
+
+    private static String readPackageName(Object packageItemInfo) {
+        if (packageItemInfo == null) {
+            return null;
+        }
+        try {
+            Object value = readField(packageItemInfo, "packageName");
+            return value instanceof String ? (String) value : null;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

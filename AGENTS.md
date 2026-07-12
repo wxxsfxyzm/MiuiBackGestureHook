@@ -18,6 +18,15 @@ D:/code/jadx
 
 ## Current Goal
 
+Historical AOSP gesture restoration research is archived under
+`reports/restore-gesture/`. New predictive-back opt-in research is recorded under
+`reports/enable-predictive/`.
+
+The active experiment is a predictive-back opt-in manager. Initially force-enable
+only `com.android.settings` by controlling the framework's canonical
+`WindowOnBackInvokedDispatcher.isOnBackInvokedCallbackEnabled(...)` decision in both
+the app process and system_server. Do not build the management UI yet.
+
 The old MiuiHome-side experiment is abandoned.
 
 The current direction is SystemUI-first: find and undo the Xiaomi path where SystemUI delegates gesture/back progress handling to MiuiHome, then restore the AOSP SystemUI/WM Shell back gesture pipeline.
