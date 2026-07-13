@@ -1,11 +1,12 @@
 package dev.codex.miuibackgesturehook;
 
 import android.app.ActivityManager;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
-import android.graphics.Color;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Insets;
-import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.hardware.input.InputManager;
@@ -15,10 +16,8 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.provider.Settings;
-import android.os.SystemClock;
 import android.util.Log;
 import android.util.Pair;
-import android.view.Gravity;
 import android.view.InputChannel;
 import android.view.InputEvent;
 import android.view.InputEventReceiver;
@@ -34,7 +33,6 @@ import android.window.BackNavigationInfo;
 import android.window.BackTouchTracker;
 
 import java.lang.reflect.Array;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -52,7 +50,8 @@ import io.github.libxposed.api.XposedModuleInterface;
 
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
-    private static final String BUILD_MARK = "systemui-aosp-back-v87-stable-cleanup";
+    private static final String BUILD_MARK =
+            "systemui-aosp-back-v102-clean";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -60,58 +59,42 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.systemui.navigationbar.gestural.EdgeBackGestureHandler";
     private static final String MIUI_OVERVIEW_PROXY =
             "com.android.systemui.recents.MiuiOverviewProxy";
-    private static final String LAUNCHER_PROXY_SERVICE =
-            "com.android.systemui.recents.LauncherProxyService";
+    private static final String MIUI_HOME_GESTURE_STUB =
+            "com.miui.home.recents.GestureStubView";
+    private static final String MIUI_HOME_RECENTS_CONTAINER =
+            "com.miui.home.recents.views.RecentsContainer";
+    private static final String MIUI_HOME_TASK_VIEW =
+            "com.miui.home.recents.views.TaskView";
     private static final String NAVIGATION_BAR =
             "com.android.systemui.navigationbar.views.NavigationBar";
     private static final String BACK_ANIMATION_CONTROLLER =
             "com.android.wm.shell.back.BackAnimationController";
-    private static final String SHELL_BACK_ANIMATION_REGISTRY =
-            "com.android.wm.shell.back.ShellBackAnimationRegistry";
     private static final String DEFAULT_TRANSITION_HANDLER =
             "com.android.wm.shell.transition.DefaultTransitionHandler";
     private static final String DEFAULT_TRANSITION_IMPL =
             "com.android.wm.shell.common.transition.DefaultTransitionImpl";
-    private static final String CROSS_ACTIVITY_BACK_ANIMATION =
-            "com.android.wm.shell.back.CrossActivityBackAnimation";
-    private static final String DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION =
-            "com.android.wm.shell.back.DefaultCrossActivityBackAnimation";
-    private static final String CUSTOM_CROSS_ACTIVITY_BACK_ANIMATION =
-            "com.android.wm.shell.back.CustomCrossActivityBackAnimation";
     private static final String BACK_NAVIGATION_CONTROLLER =
             "com.android.server.wm.BackNavigationController";
-    private static final String TRANSITION_CONTROLLER_IMPL =
-            "com.android.server.wm.TransitionControllerImpl";
     private static final String BACK_ANIMATION_HANDLER =
             "com.android.server.wm.BackNavigationController$AnimationHandler";
     private static final String BACK_WINDOW_ANIMATION_ADAPTOR =
             "com.android.server.wm.BackNavigationController$AnimationHandler$BackWindowAnimationAdaptor";
     private static final String SCHEDULE_ANIMATION_BUILDER =
             "com.android.server.wm.BackNavigationController$AnimationHandler$ScheduleAnimationBuilder";
-    private static final String SURFACE_ANIMATOR =
-            "com.android.server.wm.SurfaceAnimator";
-    private static final String WINDOW_CONTAINER =
-            "com.android.server.wm.WindowContainer";
     private static final String DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
-    private static final String ACTIVITY_RECORD =
-            "com.android.server.wm.ActivityRecord";
-    private static final String SURFACE_CONTROL_TRANSACTION =
-            "android.view.SurfaceControl$Transaction";
 
     private static final int TRANSACTION_MIUI_ON_GESTURE_LINE_PROGRESS = 4;
     private static final int EDGE_LEFT = 0;
     private static final int EDGE_RIGHT = 1;
-    private static final int TYPE_NAVIGATION_BAR_PANEL = 2024;
-    private static final int PRIVATE_FLAG_TRUSTED_OVERLAY = 0x00000010;
+    private static final String MIUI_FULLSCREEN_STATE_CHANGE =
+            "com.miui.fullscreen_state_change";
+    private static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
+            "dev.codex.miuibackgesturehook.action.MIUI_OVERVIEW_STATE_CHANGE";
     private static final int KEY_ACTION_UP = 1;
     private static final int KEY_ACTION_DOWN = 0;
-    private static final int TYPE_RETURN_TO_HOME = 1;
     private static final int TYPE_CROSS_ACTIVITY = 2;
     private static final int TYPE_CROSS_TASK = 3;
     private static final int TYPE_CALLBACK = 4;
-    private static final boolean INSTALL_WINDOW_INPUT_OVERLAY = false;
-    // Debug builds retain frame-level diagnostics; release builds keep lifecycle/error logs only.
-    private static final boolean ENABLE_VERBOSE_DIAGNOSTICS = BuildConfig.DEBUG;
     private static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     private static final float MIUI_INDICATOR_PILFER_THRESHOLD_DP = 1.0f;
     private static final float PILFER_THRESHOLD_DP = 8.0f;
@@ -119,19 +102,20 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
     private static final String MIUI_SIDEBAR_BOUNDS = "sidebar_bounds";
     private static final float MIUI_SIDEBAR_EXCLUSION_PADDING_DP = 8.0f;
+    private static final long MIUI_OVERVIEW_DISMISS_TIMEOUT_MS = 2500L;
+    private static final long MIUI_OVERVIEW_EXIT_GUARD_MS = 400L;
 
     private final List<XposedInterface.HookHandle> hookHandles = new ArrayList<>();
-    private final Map<Object, SystemUiBackInputOverlay> overlays =
-            Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
     private final Map<Object, Boolean> defaultTransitionHandlers =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private volatile boolean miuiOverviewVisible;
+    private volatile long miuiOverviewDismissPendingUntilUptime;
+    private Context miuiOverviewReceiverContext;
+    private BroadcastReceiver miuiOverviewReceiver;
     private String processName;
-    private ClassLoader systemUiClassLoader;
     private boolean nativePluginDiagnosticsLogged;
-    private volatile long lastPredictiveBackServerTraceUptime;
-    private volatile long lastMiuiTransitionReverseUptime;
     private volatile long suppressDuplicateBackUntilUptime;
     private final ThreadLocal<Boolean> moduleLegacyBackInjection = new ThreadLocal<>();
 
@@ -148,29 +132,23 @@ public final class MiuiBackGestureHook extends XposedModule {
         log(Log.INFO, TAG, "Hot reloading, build=" + BUILD_MARK
                 + ", process=" + processName
                 + ", hooks=" + hookHandles.size());
-        Object[][] overlayState = new Object[overlays.size() + nativeInputMonitors.size()][2];
+        boolean savedMiuiOverviewVisible = miuiOverviewVisible;
+        unregisterMiuiOverviewStateReceiver();
+        Object[][] inputState = new Object[nativeInputMonitors.size()][2];
         int index = 0;
-        for (Map.Entry<Object, SystemUiBackInputOverlay> entry
-                : new ArrayList<>(overlays.entrySet())) {
-            overlayState[index][0] = entry.getKey();
-            overlayState[index][1] = entry.getValue().backAnimationImpl;
-            index++;
-        }
         for (Map.Entry<Object, NativeBackInputMonitor> entry
                 : new ArrayList<>(nativeInputMonitors.entrySet())) {
-            overlayState[index][0] = entry.getKey();
-            overlayState[index][1] = entry.getValue().backAnimationImpl;
+            inputState[index][0] = entry.getKey();
+            inputState[index][1] = entry.getValue().backAnimationImpl;
             index++;
-        }
-        for (SystemUiBackInputOverlay overlay : new ArrayList<>(overlays.values())) {
-            overlay.detach();
         }
         for (NativeBackInputMonitor monitor : new ArrayList<>(nativeInputMonitors.values())) {
             monitor.detach();
         }
-        overlays.clear();
         nativeInputMonitors.clear();
-        param.setSavedInstanceState(overlayState);
+        param.setSavedInstanceState(new Object[]{
+                inputState, Boolean.valueOf(savedMiuiOverviewVisible)
+        });
         return true;
     }
 
@@ -178,16 +156,15 @@ public final class MiuiBackGestureHook extends XposedModule {
     public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
         processName = param.getProcessName();
         int replaced = 0;
-        boolean hadApplyTransformHook = false;
         boolean hadBackWindowStartHook = false;
-        boolean hadSurfaceCreateLeashHook = false;
-        boolean hadPreviewHook = false;
         boolean hadPrepareTransitionHook = false;
-        boolean hadEnforceVisibleHook = false;
-        boolean hadActivityVisibilityHook = false;
-        boolean hadSurfaceTransactionLayerHook = false;
         boolean hadNavigationBarGestureInsetsHook = false;
         boolean hadBackNavigationDoneHook = false;
+        boolean hadMiuiHomeGestureStubLayoutHook = false;
+        boolean hadMiuiHomeGestureStubShowHook = false;
+        boolean hadMiuiHomeGestureStubTouchRegionHook = false;
+        boolean hadMiuiHomeRecentsStateHook = false;
+        boolean hadMiuiHomeTaskLaunchHook = false;
         boolean hadAnyServerHook = false;
         ClassLoader hotReloadClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
@@ -195,31 +172,29 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (oldHandle.getId() != null && oldHandle.getId().startsWith("server_")) {
                     hadAnyServerHook = true;
                 }
-                if ("cross_activity_applyTransform".equals(oldHandle.getId())) {
-                    hadApplyTransformHook = true;
-                } else if ("server_back_window_start_animation".equals(oldHandle.getId())) {
+                if ("server_back_window_start_animation".equals(oldHandle.getId())) {
                     hadBackWindowStartHook = true;
-                } else if ("server_surface_animator_create_leash".equals(oldHandle.getId())) {
-                    hadSurfaceCreateLeashHook = true;
-                } else if ("server_schedule_animation_apply_preview".equals(oldHandle.getId())) {
-                    hadPreviewHook = true;
                 } else if ("server_schedule_animation_prepare_transition".equals(
                         oldHandle.getId())) {
                     hadPrepareTransitionHook = true;
-                } else if ("server_window_container_enforce_surface_visible"
-                        .equals(oldHandle.getId())) {
-                    hadEnforceVisibleHook = true;
-                } else if ("server_activity_record_set_visibility".equals(oldHandle.getId())) {
-                    hadActivityVisibilityHook = true;
-                } else if (oldHandle.getId() != null
-                        && oldHandle.getId().startsWith("server_surface_transaction_")) {
-                    hadSurfaceTransactionLayerHook = true;
                 } else if ("systemui_navigation_bar_gesture_insets".equals(
                         oldHandle.getId())) {
                     hadNavigationBarGestureInsetsHook = true;
                 } else if ("server_back_navigation_done_cleanup".equals(
                         oldHandle.getId())) {
                     hadBackNavigationDoneHook = true;
+                } else if ("miui_home_gesture_stub_layout_params".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeGestureStubLayoutHook = true;
+                } else if ("miui_home_gesture_stub_show".equals(oldHandle.getId())) {
+                    hadMiuiHomeGestureStubShowHook = true;
+                } else if ("miui_home_gesture_stub_touch_region".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeGestureStubTouchRegionHook = true;
+                } else if ("miui_home_recents_actual_state_v2".equals(oldHandle.getId())) {
+                    hadMiuiHomeRecentsStateHook = true;
+                } else if ("miui_home_recents_task_launch".equals(oldHandle.getId())) {
+                    hadMiuiHomeTaskLaunchHook = true;
                 }
                 if (hotReloadClassLoader == null
                         && oldHandle.getExecutable() != null
@@ -238,7 +213,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.WARN, TAG, "Failed to replace old hook: " + oldHandle, throwable);
             }
         }
-        restoreHotReloadOverlays(param.getSavedInstanceState());
+        restoreHotReloadInput(param.getSavedInstanceState());
         boolean shouldInstallServerHooks = param.isSystemServer()
                 || "system".equals(processName)
                 || hadAnyServerHook;
@@ -246,44 +221,52 @@ public final class MiuiBackGestureHook extends XposedModule {
             installSystemServerHooks(null);
         }
         if (shouldInstallServerHooks
-                && (!hadBackWindowStartHook || !hadSurfaceCreateLeashHook || !hadPreviewHook
-                || !hadPrepareTransitionHook || !hadEnforceVisibleHook || !hadActivityVisibilityHook
-                || !hadSurfaceTransactionLayerHook || !hadBackNavigationDoneHook)) {
+                && (!hadBackWindowStartHook || !hadPrepareTransitionHook
+                || !hadBackNavigationDoneHook)) {
             ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
             if (serverClassLoader != null) {
                 if (!hadBackWindowStartHook) {
                     hookBackWindowStartAnimation(serverClassLoader);
                 }
-                if (!hadSurfaceCreateLeashHook) {
-                    hookSurfaceAnimatorCreateAnimationLeash(serverClassLoader);
-                }
-                if (!hadPreviewHook) {
-                    hookScheduleAnimationPreview(serverClassLoader);
-                }
                 if (!hadPrepareTransitionHook) {
                     hookScheduleAnimationPrepareTransition(serverClassLoader);
-                }
-                if (!hadEnforceVisibleHook) {
-                    hookWindowContainerEnforceSurfaceVisible(serverClassLoader);
-                }
-                if (!hadActivityVisibilityHook) {
-                    hookActivityRecordSetVisibility(serverClassLoader);
-                }
-                if (!hadSurfaceTransactionLayerHook) {
-                    hookSurfaceTransactionLayerDiagnostics(serverClassLoader);
                 }
                 if (!hadBackNavigationDoneHook) {
                     hookBackNavigationDoneCleanup(serverClassLoader);
                 }
             }
         }
-        if (SYSTEM_UI.equals(processName) && !hadApplyTransformHook
-                && hotReloadClassLoader != null) {
-            hookCrossActivityApplyTransformDiagnostics(hotReloadClassLoader);
-        }
         if (SYSTEM_UI.equals(processName) && !hadNavigationBarGestureInsetsHook
                 && hotReloadClassLoader != null) {
             hookNavigationBarGestureInsets(hotReloadClassLoader);
+        }
+        if (MIUI_HOME.equals(processName) && hotReloadClassLoader != null) {
+            try {
+                Class<?> gestureStubClass = Class.forName(MIUI_HOME_GESTURE_STUB, false,
+                        hotReloadClassLoader);
+                if (!hadMiuiHomeGestureStubLayoutHook) {
+                    hookMiuiHomeGestureStubLayoutParams(gestureStubClass);
+                }
+                if (!hadMiuiHomeGestureStubShowHook) {
+                    hookMiuiHomeGestureStubShow(gestureStubClass);
+                }
+                if (!hadMiuiHomeGestureStubTouchRegionHook) {
+                    hookMiuiHomeGestureStubTouchRegion(gestureStubClass);
+                }
+                if (!hadMiuiHomeRecentsStateHook) {
+                    Class<?> recentsContainerClass = Class.forName(
+                            MIUI_HOME_RECENTS_CONTAINER, false, hotReloadClassLoader);
+                    hookMiuiHomeRecentsActualState(recentsContainerClass);
+                }
+                if (!hadMiuiHomeTaskLaunchHook) {
+                    Class<?> taskViewClass = Class.forName(MIUI_HOME_TASK_VIEW, false,
+                            hotReloadClassLoader);
+                    hookMiuiHomeRecentsTaskLaunch(taskViewClass);
+                }
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to restore MiuiHome hooks",
+                        throwable);
+            }
         }
         log(Log.INFO, TAG, "Hot reloaded, build=" + BUILD_MARK
                 + ", process=" + processName
@@ -301,6 +284,31 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("systemui_navigation_bar_gesture_insets".equals(hookId)) {
             return this::restoreNavigationBarGestureInsets;
         }
+        if ("miui_home_gesture_stub_layout_params".equals(hookId)) {
+            return this::makeMiuiHomeGestureStubNotTouchable;
+        }
+        if ("miui_home_gesture_stub_show".equals(hookId)) {
+            return this::blockMiuiHomeGestureStubShow;
+        }
+        if ("miui_home_gesture_stub_touch_region".equals(hookId)) {
+            return this::emptyMiuiHomeGestureStubTouchRegion;
+        }
+        if ("miui_home_recents_actual_state".equals(hookId)) {
+            // v91/v92 hooked the background PowerKeeper notification lambda, which did not
+            // retain the RecentsContainer instance needed for native back dispatch.
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_recents_actual_state_v2".equals(hookId)) {
+            return this::mirrorMiuiHomeRecentsActualState;
+        }
+        if ("miui_home_recents_task_launch".equals(hookId)) {
+            return this::mirrorMiuiHomeRecentsTaskLaunch;
+        }
+        if (hookId.startsWith("miui_home_block_gesture_window_")) {
+            // v88 blocked BaseRecentsImpl.addBackStubWindow(), leaving its gesture-stub
+            // fields null and short-circuiting unrelated NavStubView visibility updates.
+            return XposedInterface.Chain::proceed;
+        }
         if (hookId.startsWith("miui_home_")
                 || "systemui_default_animation_reverse_frames".equals(hookId)) {
             // Retired experiments may still exist during API 102 hot reload. Replace them with
@@ -311,13 +319,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             return this::interceptPromoteToTaskFragmentIfNeeded;
         }
         if ("server_back_window_start_animation".equals(hookId)) {
-            return this::traceBackWindowStartAnimation;
-        }
-        if ("server_surface_animator_create_leash".equals(hookId)) {
-            return this::traceSurfaceAnimatorCreateLeash;
-        }
-        if ("server_schedule_animation_apply_preview".equals(hookId)) {
-            return this::traceScheduleAnimationPreview;
+            return this::prepareOpeningTaskFragment;
         }
         if ("server_schedule_animation_prepare_transition".equals(hookId)) {
             return this::interceptScheduleAnimationPrepareTransition;
@@ -325,49 +327,64 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("server_back_navigation_done_cleanup".equals(hookId)) {
             return this::cleanupSkippedRemoteAnimationOnNavigationDone;
         }
-        if ("server_window_container_enforce_surface_visible".equals(hookId)) {
-            return this::traceEnforceSurfaceVisible;
+        if (hookId.startsWith("server_security_sidebar_transient_bars_")) {
+            return this::interceptSecuritySidebarTransientBars;
         }
-        if ("server_activity_record_set_visibility".equals(hookId)) {
-            return this::traceActivityRecordSetVisibility;
+        if ("systemui_default_transition_start".equals(hookId)) {
+            return this::registerDefaultTransitionHandler;
         }
-        if (hookId != null && hookId.startsWith("server_surface_transaction_")) {
-            return this::traceSurfaceTransactionLayerCall;
+        if ("systemui_default_transition_merge".equals(hookId)) {
+            return this::trackMiuiOpenCloseMerge;
         }
-        if ("shell_back_registry_updateSupportedAnimators".equals(hookId)) {
-            return chain -> {
-                Object result = chain.proceed();
-                logRegistryState(chain.getThisObject(), "updateSupportedAnimators");
-                return result;
-            };
+        if ("systemui_back_send_event_guard".equals(hookId)) {
+            return this::guardDuplicateBackEvent;
         }
-        if (hookId.startsWith("systemui_") || hookId.startsWith("shell_back_")
-                || hookId.startsWith("cross_activity_")
-                || hookId.startsWith("default_cross_activity_")
-                || hookId.startsWith("custom_cross_activity_")) {
-            return chain -> traceHook(chain, hookId);
+        if ("systemui_edge_back_setBackAnimation".equals(hookId)) {
+            return this::onEdgeBackSetBackAnimation;
+        }
+        if ("systemui_edge_back_updateIsEnabled".equals(hookId)) {
+            return this::onEdgeBackUpdateIsEnabled;
+        }
+        if ("systemui_edge_back_onNavigationModeChanged".equals(hookId)) {
+            return this::onEdgeBackNavigationModeChanged;
+        }
+        if ("shell_back_onBackNavigationInfoReceived".equals(hookId)) {
+            return this::onBackNavigationInfoReceived;
+        }
+        if ("shell_back_onBackAnimationFinished".equals(hookId)
+                || "shell_back_finishBackAnimation".equals(hookId)) {
+            return this::onShellAnimationFinished;
         }
         return null;
     }
 
-    private void restoreHotReloadOverlays(Object savedState) {
-        if (!(savedState instanceof Object[][])) {
+    private void restoreHotReloadInput(Object savedState) {
+        Object inputStateObject = savedState;
+        if (savedState instanceof Object[]) {
+            Object[] state = (Object[]) savedState;
+            if (state.length == 2 && state[0] instanceof Object[][]
+                    && state[1] instanceof Boolean) {
+                inputStateObject = state[0];
+                miuiOverviewVisible = ((Boolean) state[1]).booleanValue();
+            }
+        }
+        if (!(inputStateObject instanceof Object[][])) {
             log(Log.INFO, TAG, "No hot reload back input state to restore");
             return;
         }
-        Object[][] overlayState = (Object[][]) savedState;
-        if (overlayState.length == 0) {
+        Object[][] inputState = (Object[][]) inputStateObject;
+        if (inputState.length == 0) {
             log(Log.INFO, TAG, "Hot reload back input state is empty; "
                     + "will restore from next EdgeBackGestureHandler callback");
             return;
         }
         new Handler(Looper.getMainLooper()).post(() -> {
             int restored = 0;
-            for (Object[] pair : overlayState) {
+            for (Object[] pair : inputState) {
                 if (pair == null || pair.length < 2) {
                     continue;
                 }
-                installBackInputOverlay(pair[0], pair[1]);
+                installBackInputDriver(pair[0], pair[1]);
                 restored++;
             }
             log(Log.INFO, TAG, "Restored hot reload back input on main thread, count="
@@ -382,8 +399,181 @@ public final class MiuiBackGestureHook extends XposedModule {
                 + ", classLoader=" + param.getDefaultClassLoader()
                 + ", sourceDir=" + param.getApplicationInfo().sourceDir);
         if (SYSTEM_UI.equals(processName)) {
-            systemUiClassLoader = param.getDefaultClassLoader();
-            installSystemUiHooks(systemUiClassLoader);
+            installSystemUiHooks(param.getDefaultClassLoader());
+        } else if (MIUI_HOME.equals(processName)) {
+            installMiuiHomeHooks(param.getDefaultClassLoader());
+        }
+    }
+
+    private void installMiuiHomeHooks(ClassLoader classLoader) {
+        try {
+            Class<?> gestureStubClass = Class.forName(MIUI_HOME_GESTURE_STUB, false,
+                    classLoader);
+            hookMiuiHomeGestureStubLayoutParams(gestureStubClass);
+            hookMiuiHomeGestureStubShow(gestureStubClass);
+            hookMiuiHomeGestureStubTouchRegion(gestureStubClass);
+            Class<?> recentsContainerClass = Class.forName(MIUI_HOME_RECENTS_CONTAINER, false,
+                    classLoader);
+            hookMiuiHomeRecentsActualState(recentsContainerClass);
+            Class<?> taskViewClass = Class.forName(MIUI_HOME_TASK_VIEW, false, classLoader);
+            hookMiuiHomeRecentsTaskLaunch(taskViewClass);
+            log(Log.INFO, TAG, "Disabled MiuiHome side back gesture input"
+                    + ", preservedGestureStubInitialization=true"
+                    + ", mirrorsActualRecentsState=true"
+                    + ", mirrorsTaskLaunchExit=true"
+                    + ", usesStandardLauncherBackCallback=true");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to block MiuiHome gesture windows", throwable);
+        }
+    }
+
+    private void hookMiuiHomeGestureStubLayoutParams(Class<?> gestureStubClass)
+            throws NoSuchMethodException {
+        Method method = gestureStubClass.getDeclaredMethod("getGestureStubWindowParam");
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_gesture_stub_layout_params")
+                .intercept(this::makeMiuiHomeGestureStubNotTouchable));
+    }
+
+    private void hookMiuiHomeGestureStubShow(Class<?> gestureStubClass)
+            throws NoSuchMethodException {
+        Method method = gestureStubClass.getDeclaredMethod("showGestureStub");
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_gesture_stub_show")
+                .intercept(this::blockMiuiHomeGestureStubShow));
+    }
+
+    private void hookMiuiHomeGestureStubTouchRegion(Class<?> gestureStubClass)
+            throws NoSuchMethodException {
+        for (Method method : gestureStubClass.getDeclaredMethods()) {
+            if (!"updateTouchRegion".equals(method.getName())
+                    || method.getParameterCount() != 1) {
+                continue;
+            }
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("miui_home_gesture_stub_touch_region")
+                    .intercept(this::emptyMiuiHomeGestureStubTouchRegion));
+            return;
+        }
+        throw new NoSuchMethodException(MIUI_HOME_GESTURE_STUB + ".updateTouchRegion/1");
+    }
+
+    private void hookMiuiHomeRecentsActualState(Class<?> recentsContainerClass)
+            throws NoSuchMethodException {
+        Method method = recentsContainerClass.getDeclaredMethod(
+                "notifyRecentTaskState", Context.class, boolean.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_recents_actual_state_v2")
+                .intercept(this::mirrorMiuiHomeRecentsActualState));
+    }
+
+    private void hookMiuiHomeRecentsTaskLaunch(Class<?> taskViewClass)
+            throws NoSuchMethodException {
+        Method method = taskViewClass.getDeclaredMethod("onClick", View.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_recents_task_launch")
+                .intercept(this::mirrorMiuiHomeRecentsTaskLaunch));
+    }
+
+    private Object mirrorMiuiHomeRecentsActualState(XposedInterface.Chain chain)
+            throws Throwable {
+        Object container = chain.getThisObject();
+        Object result = chain.proceed();
+        Object contextObject = chain.getArg(0);
+        boolean overviewVisible = Boolean.TRUE.equals(chain.getArg(1));
+        if (!(contextObject instanceof Context)) {
+            log(Log.WARN, TAG, "Cannot mirror MiuiHome Recents state: context="
+                    + shortObject(contextObject));
+            return result;
+        }
+        try {
+            Intent stateIntent = new Intent(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+            stateIntent.setPackage(SYSTEM_UI);
+            stateIntent.putExtra("overview_visible", overviewVisible);
+            ((Context) contextObject).getApplicationContext().sendBroadcast(stateIntent);
+            log(Log.INFO, TAG, "Mirrored MiuiHome actual Recents state"
+                    + ", overviewVisible=" + overviewVisible
+                    + ", container=" + shortObject(container));
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to mirror MiuiHome actual Recents state",
+                    throwable);
+        }
+        return result;
+    }
+
+    private Object mirrorMiuiHomeRecentsTaskLaunch(XposedInterface.Chain chain)
+            throws Throwable {
+        Object taskView = chain.getThisObject();
+        if (taskView instanceof View) {
+            try {
+                Intent stateIntent = new Intent(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+                stateIntent.setPackage(SYSTEM_UI);
+                stateIntent.putExtra("overview_visible", false);
+                stateIntent.putExtra("task_launch_started", true);
+                ((View) taskView).getContext().getApplicationContext()
+                        .sendBroadcast(stateIntent);
+                log(Log.INFO, TAG, "Mirrored MiuiHome Recents task launch start"
+                        + ", overviewVisible=false"
+                        + ", taskView=" + shortObject(taskView));
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to mirror MiuiHome Recents task launch start",
+                        throwable);
+            }
+        } else {
+            log(Log.WARN, TAG, "Cannot mirror MiuiHome task launch: taskView="
+                    + shortObject(taskView));
+        }
+        // Notify SystemUI before Xiaomi's original onClick() starts the task transition.
+        return chain.proceed();
+    }
+
+    private Object makeMiuiHomeGestureStubNotTouchable(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        if (result instanceof WindowManager.LayoutParams) {
+            WindowManager.LayoutParams layoutParams = (WindowManager.LayoutParams) result;
+            layoutParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        }
+        try {
+            writeField(chain.getThisObject(), "mTouchable", Boolean.FALSE);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to clear MiuiHome gesture-stub touch state",
+                    throwable);
+        }
+        return result;
+    }
+
+    private Object blockMiuiHomeGestureStubShow(XposedInterface.Chain chain) {
+        try {
+            writeField(chain.getThisObject(), "mTouchable", Boolean.FALSE);
+            Object view = chain.getThisObject();
+            if (view instanceof View) {
+                ((View) view).requestApplyInsets();
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to suppress MiuiHome gesture-stub show", throwable);
+        }
+        return null;
+    }
+
+    private Object emptyMiuiHomeGestureStubTouchRegion(XposedInterface.Chain chain)
+            throws Throwable {
+        Object insetsInfo = chain.getArg(0);
+        try {
+            invokeAnyMethod(insetsInfo, "setTouchableInsets",
+                    new Object[]{Integer.valueOf(3)});
+            invokeAnyMethod(insetsInfo, "setTouchableRegion",
+                    new Object[]{new Region()});
+            return null;
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to empty MiuiHome gesture-stub touch region",
+                    throwable);
+            return chain.proceed();
         }
     }
 
@@ -403,12 +593,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + BACK_NAVIGATION_CONTROLLER);
                 return;
             }
-            hookBackNavigationControllerDiagnostics(serverClassLoader);
-            hookBackNavigationMonitoringDiagnostics(serverClassLoader);
+            hookTaskFragmentPromotionCompatibility(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
-            hookTransitionOpenClosePairDiagnostics(serverClassLoader);
-            hookServerLeashDiagnostics(serverClassLoader);
+            hookBackWindowStartAnimation(serverClassLoader);
+            hookScheduleAnimationPrepareTransition(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
@@ -428,38 +617,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 int overload = hooked++;
                 recordHookHandle(hook(method)
                         .setId("server_security_sidebar_transient_bars_" + overload)
-                        .intercept(chain -> {
-                            if (isSidebarTransientGesture(chain.getThisObject())) {
-                                log(Log.INFO, TAG, "Blocked transient bars from sidebar bounds"
-                                        + ", overload=" + method.toGenericString());
-                                return null;
-                            }
-                            for (Object argument : chain.getArgs()) {
-                                if (argument == null) {
-                                    continue;
-                                }
-                                String lower = String.valueOf(argument).toLowerCase();
-                                if (!lower.contains("sidebar")
-                                        && !lower.contains("game")
-                                        && !lower.contains("toolbox")) {
-                                    continue;
-                                }
-                                String owner;
-                                try {
-                                    owner = String.valueOf(invokeAnyMethod(
-                                            argument, "getOwningPackage", new Object[0]));
-                                } catch (NoSuchMethodException ignored) {
-                                    continue;
-                                }
-                                if ("com.miui.securitycenter".equals(owner)) {
-                                    log(Log.INFO, TAG,
-                                            "Blocked transient bars from security sidebar"
-                                                    + ", target=" + shortObject(argument));
-                                    return null;
-                                }
-                            }
-                            return chain.proceed();
-                        }));
+                        .intercept(this::interceptSecuritySidebarTransientBars));
             }
             if (hooked == 0) {
                 log(Log.WARN, TAG, "DisplayPolicy.requestTransientBars not found");
@@ -469,6 +627,39 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook security-sidebar transient bars", throwable);
         }
+    }
+
+    private Object interceptSecuritySidebarTransientBars(XposedInterface.Chain chain)
+            throws Throwable {
+        if (isSidebarTransientGesture(chain.getThisObject())) {
+            log(Log.INFO, TAG, "Blocked transient bars from sidebar bounds"
+                    + ", overload=" + chain.getExecutable().toGenericString());
+            return null;
+        }
+        for (Object argument : chain.getArgs()) {
+            if (argument == null) {
+                continue;
+            }
+            String lower = String.valueOf(argument).toLowerCase();
+            if (!lower.contains("sidebar")
+                    && !lower.contains("game")
+                    && !lower.contains("toolbox")) {
+                continue;
+            }
+            String owner;
+            try {
+                owner = String.valueOf(invokeAnyMethod(
+                        argument, "getOwningPackage", new Object[0]));
+            } catch (NoSuchMethodException ignored) {
+                continue;
+            }
+            if ("com.miui.securitycenter".equals(owner)) {
+                log(Log.INFO, TAG, "Blocked transient bars from security sidebar"
+                        + ", target=" + shortObject(argument));
+                return null;
+            }
+        }
+        return chain.proceed();
     }
 
     private boolean isSidebarTransientGesture(Object displayPolicy) {
@@ -525,39 +716,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         return false;
     }
 
-    private void hookBackNavigationMonitoringDiagnostics(ClassLoader classLoader) {
-        try {
-            Class<?> controllerClass = Class.forName(BACK_NAVIGATION_CONTROLLER, false,
-                    classLoader);
-            Method monitoring = controllerClass.getDeclaredMethod("isMonitoringFinishTransition");
-            monitoring.setAccessible(true);
-            recordHookHandle(hook(monitoring)
-                    .setId("server_back_monitoring_finish_transition")
-                    .intercept(chain -> {
-                        Object result = chain.proceed();
-                        if (!Boolean.TRUE.equals(result)) {
-                            return result;
-                        }
-                        Object controller = chain.getThisObject();
-                        Object handler = readField(controller, "mAnimationHandler");
-                        Object monitor = readField(controller, "mNavigationMonitor");
-                        log(Log.WARN, TAG, "Back navigation blocked by unfinished transition"
-                                + ", composed=" + readField(handler, "mComposed")
-                                + ", prepareClose=" + shortObject(
-                                readField(handler, "mPrepareCloseTransition"))
-                                + ", openAdaptor=" + shortObject(
-                                readField(handler, "mOpenAnimAdaptor"))
-                                + ", navigationMonitor=" + shortObject(monitor)
-                                + ", monitorForRemote=" + invokeAnyMethod(
-                                monitor, "isMonitorForRemote", new Object[0]));
-                        return result;
-                    }));
-            log(Log.INFO, TAG, "Hooked BackNavigationController transition-monitor diagnostics");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook transition-monitor diagnostics", throwable);
-        }
-    }
-
     private ClassLoader findSystemServerClassLoader(ClassLoader preferred) {
         ClassLoader[] candidates = new ClassLoader[]{
                 preferred,
@@ -582,7 +740,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         return null;
     }
 
-    private void hookBackNavigationControllerDiagnostics(ClassLoader classLoader) {
+    private void hookTaskFragmentPromotionCompatibility(ClassLoader classLoader) {
         try {
             Class.forName(BACK_NAVIGATION_CONTROLLER, false, classLoader);
             Class<?> handlerClass = Class.forName(BACK_ANIMATION_HANDLER, false, classLoader);
@@ -604,7 +762,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     .intercept(this::interceptPromoteToTaskFragmentIfNeeded));
             log(Log.INFO, TAG, "Hooked BackNavigationController promoteToTFIfNeeded");
         } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook BackNavigationController diagnostics", throwable);
+            log(Log.ERROR, TAG, "Failed to hook TaskFragment promotion compatibility", throwable);
         }
     }
 
@@ -673,18 +831,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         return result;
     }
 
-    private void hookServerLeashDiagnostics(ClassLoader classLoader) {
-        hookBackWindowStartAnimation(classLoader);
-        hookScheduleAnimationPrepareTransition(classLoader);
-        if (ENABLE_VERBOSE_DIAGNOSTICS) {
-            hookSurfaceAnimatorCreateAnimationLeash(classLoader);
-            hookScheduleAnimationPreview(classLoader);
-            hookWindowContainerEnforceSurfaceVisible(classLoader);
-            hookActivityRecordSetVisibility(classLoader);
-            hookSurfaceTransactionLayerDiagnostics(classLoader);
-        }
-    }
-
     private void hookBackWindowStartAnimation(ClassLoader classLoader) {
         try {
             Class<?> adaptorClass = Class.forName(BACK_WINDOW_ANIMATION_ADAPTOR,
@@ -695,7 +841,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     method.setAccessible(true);
                     recordHookHandle(hook(method)
                             .setId("server_back_window_start_animation")
-                            .intercept(this::traceBackWindowStartAnimation));
+                            .intercept(this::prepareOpeningTaskFragment));
                     log(Log.INFO, TAG, "Hooked BackWindowAnimationAdaptor.startAnimation");
                     return;
                 }
@@ -703,48 +849,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.WARN, TAG, "BackWindowAnimationAdaptor.startAnimation not found");
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to hook BackWindowAnimationAdaptor.startAnimation",
-                    throwable);
-        }
-    }
-
-    private void hookSurfaceAnimatorCreateAnimationLeash(ClassLoader classLoader) {
-        try {
-            Class<?> surfaceAnimatorClass = Class.forName(SURFACE_ANIMATOR, false, classLoader);
-            for (Method method : surfaceAnimatorClass.getDeclaredMethods()) {
-                if ("createAnimationLeash".equals(method.getName())
-                        && method.getParameterCount() == 10) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_surface_animator_create_leash")
-                            .intercept(this::traceSurfaceAnimatorCreateLeash));
-                    log(Log.INFO, TAG, "Hooked SurfaceAnimator.createAnimationLeash");
-                    return;
-                }
-            }
-            log(Log.WARN, TAG, "SurfaceAnimator.createAnimationLeash not found");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook SurfaceAnimator.createAnimationLeash",
-                    throwable);
-        }
-    }
-
-    private void hookScheduleAnimationPreview(ClassLoader classLoader) {
-        try {
-            Class<?> builderClass = Class.forName(SCHEDULE_ANIMATION_BUILDER, false,
-                    classLoader);
-            for (Method method : builderClass.getDeclaredMethods()) {
-                if ("applyPreviewStrategy".equals(method.getName())) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_schedule_animation_apply_preview")
-                            .intercept(this::traceScheduleAnimationPreview));
-                    log(Log.INFO, TAG, "Hooked ScheduleAnimationBuilder.applyPreviewStrategy");
-                    return;
-                }
-            }
-            log(Log.WARN, TAG, "ScheduleAnimationBuilder.applyPreviewStrategy not found");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook ScheduleAnimationBuilder.applyPreviewStrategy",
                     throwable);
         }
     }
@@ -770,117 +874,19 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private void hookWindowContainerEnforceSurfaceVisible(ClassLoader classLoader) {
-        try {
-            Class<?> windowContainerClass = Class.forName(WINDOW_CONTAINER, false, classLoader);
-            for (Method method : windowContainerClass.getDeclaredMethods()) {
-                if ("enforceSurfaceVisible".equals(method.getName())
-                        && method.getParameterCount() == 1) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_window_container_enforce_surface_visible")
-                            .intercept(this::traceEnforceSurfaceVisible));
-                    log(Log.INFO, TAG, "Hooked WindowContainer.enforceSurfaceVisible");
-                    return;
-                }
-            }
-            log(Log.WARN, TAG, "WindowContainer.enforceSurfaceVisible not found");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook WindowContainer.enforceSurfaceVisible",
-                    throwable);
-        }
-    }
-
-    private void hookActivityRecordSetVisibility(ClassLoader classLoader) {
-        try {
-            Class<?> activityRecordClass = Class.forName(ACTIVITY_RECORD, false, classLoader);
-            for (Method method : activityRecordClass.getDeclaredMethods()) {
-                if ("setVisibility".equals(method.getName())
-                        && method.getParameterCount() == 1
-                        && method.getParameterTypes()[0] == boolean.class) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_activity_record_set_visibility")
-                            .intercept(this::traceActivityRecordSetVisibility));
-                    log(Log.INFO, TAG, "Hooked ActivityRecord.setVisibility(boolean)");
-                    return;
-                }
-            }
-            log(Log.WARN, TAG, "ActivityRecord.setVisibility(boolean) not found");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook ActivityRecord.setVisibility(boolean)",
-                    throwable);
-        }
-    }
-
-    private void hookSurfaceTransactionLayerDiagnostics(ClassLoader classLoader) {
-        try {
-            Class<?> transactionClass = Class.forName(SURFACE_CONTROL_TRANSACTION, false,
-                    classLoader);
-            int count = 0;
-            for (Method method : transactionClass.getDeclaredMethods()) {
-                String name = method.getName();
-                if (("setLayer".equals(name) && method.getParameterCount() == 2)
-                        || ("setRelativeLayer".equals(name) && method.getParameterCount() == 3)
-                        || ("reparent".equals(name) && method.getParameterCount() == 2)
-                        || ("show".equals(name) && method.getParameterCount() == 1)
-                        || ("hide".equals(name) && method.getParameterCount() == 1)
-                        || ("setAlpha".equals(name) && method.getParameterCount() == 2)) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("server_surface_transaction_" + name + "_"
-                                    + method.getParameterCount())
-                            .intercept(this::traceSurfaceTransactionLayerCall));
-                    count++;
-                }
-            }
-            log(Log.INFO, TAG, "Hooked SurfaceControl.Transaction layer diagnostics"
-                    + ", count=" + count);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook SurfaceControl.Transaction layer diagnostics",
-                    throwable);
-        }
-    }
-
-    private Object traceBackWindowStartAnimation(XposedInterface.Chain chain) throws Throwable {
-        markPredictiveBackServerTrace();
+    private Object prepareOpeningTaskFragment(XposedInterface.Chain chain) throws Throwable {
         Object adaptor = chain.getThisObject();
         try {
             Object target = readField(adaptor, "mTarget");
             Object isOpen = readField(adaptor, "mIsOpen");
-            Object switchType = readField(adaptor, "mSwitchType");
-            Object animationLeash = chain.getArg(0);
             Object transaction = chain.getArg(1);
-            Object type = chain.getArg(2);
-            log(Log.INFO, TAG, "BackWindowAnimationAdaptor.startAnimation before"
-                    + ", target=" + shortObject(target)
-                    + ", isOpen=" + isOpen
-                    + ", switchType=" + switchType
-                    + ", animationLeashArg=" + shortObject(animationLeash)
-                    + ", type=" + type
-                    + ", targetSurface=" + describeSurfaceFromTarget(target)
-                    + ", leashParent=" + describeAnimationLeashParent(target));
             if (Boolean.TRUE.equals(isOpen) && transaction instanceof SurfaceControl.Transaction) {
                 ensureOpenTaskFragmentVisible(target, (SurfaceControl.Transaction) transaction);
             }
         } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to trace BackWindow startAnimation before", throwable);
+            log(Log.WARN, TAG, "Failed to prepare opening TaskFragment", throwable);
         }
-        Object result = chain.proceed();
-        try {
-            Object target = readField(adaptor, "mTarget");
-            Object isOpen = readField(adaptor, "mIsOpen");
-            Object capturedLeash = readField(adaptor, "mCapturedLeash");
-            Object animationTarget = readField(adaptor, "mAnimationTarget");
-            log(Log.INFO, TAG, "BackWindowAnimationAdaptor.startAnimation after"
-                    + ", target=" + shortObject(target)
-                    + ", isOpen=" + isOpen
-                    + ", capturedLeash=" + shortObject(capturedLeash)
-                    + ", remoteTarget=" + describeRemoteTarget(animationTarget));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to trace BackWindow startAnimation after", throwable);
-        }
-        return result;
+        return chain.proceed();
     }
 
     private void ensureOpenTaskFragmentVisible(Object target, SurfaceControl.Transaction transaction) {
@@ -920,203 +926,37 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private Object traceScheduleAnimationPreview(XposedInterface.Chain chain) throws Throwable {
-        markPredictiveBackServerTrace();
-        Object builder = chain.getThisObject();
-        try {
-            log(Log.INFO, TAG, "ScheduleAnimationBuilder.applyPreviewStrategy before"
-                    + ", builder=" + shortObject(builder)
-                    + ", close=" + shortObject(readFieldOrNull(builder, "mCloseActivity"))
-                    + ", open=" + describeArray(readFieldOrNull(builder, "mOpenActivities"))
-                    + ", isLaunchBehind=" + readFieldOrNull(builder, "mIsLaunchBehind")
-                    + ", showWindowlessSurface="
-                    + readFieldOrNull(builder, "mShowWindowlessSurface")
-                    + ", openAdaptors="
-                    + describeArray(readFieldOrNull(builder, "mOpenAnimationAdaptors")));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to trace applyPreviewStrategy before", throwable);
-        }
-        Object result = chain.proceed();
-        try {
-            log(Log.INFO, TAG, "ScheduleAnimationBuilder.applyPreviewStrategy after"
-                    + ", builder=" + shortObject(builder)
-                    + ", result=" + shortObject(result));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to trace applyPreviewStrategy after", throwable);
-        }
-        return result;
-    }
-
     private Object interceptScheduleAnimationPrepareTransition(XposedInterface.Chain chain)
             throws Throwable {
-        markPredictiveBackServerTrace();
         ClassLoader loader = chain.getExecutable().getDeclaringClass().getClassLoader();
         boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, true);
         if (unify) {
             log(Log.INFO, TAG, "Skipped ScheduleAnimationBuilder.prepareTransitionIfNeeded"
                     + " to avoid Xiaomi unified-transition leash reparenting"
                     + ", unifyBackNavigationTransition=true"
-                    + ", builder=" + shortObject(chain.getThisObject())
-                    + ", args=" + describeArgs(chain));
+                    + ", builder=" + shortObject(chain.getThisObject()));
             return null;
         }
         log(Log.INFO, TAG, "Allowing ScheduleAnimationBuilder.prepareTransitionIfNeeded"
                 + ", unifyBackNavigationTransition=false"
-                + ", path=Xiaomi/AOSP setLaunchBehind"
-                + ", args=" + describeArgs(chain));
+                + ", path=Xiaomi/AOSP setLaunchBehind");
         return chain.proceed();
-    }
-
-    private Object traceEnforceSurfaceVisible(XposedInterface.Chain chain) throws Throwable {
-        Object target = chain.getArg(0);
-        if (isRecentPredictiveBackServerTrace()) {
-            log(Log.INFO, TAG, "WindowContainer.enforceSurfaceVisible before"
-                    + ", target=" + shortObject(target)
-                    + ", surface=" + describeSurfaceFromTarget(target)
-                    + ", leashParent=" + describeAnimationLeashParent(target));
-        }
-        Object result = chain.proceed();
-        if (isRecentPredictiveBackServerTrace()) {
-            log(Log.INFO, TAG, "WindowContainer.enforceSurfaceVisible after"
-                    + ", target=" + shortObject(target)
-                    + ", surface=" + describeSurfaceFromTarget(target)
-                    + ", leashParent=" + describeAnimationLeashParent(target)
-                    + ", result=" + shortObject(result));
-        }
-        return result;
-    }
-
-    private Object traceActivityRecordSetVisibility(XposedInterface.Chain chain)
-            throws Throwable {
-        Object activity = chain.getThisObject();
-        Object visible = chain.getArg(0);
-        if (isRecentPredictiveBackServerTrace()) {
-            log(Log.INFO, TAG, "ActivityRecord.setVisibility before"
-                    + ", activity=" + shortObject(activity)
-                    + ", visible=" + visible
-                    + ", surface=" + describeSurfaceFromTarget(activity)
-                    + ", leashParent=" + describeAnimationLeashParent(activity));
-        }
-        Object result = chain.proceed();
-        if (isRecentPredictiveBackServerTrace()) {
-            log(Log.INFO, TAG, "ActivityRecord.setVisibility after"
-                    + ", activity=" + shortObject(activity)
-                    + ", visible=" + visible
-                    + ", surface=" + describeSurfaceFromTarget(activity)
-                    + ", leashParent=" + describeAnimationLeashParent(activity)
-                    + ", result=" + shortObject(result));
-        }
-        return result;
-    }
-
-    private Object traceSurfaceTransactionLayerCall(XposedInterface.Chain chain)
-            throws Throwable {
-        if (!ENABLE_VERBOSE_DIAGNOSTICS) {
-            return chain.proceed();
-        }
-        if (!isRecentPredictiveBackServerTrace()
-                || !isInterestingSurfaceTransaction(chain.getArgs())) {
-            return chain.proceed();
-        }
-        log(Log.INFO, TAG, "SurfaceTransaction." + chain.getExecutable().getName()
-                + ", args=" + describeObjectList(chain.getArgs()));
-        return chain.proceed();
-    }
-
-    private boolean isInterestingSurfaceTransaction(List<Object> args) {
-        for (Object arg : args) {
-            if (arg instanceof SurfaceControl) {
-                String value = String.valueOf(arg);
-                if (value.contains("predict_back")
-                        || value.contains("animation-leash")
-                        || value.contains("ActivityRecord")
-                        || value.contains("TaskFragment")
-                        || value.contains("Task=")) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private Object traceSurfaceAnimatorCreateLeash(XposedInterface.Chain chain)
-            throws Throwable {
-        Object type = chain.getArg(3);
-        boolean predictiveBack = type instanceof Integer && ((Integer) type).intValue() == 256;
-        if (!predictiveBack) {
-            return chain.proceed();
-        }
-        markPredictiveBackServerTrace();
-        Object animatable = chain.getArg(0);
-        Object surface = chain.getArg(1);
-        Object hidden = chain.getArg(8);
-        log(Log.INFO, TAG, "SurfaceAnimator.createAnimationLeash before"
-                + ", animatable=" + shortObject(animatable)
-                + ", surfaceArg=" + shortObject(surface)
-                + ", type=" + type
-                + ", hidden=" + hidden
-                + ", animatableSurface=" + describeSurfaceFromTarget(animatable)
-                + ", leashParent=" + describeAnimationLeashParent(animatable));
-        Object result = chain.proceed();
-        log(Log.INFO, TAG, "SurfaceAnimator.createAnimationLeash after"
-                + ", animatable=" + shortObject(animatable)
-                + ", resultLeash=" + shortObject(result));
-        return result;
-    }
-
-    private String describeSurfaceFromTarget(Object target) {
-        if (target == null) {
-            return "null";
-        }
-        try {
-            return shortObject(invokeAnyMethod(target, "getSurfaceControl", new Object[0]));
-        } catch (Throwable throwable) {
-            return "error:" + throwable.getClass().getSimpleName();
-        }
-    }
-
-    private String describeAnimationLeashParent(Object target) {
-        if (target == null) {
-            return "null";
-        }
-        try {
-            return shortObject(invokeAnyMethod(target, "getAnimationLeashParent",
-                    new Object[0]));
-        } catch (Throwable throwable) {
-            return "error:" + throwable.getClass().getSimpleName();
-        }
-    }
-
-    private void markPredictiveBackServerTrace() {
-        lastPredictiveBackServerTraceUptime = SystemClock.uptimeMillis();
-    }
-
-    private boolean isRecentPredictiveBackServerTrace() {
-        long last = lastPredictiveBackServerTraceUptime;
-        return last != 0 && SystemClock.uptimeMillis() - last < 5000;
     }
 
     private Object interceptPromoteToTaskFragmentIfNeeded(XposedInterface.Chain chain)
             throws Throwable {
         Object close = chain.getArg(0);
         Object open = chain.getArg(1);
-        markPredictiveBackServerTrace();
         boolean migrate = readWindowFlag("migratePredictiveBackTransition",
                 chain.getExecutable().getDeclaringClass().getClassLoader(), false);
-        log(Log.INFO, TAG, "BackNavigationController.promoteToTFIfNeeded before"
-                + ", migratePredictiveBackTransition=" + migrate
-                + ", close=" + shortObject(close)
-                + ", open=" + describeArray(open));
         if (!migrate) {
             Pair<Object, Object> result = new Pair<>(close, open);
             log(Log.INFO, TAG, "Bypassed TaskFragment promotion for predictive back"
-                    + ", result=" + shortObject(result));
+                    + ", close=" + shortObject(close)
+                    + ", open=" + shortObject(open));
             return result;
         }
-        Object result = chain.proceed();
-        log(Log.INFO, TAG, "BackNavigationController.promoteToTFIfNeeded after"
-                + ", result=" + shortObject(result));
-        return result;
+        return chain.proceed();
     }
 
     private boolean readWindowFlag(String methodName, ClassLoader preferredLoader,
@@ -1150,7 +990,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private void installSystemUiHooks(ClassLoader classLoader) {
         try {
             hookMiuiOverviewProxy(classLoader);
-            hookLauncherProxyService(classLoader);
             hookEdgeBackGestureHandler(classLoader);
             hookNavigationBarGestureInsets(classLoader);
             hookShellBackAnimation(classLoader);
@@ -1161,62 +1000,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install SystemUI hooks", throwable);
-        }
-    }
-
-    private void hookTransitionOpenClosePairDiagnostics(ClassLoader classLoader) {
-        try {
-            Class<?> implementationClass = Class.forName(TRANSITION_CONTROLLER_IMPL, false,
-                    classLoader);
-            Method pairMethod = null;
-            for (Method method : implementationClass.getDeclaredMethods()) {
-                if ("isPairOpenAndClose".equals(method.getName())
-                        && method.getParameterCount() == 2) {
-                    pairMethod = method;
-                    break;
-                }
-            }
-            if (pairMethod == null) {
-                throw new NoSuchMethodException(TRANSITION_CONTROLLER_IMPL
-                        + ".isPairOpenAndClose/2");
-            }
-            pairMethod.setAccessible(true);
-            recordHookHandle(hook(pairMethod)
-                    .setId("server_transition_open_close_pair")
-                    .intercept(chain -> {
-                        Object running = chain.getArg(0);
-                        Object incoming = chain.getArg(1);
-                        Object result = chain.proceed();
-                        log(Log.INFO, TAG, "TransitionControllerImpl.isPairOpenAndClose"
-                                + ", running=" + describeServerTransition(running)
-                                + ", incoming=" + describeServerTransition(incoming)
-                                + ", result=" + shortObject(result));
-                        return result;
-                    }));
-            log(Log.INFO, TAG, "Hooked TransitionControllerImpl.isPairOpenAndClose");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG,
-                    "Failed to hook TransitionControllerImpl.isPairOpenAndClose", throwable);
-        }
-    }
-
-    private String describeServerTransition(Object transition) {
-        if (transition == null) {
-            return "null";
-        }
-        try {
-            Object type = readField(transition, "mType");
-            Object syncId = readField(transition, "mSyncId");
-            Object targets = readField(transition, "mTargets");
-            int targetCount = targets instanceof List ? ((List<?>) targets).size() : -1;
-            return "{type=" + shortObject(type)
-                    + ",syncId=" + shortObject(syncId)
-                    + ",targetCount=" + targetCount
-                    + ",targets=" + shortObject(targets) + "}";
-        } catch (Throwable throwable) {
-            return "{object=" + shortObject(transition)
-                    + ",error=" + throwable.getClass().getSimpleName()
-                    + ": " + throwable.getMessage() + "}";
         }
     }
 
@@ -1254,27 +1037,17 @@ public final class MiuiBackGestureHook extends XposedModule {
             startAnimation.setAccessible(true);
             recordHookHandle(hook(startAnimation)
                     .setId("systemui_default_transition_start")
-                    .intercept(chain -> {
-                        Object handler = chain.getThisObject();
-                        Object token = chain.getArg(0);
-                        Object info = chain.getArg(1);
-                        defaultTransitionHandlers.put(handler, Boolean.TRUE);
-                        log(Log.INFO, TAG, "DefaultTransitionHandler.startAnimation before"
-                                + ", token=" + shortObject(token)
-                                + ", type=" + readTransitionType(info)
-                                + ", debugId=" + readTransitionDebugId(info)
-                                + ", state=" + describeDefaultTransitionState(handler, token));
-                        Object result = chain.proceed();
-                        log(Log.INFO, TAG, "DefaultTransitionHandler.startAnimation after"
-                                + ", token=" + shortObject(token)
-                                + ", result=" + shortObject(result)
-                                + ", state=" + describeDefaultTransitionState(handler, token));
-                        return result;
-                    }));
+                    .intercept(this::registerDefaultTransitionHandler));
             log(Log.INFO, TAG, "Hooked DefaultTransitionHandler.startAnimation");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook DefaultTransitionHandler", throwable);
         }
+    }
+
+    private Object registerDefaultTransitionHandler(XposedInterface.Chain chain)
+            throws Throwable {
+        defaultTransitionHandlers.put(chain.getThisObject(), Boolean.TRUE);
+        return chain.proceed();
     }
 
     private void hookDefaultTransitionImplMerge(ClassLoader classLoader) {
@@ -1282,14 +1055,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             Class<?> implementationClass = Class.forName(DEFAULT_TRANSITION_IMPL, false,
                     classLoader);
             Method mergeAnimation = null;
-            Method reverseRunnable = null;
             for (Method method : implementationClass.getDeclaredMethods()) {
                 if ("mergeAnimation".equals(method.getName())
                         && method.getParameterCount() == 8) {
                     mergeAnimation = method;
-                } else if ("lambda$mergeAnimation$4".equals(method.getName())
-                        && method.getParameterCount() == 6) {
-                    reverseRunnable = method;
                 }
             }
             if (mergeAnimation == null) {
@@ -1299,54 +1068,21 @@ public final class MiuiBackGestureHook extends XposedModule {
             mergeAnimation.setAccessible(true);
             recordHookHandle(hook(mergeAnimation)
                     .setId("systemui_default_transition_merge")
-                    .intercept(chain -> {
-                        Object incomingInfo = chain.getArg(3);
-                        Object animators = chain.getArg(4);
-                        Object runningInfo = chain.getArg(5);
-                        log(Log.INFO, TAG, "DefaultTransitionImpl.mergeAnimation before"
-                                + ", runningType=" + readTransitionType(runningInfo)
-                                + ", runningDebugId=" + readTransitionDebugId(runningInfo)
-                                + ", incomingType=" + readTransitionType(incomingInfo)
-                                + ", incomingDebugId=" + readTransitionDebugId(incomingInfo)
-                                + ", interruptedSyncId="
-                                + readInAppInterruptedSyncId(incomingInfo)
-                                + ", animators=" + describeAnimatorList(animators));
-                        Object result = chain.proceed();
-                        if (Boolean.TRUE.equals(result)) {
-                            lastMiuiTransitionReverseUptime = SystemClock.uptimeMillis();
-                            suppressDuplicateBackUntilUptime =
-                                    lastMiuiTransitionReverseUptime + 700L;
-                        }
-                        log(Log.INFO, TAG, "DefaultTransitionImpl.mergeAnimation after"
-                                + ", runningDebugId=" + readTransitionDebugId(runningInfo)
-                                + ", incomingDebugId=" + readTransitionDebugId(incomingInfo)
-                                + ", result=" + shortObject(result)
-                                + ", animators=" + describeAnimatorList(animators));
-                        return result;
-                    }));
+                    .intercept(this::trackMiuiOpenCloseMerge));
             log(Log.INFO, TAG, "Hooked DefaultTransitionImpl.mergeAnimation");
-            if (reverseRunnable == null) {
-                throw new NoSuchMethodException(DEFAULT_TRANSITION_IMPL
-                        + ".lambda$mergeAnimation$4/6");
-            }
-            reverseRunnable.setAccessible(true);
-            recordHookHandle(hook(reverseRunnable)
-                    .setId("systemui_default_transition_reverse_execution")
-                    .intercept(chain -> {
-                        Object animator = chain.getArg(2);
-                        log(Log.INFO, TAG, "DefaultTransitionImpl reverse task before"
-                                + ", animator=" + describeAnimatorDeep(animator));
-                        Object result = chain.proceed();
-                        log(Log.INFO, TAG, "DefaultTransitionImpl reverse task after"
-                                + ", animator=" + describeAnimatorDeep(animator));
-                        return result;
-                    }));
-            log(Log.INFO, TAG,
-                    "Hooked DefaultTransitionImpl.lambda$mergeAnimation$4");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook DefaultTransitionImpl.mergeAnimation",
                     throwable);
         }
+    }
+
+    private Object trackMiuiOpenCloseMerge(XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        if (Boolean.TRUE.equals(result)) {
+            suppressDuplicateBackUntilUptime = SystemClock.uptimeMillis() + 700L;
+            log(Log.INFO, TAG, "Tracked Xiaomi OPEN/CLOSE reverse merge");
+        }
+        return result;
     }
 
     private void hookBackAnimationSendBackEvent(ClassLoader classLoader) {
@@ -1358,26 +1094,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             sendBackEvent.setAccessible(true);
             recordHookHandle(hook(sendBackEvent)
                     .setId("systemui_back_send_event_guard")
-                    .intercept(chain -> {
-                        int action = ((Number) chain.getArg(0)).intValue();
-                        boolean moduleInjection = Boolean.TRUE.equals(
-                                moduleLegacyBackInjection.get());
-                        long remaining = suppressDuplicateBackUntilUptime
-                                - SystemClock.uptimeMillis();
-                        if (!moduleInjection && remaining > 0) {
-                            log(Log.WARN, TAG,
-                                    "Suppressed duplicate Shell BACK during MIUI reverse"
-                                            + ", action=" + action
-                                            + ", remaining=" + remaining
-                                            + ", controller="
-                                            + shortObject(chain.getThisObject()));
-                            return null;
-                        }
-                        log(Log.INFO, TAG, "BackAnimationController.sendBackEvent"
-                                + ", action=" + action
-                                + ", moduleLegacyInjection=" + moduleInjection);
-                        return chain.proceed();
-                    }));
+                    .intercept(this::guardDuplicateBackEvent));
             log(Log.INFO, TAG, "Hooked BackAnimationController.sendBackEvent guard");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
@@ -1385,246 +1102,16 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private String readFieldSafely(Object object, String fieldName) {
-        return shortObject(readFieldSafelyRaw(object, fieldName));
-    }
-
-    private Object readFieldSafelyRaw(Object object, String fieldName) {
-        try {
-            return readField(object, fieldName);
-        } catch (Throwable throwable) {
-            return "<" + throwable.getClass().getSimpleName() + ">";
+    private Object guardDuplicateBackEvent(XposedInterface.Chain chain) throws Throwable {
+        int action = ((Number) chain.getArg(0)).intValue();
+        boolean moduleInjection = Boolean.TRUE.equals(moduleLegacyBackInjection.get());
+        long remaining = suppressDuplicateBackUntilUptime - SystemClock.uptimeMillis();
+        if (!moduleInjection && remaining > 0) {
+            log(Log.WARN, TAG, "Suppressed duplicate Shell BACK during MIUI reverse"
+                    + ", action=" + action + ", remaining=" + remaining);
+            return null;
         }
-    }
-
-    private String describeAnimatorDeep(Object animator) {
-        if (animator == null) {
-            return "null";
-        }
-        StringBuilder description = new StringBuilder("{")
-                .append(animator.getClass().getName());
-        appendAnimatorValue(description, animator, "isStarted");
-        appendAnimatorValue(description, animator, "isRunning");
-        appendAnimatorValue(description, animator, "getCurrentPlayTime");
-        appendAnimatorValue(description, animator, "getDuration");
-        appendAnimatorValue(description, animator, "getStartDelay");
-        try {
-            Object listeners = readField(animator, "mUpdateListeners");
-            description.append(",updateListeners=");
-            if (listeners instanceof Iterable) {
-                description.append('[');
-                boolean firstListener = true;
-                for (Object listener : (Iterable<?>) listeners) {
-                    if (!firstListener) {
-                        description.append(';');
-                    }
-                    firstListener = false;
-                    description.append(describeCapturedObject(listener));
-                }
-                description.append(']');
-            } else {
-                description.append(shortObject(listeners));
-            }
-        } catch (Throwable throwable) {
-            description.append(",updateListenersError=")
-                    .append(throwable.getClass().getSimpleName());
-        }
-        return description.append('}').toString();
-    }
-
-    private void appendAnimatorValue(StringBuilder description, Object animator,
-            String methodName) {
-        try {
-            description.append(',').append(methodName).append('=')
-                    .append(shortObject(invokeAnyMethod(animator, methodName,
-                            new Object[0])));
-        } catch (Throwable throwable) {
-            description.append(',').append(methodName).append("=<")
-                    .append(throwable.getClass().getSimpleName()).append('>');
-        }
-    }
-
-    private String describeCapturedObject(Object object) {
-        if (object == null) {
-            return "null";
-        }
-        if (object.getClass().getName().contains("DefaultAnimationAdapter")) {
-            return describeDefaultAnimationAdapter(object);
-        }
-        StringBuilder description = new StringBuilder(object.getClass().getName())
-                .append('(');
-        boolean first = true;
-        for (Field field : object.getClass().getDeclaredFields()) {
-            if (!field.isSynthetic() && !field.getName().startsWith("f$")) {
-                continue;
-            }
-            try {
-                field.setAccessible(true);
-                if (!first) {
-                    description.append(',');
-                }
-                first = false;
-                description.append(field.getName()).append('=')
-                        .append(shortObject(field.get(object)));
-            } catch (Throwable ignored) {
-            }
-        }
-        return description.append(')').toString();
-    }
-
-    private String describeDefaultAnimationAdapter(Object adapter) {
-        StringBuilder description = new StringBuilder(adapter.getClass().getName())
-                .append('(');
-        appendReflectedField(description, adapter, "mLeash");
-        appendReflectedField(description, adapter, "mAnim");
-        appendReflectedField(description, adapter, "mPosition");
-        appendReflectedField(description, adapter, "mClipRect");
-        appendReflectedField(description, adapter, "mAnimClipRect");
-        appendReflectedField(description, adapter, "mCornerRadius");
-        appendReflectedField(description, adapter, "mWindowBottom");
-        try {
-            Object animation = readField(adapter, "mAnim");
-            description.append(",animation=").append(describeViewAnimation(animation));
-        } catch (Throwable throwable) {
-            description.append(",animationError=")
-                    .append(throwable.getClass().getSimpleName());
-        }
-        return description.append(')').toString();
-    }
-
-    private void appendReflectedField(StringBuilder description, Object object,
-            String fieldName) {
-        try {
-            if (description.charAt(description.length() - 1) != '(') {
-                description.append(',');
-            }
-            description.append(fieldName).append('=')
-                    .append(shortObject(readField(object, fieldName)));
-        } catch (Throwable throwable) {
-            description.append(',').append(fieldName).append("=<")
-                    .append(throwable.getClass().getSimpleName()).append('>');
-        }
-    }
-
-    private String describeViewAnimation(Object animation) {
-        if (animation == null) {
-            return "null";
-        }
-        StringBuilder description = new StringBuilder(animation.getClass().getName());
-        try {
-            description.append("{duration=")
-                    .append(shortObject(invokeAnyMethod(animation, "getDuration",
-                            new Object[0])))
-                    .append(",startOffset=")
-                    .append(shortObject(invokeAnyMethod(animation, "getStartOffset",
-                            new Object[0])));
-            Object children = invokeAnyMethod(animation, "getAnimations", new Object[0]);
-            if (children instanceof Iterable) {
-                description.append(",children=[");
-                boolean first = true;
-                for (Object child : (Iterable<?>) children) {
-                    if (!first) {
-                        description.append(';');
-                    }
-                    first = false;
-                    description.append(describeViewAnimation(child));
-                }
-                description.append(']');
-            }
-            description.append('}');
-        } catch (Throwable ignored) {
-            description.append('{').append(shortObject(animation)).append('}');
-        }
-        return description.toString();
-    }
-
-    private int readInAppInterruptedSyncId(Object info) {
-        try {
-            Object miuiInfo = info == null ? null
-                    : invokeAnyMethod(info, "getMiuiTransitionInfo", new Object[0]);
-            Object value = miuiInfo == null ? null
-                    : invokeAnyMethod(miuiInfo, "getInAppInterruptedSyncId", new Object[0]);
-            return value instanceof Number ? ((Number) value).intValue() : -1;
-        } catch (Throwable ignored) {
-            return -1;
-        }
-    }
-
-    private int readTransitionType(Object info) {
-        try {
-            Object value = info == null ? null
-                    : invokeAnyMethod(info, "getType", new Object[0]);
-            return value instanceof Number ? ((Number) value).intValue() : -1;
-        } catch (Throwable ignored) {
-            return -1;
-        }
-    }
-
-    private int readTransitionDebugId(Object info) {
-        try {
-            Object value = info == null ? null
-                    : invokeAnyMethod(info, "getDebugId", new Object[0]);
-            return value instanceof Number ? ((Number) value).intValue() : -1;
-        } catch (Throwable ignored) {
-            return -1;
-        }
-    }
-
-    private String describeDefaultTransitionState(Object handler, Object focusToken) {
-        try {
-            Object transitionsObject = readField(handler, "mTransitions");
-            Object animationsObject = readField(handler, "mAnimations");
-            if (!(transitionsObject instanceof Map) || !(animationsObject instanceof Map)) {
-                return "unsupported{transitions=" + shortObject(transitionsObject)
-                        + ", animations=" + shortObject(animationsObject) + "}";
-            }
-            Map<?, ?> transitions = (Map<?, ?>) transitionsObject;
-            Map<?, ?> animations = (Map<?, ?>) animationsObject;
-            StringBuilder state = new StringBuilder("maps{transitions=")
-                    .append(transitions.size()).append(", animations=")
-                    .append(animations.size()).append(", entries=[");
-            boolean first = true;
-            for (Map.Entry<?, ?> entry : transitions.entrySet()) {
-                if (!first) {
-                    state.append("; ");
-                }
-                first = false;
-                Object token = entry.getKey();
-                Object animatorList = animations.get(token);
-                state.append(token == focusToken ? "focus:" : "")
-                        .append("type=").append(readTransitionType(entry.getValue()))
-                        .append(",debugId=").append(readTransitionDebugId(entry.getValue()))
-                        .append(",animators=").append(describeAnimatorList(animatorList));
-            }
-            return state.append("]}").toString();
-        } catch (Throwable throwable) {
-            return "error{" + throwable.getClass().getSimpleName() + ": "
-                    + throwable.getMessage() + "}";
-        }
-    }
-
-    private String describeAnimatorList(Object animatorList) {
-        if (!(animatorList instanceof Iterable)) {
-            return shortObject(animatorList);
-        }
-        int count = 0;
-        int running = 0;
-        int reversible = 0;
-        for (Object animator : (Iterable<?>) animatorList) {
-            count++;
-            try {
-                if (Boolean.TRUE.equals(invokeAnyMethod(animator,
-                        "isRunning", new Object[0]))) {
-                    running++;
-                }
-                if (Boolean.TRUE.equals(invokeAnyMethod(animator,
-                        "canReverse", new Object[0]))) {
-                    reversible++;
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-        return count + "(running=" + running + ",canReverse=" + reversible + ")";
+        return chain.proceed();
     }
 
     private Object interceptMiuiOverviewProxyTransact(XposedInterface.Chain chain)
@@ -1641,40 +1128,50 @@ public final class MiuiBackGestureHook extends XposedModule {
         return Boolean.TRUE;
     }
 
-    private void hookLauncherProxyService(ClassLoader classLoader) {
-        try {
-            Class<?> serviceClass = Class.forName(LAUNCHER_PROXY_SERVICE, false, classLoader);
-            hookNoArgTrace(serviceClass, "maybeBindService",
-                    "systemui_launcher_proxy_maybeBindService");
-            hookMethodTrace(serviceClass.getDeclaredMethod("disconnectFromLauncherService",
-                            String.class),
-                    "systemui_launcher_proxy_disconnect");
-            hookNoArgTrace(serviceClass, "updateEnabledAndBinding",
-                    "systemui_launcher_proxy_updateEnabledAndBinding");
-            log(Log.INFO, TAG, "Hooked LauncherProxyService trace points");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook LauncherProxyService", throwable);
-        }
-    }
-
     private void hookEdgeBackGestureHandler(ClassLoader classLoader) {
         try {
             Class<?> handlerClass = Class.forName(EDGE_BACK_GESTURE_HANDLER, false, classLoader);
-            hookNoArgTrace(handlerClass, "updateIsEnabled",
-                    "systemui_edge_back_updateIsEnabled");
-            hookMethodTrace(handlerClass.getDeclaredMethod("onNavigationModeChanged",
-                            int.class),
-                    "systemui_edge_back_onNavigationModeChanged");
-            hookNoArgTrace(handlerClass, "updateBackAnimationThresholds",
-                    "systemui_edge_back_updateThresholds");
-            hookMethodTrace(handlerClass.getDeclaredMethod("setBackAnimation",
-                            Class.forName(BACK_ANIMATION_CONTROLLER + "$BackAnimationImpl",
-                                    false, classLoader)),
-                    "systemui_edge_back_setBackAnimation");
+            Method updateIsEnabled = handlerClass.getDeclaredMethod("updateIsEnabled");
+            updateIsEnabled.setAccessible(true);
+            recordHookHandle(hook(updateIsEnabled)
+                    .setId("systemui_edge_back_updateIsEnabled")
+                    .intercept(this::onEdgeBackUpdateIsEnabled));
+            Method navigationModeChanged = handlerClass.getDeclaredMethod(
+                    "onNavigationModeChanged", int.class);
+            navigationModeChanged.setAccessible(true);
+            recordHookHandle(hook(navigationModeChanged)
+                    .setId("systemui_edge_back_onNavigationModeChanged")
+                    .intercept(this::onEdgeBackNavigationModeChanged));
+            Method setBackAnimation = handlerClass.getDeclaredMethod("setBackAnimation",
+                    Class.forName(BACK_ANIMATION_CONTROLLER + "$BackAnimationImpl",
+                            false, classLoader));
+            setBackAnimation.setAccessible(true);
+            recordHookHandle(hook(setBackAnimation)
+                    .setId("systemui_edge_back_setBackAnimation")
+                    .intercept(this::onEdgeBackSetBackAnimation));
             log(Log.INFO, TAG, "Hooked EdgeBackGestureHandler AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler", throwable);
         }
+    }
+
+    private Object onEdgeBackUpdateIsEnabled(XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        ensureBackInputInstalledFromHandler(chain.getThisObject(), "updateIsEnabled");
+        return result;
+    }
+
+    private Object onEdgeBackNavigationModeChanged(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        ensureBackInputInstalledFromHandler(chain.getThisObject(), "onNavigationModeChanged");
+        return result;
+    }
+
+    private Object onEdgeBackSetBackAnimation(XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        installBackInputDriver(chain.getThisObject(), chain.getArg(0));
+        return result;
     }
 
     private void hookNavigationBarGestureInsets(ClassLoader classLoader) {
@@ -1775,80 +1272,31 @@ public final class MiuiBackGestureHook extends XposedModule {
         try {
             Class<?> controllerClass =
                     Class.forName(BACK_ANIMATION_CONTROLLER, false, classLoader);
-            hookMethodTrace(controllerClass.getDeclaredMethod("onGestureStarted",
-                            float.class, float.class, int.class),
-                    "shell_back_onGestureStarted");
-            hookNoArgTrace(controllerClass, "onThresholdCrossed",
-                    "shell_back_onThresholdCrossed");
-            hookNoArgTrace(controllerClass, "startSystemAnimation",
-                    "shell_back_startSystemAnimation");
-            hookMethodTrace(controllerClass.getDeclaredMethod("finishBackNavigation",
-                            boolean.class),
-                    "shell_back_finishBackNavigation");
-            hookNoArgTrace(controllerClass, "onBackAnimationFinished",
-                    "shell_back_onBackAnimationFinished");
-            hookOptionalNoArgTrace(controllerClass, "finishBackAnimation",
-                    "shell_back_finishBackAnimation");
+            hookShellAnimationFinished(controllerClass, "onBackAnimationFinished",
+                    "shell_back_onBackAnimationFinished", false);
+            hookShellAnimationFinished(controllerClass, "finishBackAnimation",
+                    "shell_back_finishBackAnimation", true);
             hookBackNavigationInfoReceived(controllerClass);
-            hookRegistryUpdate(classLoader);
-            hookCrossActivityDiagnostics(classLoader);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
         }
     }
 
-    private void hookCrossActivityDiagnostics(ClassLoader classLoader) {
+    private void hookShellAnimationFinished(Class<?> controllerClass, String methodName,
+                                            String hookId, boolean optional)
+            throws NoSuchMethodException {
         try {
-            Class<?> crossClass =
-                    Class.forName(CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
-            for (Method method : crossClass.getDeclaredMethods()) {
-                if ("startBackAnimation".equals(method.getName())
-                        || "finishAnimation".equals(method.getName())) {
-                    hookMethodTrace(method, "cross_activity_" + method.getName());
-                }
+            Method method = controllerClass.getDeclaredMethod(methodName);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId(hookId)
+                    .intercept(this::onShellAnimationFinished));
+        } catch (NoSuchMethodException exception) {
+            if (!optional) {
+                throw exception;
             }
-            hookCrossActivityApplyTransformDiagnostics(classLoader);
-            hookPreCommitDiagnostics(classLoader, DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION,
-                    "default_cross_activity");
-            hookPreCommitDiagnostics(classLoader, CUSTOM_CROSS_ACTIVITY_BACK_ANIMATION,
-                    "custom_cross_activity");
-            log(Log.INFO, TAG, "Hooked CrossActivityBackAnimation diagnostics");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook CrossActivity diagnostics", throwable);
-        }
-    }
-
-    private void hookCrossActivityApplyTransformDiagnostics(ClassLoader classLoader) {
-        try {
-            Class<?> crossClass =
-                    Class.forName(CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
-            for (Method method : crossClass.getDeclaredMethods()) {
-                if ("applyTransform".equals(method.getName())
-                        && method.getParameterCount() >= 3) {
-                    hookMethodTrace(method, "cross_activity_applyTransform");
-                    log(Log.INFO, TAG, "Hooked CrossActivityBackAnimation.applyTransform diagnostics"
-                            + ", signature=" + method);
-                    return;
-                }
-            }
-            log(Log.WARN, TAG, "CrossActivityBackAnimation.applyTransform not found");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook CrossActivity applyTransform diagnostics",
-                    throwable);
-        }
-    }
-
-    private void hookPreCommitDiagnostics(ClassLoader classLoader, String className, String prefix) {
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            hookMethodTrace(clazz.getDeclaredMethod("preparePreCommitClosingRectMovement",
-                            int.class),
-                    prefix + "_prepareClosing");
-            hookNoArgTrace(clazz, "preparePreCommitEnteringRectMovement",
-                    prefix + "_prepareEntering");
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to hook " + className + " diagnostics", throwable);
+            log(Log.INFO, TAG, "Optional Shell method unavailable: " + methodName);
         }
     }
 
@@ -1858,101 +1306,29 @@ public final class MiuiBackGestureHook extends XposedModule {
                     || method.getParameterCount() != 2) {
                 continue;
             }
-            hookMethodTrace(method, "shell_back_onBackNavigationInfoReceived");
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("shell_back_onBackNavigationInfoReceived")
+                    .intercept(this::onBackNavigationInfoReceived));
             return;
         }
         log(Log.WARN, TAG, "BackAnimationController.onBackNavigationInfoReceived not found");
     }
 
-    private void hookRegistryUpdate(ClassLoader classLoader) {
-        try {
-            Class<?> registryClass =
-                    Class.forName(SHELL_BACK_ANIMATION_REGISTRY, false, classLoader);
-            Method method = registryClass.getDeclaredMethod("updateSupportedAnimators");
-            method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("shell_back_registry_updateSupportedAnimators")
-                    .intercept(chain -> {
-                        Object result = chain.proceed();
-                        logRegistryState(chain.getThisObject(), "updateSupportedAnimators");
-                        return result;
-                    }));
-            log(Log.INFO, TAG, "Hooked ShellBackAnimationRegistry.updateSupportedAnimators");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook ShellBackAnimationRegistry", throwable);
-        }
-    }
 
-    private void hookNoArgTrace(Class<?> ownerClass, String methodName, String hookId)
-            throws NoSuchMethodException {
-        Method method = ownerClass.getDeclaredMethod(methodName);
-        hookMethodTrace(method, hookId);
-    }
-
-    private void hookOptionalNoArgTrace(Class<?> ownerClass, String methodName, String hookId) {
-        try {
-            hookNoArgTrace(ownerClass, methodName, hookId);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Optional Shell method unavailable: " + methodName,
-                    throwable);
-        }
-    }
-
-    private void hookMethodTrace(Method method, String hookId) {
-        method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId(hookId)
-                .intercept(chain -> traceHook(chain, hookId)));
-    }
-
-    private Object traceHook(XposedInterface.Chain chain, String hookId) throws Throwable {
-        if ("cross_activity_applyTransform".equals(hookId)) {
-            if (!ENABLE_VERBOSE_DIAGNOSTICS) {
-                return chain.proceed();
-            }
-            return traceCrossActivityApplyTransform(chain);
-        }
-        if (ENABLE_VERBOSE_DIAGNOSTICS) {
-            log(Log.INFO, TAG, "before " + hookId
-                    + ", this=" + shortObject(chain.getThisObject())
-                    + ", args=" + describeArgs(chain));
-        }
-        if ("shell_back_onBackNavigationInfoReceived".equals(hookId)) {
-            ensureAospBackAnimations(chain.getThisObject(), "beforeNavigationInfo");
-            forceSystemUiCallbackProgress(chain.getArg(0));
-        }
-        boolean b = hookId.startsWith("cross_activity_")
-                || hookId.startsWith("default_cross_activity_")
-                || hookId.startsWith("custom_cross_activity_");
-        if (b && ENABLE_VERBOSE_DIAGNOSTICS) {
-            logCrossActivityState("before " + hookId, chain.getThisObject(), chain.getArgs());
-        }
+    private Object onBackNavigationInfoReceived(XposedInterface.Chain chain)
+            throws Throwable {
+        ensureAospBackAnimations(chain.getThisObject(), "beforeNavigationInfo");
+        forceSystemUiCallbackProgress(chain.getArg(0));
         Object result = chain.proceed();
-        if ("shell_back_onBackAnimationFinished".equals(hookId)
-                || "shell_back_finishBackAnimation".equals(hookId)) {
-            notifyShellAnimationFinished(chain.getThisObject(), hookId);
-        }
-        switch (hookId) {
-            case "systemui_edge_back_setBackAnimation":
-                installBackInputOverlay(chain.getThisObject(), chain.getArg(0));
-                logNativeInputState(chain.getThisObject(), "setBackAnimation");
-                break;
-            case "systemui_edge_back_updateIsEnabled":
-            case "systemui_edge_back_onNavigationModeChanged":
-                ensureBackInputInstalledFromHandler(chain.getThisObject(), hookId);
-                logNativeInputState(chain.getThisObject(), hookId);
-                break;
-            case "shell_back_onBackNavigationInfoReceived":
-                logBackNavigationInfo(chain.getArg(0));
-                break;
-        }
-        if (b && ENABLE_VERBOSE_DIAGNOSTICS) {
-            logCrossActivityState("after " + hookId, chain.getThisObject(), chain.getArgs());
-        }
-        if (ENABLE_VERBOSE_DIAGNOSTICS) {
-            log(Log.INFO, TAG, "after " + hookId
-                    + ", result=" + shortObject(result));
-        }
+        logBackNavigationInfo(chain.getArg(0));
+        return result;
+    }
+
+    private Object onShellAnimationFinished(XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        notifyShellAnimationFinished(chain.getThisObject(),
+                chain.getExecutable().getName());
         return result;
     }
 
@@ -1961,84 +1337,172 @@ public final class MiuiBackGestureHook extends XposedModule {
                 : new ArrayList<>(nativeInputMonitors.values())) {
             monitor.onShellAnimationFinished(controller, reason);
         }
-        for (SystemUiBackInputOverlay overlay : new ArrayList<>(overlays.values())) {
-            overlay.onShellAnimationFinished(controller, reason);
-        }
     }
 
-    private Object traceCrossActivityApplyTransform(XposedInterface.Chain chain)
-            throws Throwable {
-        try {
-            Object animation = chain.getThisObject();
-            Object leash = chain.getArg(0);
-            Object rect = chain.getArg(1);
-            Object alpha = chain.getArg(2);
-            Object closing = readField(animation, "closingTarget");
-            Object entering = readField(animation, "enteringTarget");
-            Object closingLeash = closing == null ? null : readField(closing, "leash");
-            Object enteringLeash = entering == null ? null : readField(entering, "leash");
-            String targetRole = "unknown";
-            if (leash == closingLeash) {
-                targetRole = "closing";
-            } else if (leash == enteringLeash) {
-                targetRole = "entering";
+    private synchronized void ensureMiuiOverviewStateReceiver(Context context) {
+        if (miuiOverviewReceiver != null || context == null) {
+            return;
+        }
+        Context appContext = context.getApplicationContext();
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                String action = intent == null ? null : intent.getAction();
+                String state = intent == null ? null : intent.getStringExtra("state");
+                boolean overviewVisible;
+                String source;
+                if (MODULE_MIUI_OVERVIEW_STATE_CHANGE.equals(action)
+                        && intent.hasExtra("overview_visible")) {
+                    overviewVisible = intent.getBooleanExtra("overview_visible", false);
+                    if (!overviewVisible
+                            && intent.getBooleanExtra("task_launch_started", false)) {
+                        beginMiuiOverviewDismiss("taskLaunch");
+                        return;
+                    }
+                    state = overviewVisible ? "actualRecentsEnter" : "actualRecentsExit";
+                    source = "RecentsContainer";
+                } else if ("toRecents".equals(state)) {
+                    overviewVisible = true;
+                    source = "fullscreenState";
+                } else if ("toHome".equals(state)
+                        || "toAnotherApp".equals(state)
+                        || "toCurrentApp".equals(state)
+                        || "finishRecentDirectly".equals(state)) {
+                    overviewVisible = false;
+                    source = "fullscreenState";
+                } else {
+                    return;
+                }
+                updateMiuiOverviewState(overviewVisible, state, source);
             }
-            log(Log.INFO, TAG, "CrossActivity.applyTransform"
-                    + ", targetRole=" + targetRole
-                    + ", rect=" + rect
-                    + ", alpha=" + alpha
-                    + ", leash=" + shortObject(leash)
-                    + ", closing=" + describeRemoteTarget(closing)
-                    + ", entering=" + describeRemoteTarget(entering));
+        };
+        try {
+            IntentFilter filter = new IntentFilter(MIUI_FULLSCREEN_STATE_CHANGE);
+            filter.addAction(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            miuiOverviewReceiverContext = appContext;
+            miuiOverviewReceiver = receiver;
+            log(Log.INFO, TAG, "Registered Miui launcher overview-state receiver"
+                    + ", currentOverviewVisible=" + miuiOverviewVisible);
         } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to trace cross-activity applyTransform", throwable);
+            log(Log.ERROR, TAG, "Failed to register Miui overview-state receiver",
+                    throwable);
         }
-        return chain.proceed();
     }
 
-    private void installBackInputOverlay(Object edgeBackGestureHandler, Object backAnimationImpl) {
+    private synchronized void unregisterMiuiOverviewStateReceiver() {
+        BroadcastReceiver receiver = miuiOverviewReceiver;
+        Context receiverContext = miuiOverviewReceiverContext;
+        miuiOverviewReceiver = null;
+        miuiOverviewReceiverContext = null;
+        if (receiver == null || receiverContext == null) {
+            return;
+        }
+        try {
+            receiverContext.unregisterReceiver(receiver);
+            log(Log.INFO, TAG, "Unregistered Miui launcher overview-state receiver");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to unregister Miui overview-state receiver",
+                    throwable);
+        }
+    }
+
+    private synchronized void updateMiuiOverviewState(boolean overviewVisible,
+                                                      String state, String source) {
+        long now = SystemClock.uptimeMillis();
+        long pendingUntil = miuiOverviewDismissPendingUntilUptime;
+        if (overviewVisible && pendingUntil > now) {
+            if ("toRecents".equals(state) && "fullscreenState".equals(source)) {
+                // A lone container enter can be a late lifecycle notification from the
+                // dismissal that just finished. The launcher's explicit toRecents signal,
+                // however, is emitted by a new overview gesture. Accept it even inside the
+                // short post-exit guard so quickly reopening Recents cannot leave SystemUI
+                // permanently believing that launcher Home is visible.
+                miuiOverviewDismissPendingUntilUptime = 0L;
+                miuiOverviewVisible = true;
+                log(Log.INFO, TAG, "Confirmed new Miui Recents entry during dismiss pending"
+                        + ", state=" + state
+                        + ", source=" + source
+                        + ", clearedPendingForMs=" + (pendingUntil - now)
+                        + ", overviewVisible=true");
+                return;
+            }
+            log(Log.INFO, TAG, "Ignored Miui Recents enter while dismiss is pending"
+                    + ", state=" + state
+                    + ", source=" + source
+                    + ", pendingForMs=" + (pendingUntil - now)
+                    + ", overviewVisible=" + miuiOverviewVisible);
+            return;
+        }
+        if (!overviewVisible && pendingUntil > now) {
+            long guardUntil = now + MIUI_OVERVIEW_EXIT_GUARD_MS;
+            miuiOverviewDismissPendingUntilUptime = guardUntil;
+            miuiOverviewVisible = false;
+            log(Log.INFO, TAG, "Confirmed Miui Recents dismiss"
+                    + ", state=" + state
+                    + ", source=" + source
+                    + ", lateEnterGuardMs=" + MIUI_OVERVIEW_EXIT_GUARD_MS
+                    + ", overviewVisible=false");
+            return;
+        }
+        if (!overviewVisible || pendingUntil != 0L) {
+            miuiOverviewDismissPendingUntilUptime = 0L;
+        }
+        miuiOverviewVisible = overviewVisible;
+        log(Log.INFO, TAG, "Miui launcher state changed"
+                + ", state=" + state
+                + ", source=" + source
+                + ", overviewVisible=" + overviewVisible);
+    }
+
+    private synchronized void beginMiuiOverviewDismiss(String reason) {
+        long pendingUntil = SystemClock.uptimeMillis() + MIUI_OVERVIEW_DISMISS_TIMEOUT_MS;
+        miuiOverviewDismissPendingUntilUptime = pendingUntil;
+        miuiOverviewVisible = false;
+        new Handler(Looper.getMainLooper()).postDelayed(
+                () -> restoreMiuiOverviewAfterDismissTimeout(pendingUntil),
+                MIUI_OVERVIEW_DISMISS_TIMEOUT_MS);
+        log(Log.INFO, TAG, "Started Miui Recents dismiss pending"
+                + ", reason=" + reason
+                + ", timeoutMs=" + MIUI_OVERVIEW_DISMISS_TIMEOUT_MS
+                + ", overviewVisible=false");
+    }
+
+    private synchronized void restoreMiuiOverviewAfterDismissTimeout(long pendingUntil) {
+        if (miuiOverviewDismissPendingUntilUptime != pendingUntil) {
+            return;
+        }
+        miuiOverviewDismissPendingUntilUptime = 0L;
+        miuiOverviewVisible = true;
+        log(Log.WARN, TAG, "Miui Recents dismiss confirmation timed out"
+                + ", restoredOverviewVisible=true");
+    }
+
+    private void installBackInputDriver(Object edgeBackGestureHandler, Object backAnimationImpl) {
         try {
             if (edgeBackGestureHandler == null || backAnimationImpl == null) {
                 return;
             }
-            if (!INSTALL_WINDOW_INPUT_OVERLAY) {
-                Object controller = readField(backAnimationImpl, "this$0");
-                ensureAospBackAnimations(controller, "setBackAnimation");
-                Context context = (Context) readField(edgeBackGestureHandler, "mContext");
-                ensureNativeEdgeBackPlugin(edgeBackGestureHandler, context);
-                NativeBackInputMonitor existing = nativeInputMonitors.get(edgeBackGestureHandler);
-                if (existing != null) {
-                    existing.updateBackAnimation(backAnimationImpl);
-                    log(Log.INFO, TAG, "Updated native SystemUI back input monitor"
-                            + ", controller=" + shortObject(controller));
-                    return;
-                }
-                NativeBackInputMonitor monitor = createNativeBackInputMonitor(context,
-                        edgeBackGestureHandler, controller, backAnimationImpl);
-                monitor.attach();
-                nativeInputMonitors.put(edgeBackGestureHandler, monitor);
-                log(Log.INFO, TAG, "Installed native SystemUI back input monitor"
+            Object controller = readField(backAnimationImpl, "this$0");
+            ensureAospBackAnimations(controller, "setBackAnimation");
+            Context context = (Context) readField(edgeBackGestureHandler, "mContext");
+            ensureMiuiOverviewStateReceiver(context);
+            ensureNativeEdgeBackPlugin(edgeBackGestureHandler, context);
+            NativeBackInputMonitor existing = nativeInputMonitors.get(edgeBackGestureHandler);
+            if (existing != null) {
+                existing.updateBackAnimation(backAnimationImpl);
+                log(Log.INFO, TAG, "Updated native SystemUI back input monitor"
                         + ", controller=" + shortObject(controller));
                 return;
             }
-            SystemUiBackInputOverlay existing = overlays.get(edgeBackGestureHandler);
-            if (existing != null) {
-                existing.updateBackAnimation(backAnimationImpl);
-                return;
-            }
-            Context context = (Context) readField(edgeBackGestureHandler, "mContext");
-            ensureNativeEdgeBackPlugin(edgeBackGestureHandler, context);
-            Object controller = readField(backAnimationImpl, "this$0");
-            ensureAospBackAnimations(controller, "setBackAnimation");
-            SystemUiBackInputOverlay overlay =
-                    new SystemUiBackInputOverlay(context, edgeBackGestureHandler,
-                            controller, backAnimationImpl);
-            overlay.attach();
-            overlays.put(edgeBackGestureHandler, overlay);
-            log(Log.INFO, TAG, "Installed SystemUI back input overlay"
+            NativeBackInputMonitor monitor = createNativeBackInputMonitor(context,
+                    edgeBackGestureHandler, controller, backAnimationImpl);
+            monitor.attach();
+            nativeInputMonitors.put(edgeBackGestureHandler, monitor);
+            log(Log.INFO, TAG, "Installed native SystemUI back input monitor"
                     + ", controller=" + shortObject(controller));
         } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to install SystemUI back input overlay", throwable);
+            log(Log.ERROR, TAG, "Failed to install SystemUI back input driver", throwable);
         }
     }
 
@@ -2048,8 +1512,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         try {
-            if (nativeInputMonitors.containsKey(edgeBackGestureHandler)
-                    || overlays.containsKey(edgeBackGestureHandler)) {
+            if (nativeInputMonitors.containsKey(edgeBackGestureHandler)) {
                 return;
             }
             Object backAnimation = readField(edgeBackGestureHandler, "mBackAnimation");
@@ -2058,7 +1521,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", reason=" + reason + ", mBackAnimation=null");
                 return;
             }
-            installBackInputOverlay(edgeBackGestureHandler, backAnimation);
+            installBackInputDriver(edgeBackGestureHandler, backAnimation);
             log(Log.INFO, TAG, "Restored back input from existing EdgeBackGestureHandler"
                     + ", reason=" + reason);
         } catch (Throwable throwable) {
@@ -2157,91 +1620,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         nativePluginDiagnosticsLogged = true;
-        try {
-            StringBuilder fields = new StringBuilder();
-            for (Field field : edgeBackGestureHandler.getClass().getDeclaredFields()) {
-                field.setAccessible(true);
-                Object value = null;
-                try {
-                    value = field.get(edgeBackGestureHandler);
-                } catch (Throwable ignored) {
-                }
-                fields.append(field.getName())
-                        .append("=")
-                        .append(shortObject(value))
-                        .append("; ");
-            }
-            log(Log.WARN, TAG, "Native edge plugin unavailable; handler fields: " + fields);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to dump EdgeBackGestureHandler fields", throwable);
-        }
-        try {
-            Class<?> controllerClass = Class.forName(
-                    "com.android.systemui.navigationbar.gestural.BackPanelController",
-                    false, edgeBackGestureHandler.getClass().getClassLoader());
-            StringBuilder constructors = new StringBuilder();
-            for (Constructor<?> constructor : controllerClass.getDeclaredConstructors()) {
-                constructors.append(constructor.toString()).append("; ");
-            }
-            log(Log.WARN, TAG, "BackPanelController constructors: " + constructors);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to dump BackPanelController constructors", throwable);
-        }
-    }
-
-    private void logNativeInputState(Object edgeBackGestureHandler, String reason) {
-        if (edgeBackGestureHandler == null) {
-            return;
-        }
-        try {
-            log(Log.INFO, TAG, "Native EdgeBack input state"
-                    + ", reason=" + reason
-                    + ", inputMonitorResources="
-                    + shortObject(readField(edgeBackGestureHandler, "mInputMonitorResources"))
-                    + ", allowGesture="
-                    + shortObject(readField(edgeBackGestureHandler, "mAllowGesture"))
-                    + ", isBackGestureAllowed="
-                    + shortObject(readField(edgeBackGestureHandler, "mIsBackGestureAllowed"))
-                    + ", gestureBlockingActivityRunning="
-                    + shortObject(readField(edgeBackGestureHandler,
-                    "mGestureBlockingActivityRunning"))
-                    + ", excludeRegion="
-                    + shortObject(readField(edgeBackGestureHandler, "mExcludeRegion"))
-                    + ", unrestrictedExcludeRegion="
-                    + shortObject(readField(edgeBackGestureHandler,
-                    "mUnrestrictedExcludeRegion"))
-                    + ", navBarOverlayExcludedBounds="
-                    + shortObject(readField(edgeBackGestureHandler,
-                    "mNavBarOverlayExcludedBounds"))
-                    + ", pipExcludedBounds="
-                    + shortObject(readField(edgeBackGestureHandler, "mPipExcludedBounds"))
-                    + ", backAnimation="
-                    + shortObject(readField(edgeBackGestureHandler, "mBackAnimation"))
-                    + ", edgePlugin="
-                    + shortObject(readField(edgeBackGestureHandler, "mEdgeBackPlugin")));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to log native EdgeBack input state", throwable);
-        }
-    }
-
-    private void logRegistryState(Object registry, String source) {
-        try {
-            ensureAospRegistryDefinitions(registry, source);
-            Object animationDefinition = readField(registry, "mAnimationDefinition");
-            Object supportedAnimators = readField(registry, "mSupportedAnimators");
-            Object defaultCrossActivity = readField(registry, "mDefaultCrossActivityAnimation");
-            Object customizeActivity = readField(registry, "mCustomizeActivityAnimation");
-            Object crossTask = readField(registry, "mCrossTaskAnimation");
-            log(Log.INFO, TAG, "ShellBackAnimationRegistry." + source
-                    + ": definitions=" + animationDefinition
-                    + ", definitionKeys=" + sparseArrayKeys(animationDefinition)
-                    + ", supported=" + supportedAnimators
-                    + ", defaultCrossActivity=" + shortObject(defaultCrossActivity)
-                    + ", customizeActivity=" + shortObject(customizeActivity)
-                    + ", crossTask=" + shortObject(crossTask));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to inspect ShellBackAnimationRegistry", throwable);
-        }
+        log(Log.WARN, TAG, "Native BackPanelController plugin unavailable"
+                + ", handler=" + shortObject(edgeBackGestureHandler));
     }
 
     private void ensureAospBackAnimations(Object controller, String source) {
@@ -2251,8 +1631,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         try {
             Object registry = readField(controller, "mShellBackAnimationRegistry");
             ensureAospRegistryDefinitions(registry, source);
-            logRegistryState(registry, source);
-            logBackAnimationAdapter(controller, source);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to ensure AOSP back animations from " + source,
                     throwable);
@@ -2274,8 +1652,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     crossTask, "crossTask");
             if (changed) {
                 invokeAnyMethod(registry, "updateSupportedAnimators", new Object[0]);
-                log(Log.INFO, TAG, "Restored AOSP registry definitions from " + source
-                        + ", keys=" + sparseArrayKeys(definitions));
+                log(Log.INFO, TAG, "Restored AOSP registry definitions from " + source);
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to restore AOSP registry definitions from " + source,
@@ -2305,134 +1682,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private void logBackAnimationAdapter(Object controller, String source) {
-        try {
-            Object adapter = readField(controller, "mBackAnimationAdapter");
-            Object supported = adapter == null ? null : readField(adapter, "mSupportedAnimators");
-            log(Log.INFO, TAG, "BackAnimationAdapter." + source
-                    + ": adapter=" + shortObject(adapter)
-                    + ", supported=" + supported);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to inspect BackAnimationAdapter from " + source,
-                    throwable);
-        }
-    }
-
-    private void logCrossActivityState(String source, Object animation, List<Object> args) {
-        if (animation == null) {
-            return;
-        }
-        try {
-            Object closing = readField(animation, "closingTarget");
-            Object entering = readField(animation, "enteringTarget");
-            Object startClosing = readField(animation, "startClosingRect");
-            Object targetClosing = readField(animation, "targetClosingRect");
-            Object currentClosing = readField(animation, "currentClosingRect");
-            Object startEntering = readField(animation, "startEnteringRect");
-            Object targetEntering = readField(animation, "targetEnteringRect");
-            Object currentEntering = readField(animation, "currentEnteringRect");
-            Object backAnimRect = readField(animation, "backAnimRect");
-            Object gestureProgress = readField(animation, "gestureProgress");
-            log(Log.INFO, TAG, "CrossActivity." + source
-                    + ", class=" + animation.getClass().getName()
-                    + ", args=" + describeObjectList(args)
-                    + ", backMotion=" + describeBackMotionArgs(args)
-                    + ", progress=" + gestureProgress
-                    + ", backAnimRect=" + backAnimRect
-                    + ", closing=" + describeRemoteTarget(closing)
-                    + ", entering=" + describeRemoteTarget(entering)
-                    + ", startClosing=" + startClosing
-                    + ", targetClosing=" + targetClosing
-                    + ", currentClosing=" + currentClosing
-                    + ", startEntering=" + startEntering
-                    + ", targetEntering=" + targetEntering
-                    + ", currentEntering=" + currentEntering);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to log cross activity state from " + source,
-                    throwable);
-        }
-    }
-
-    private String describeObjectList(List<Object> args) {
-        if (args == null) {
-            return "null";
-        }
-        StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < args.size(); i++) {
-            if (i > 0) {
-                builder.append(", ");
-            }
-            builder.append(shortObject(args.get(i)));
-        }
-        return builder.append(']').toString();
-    }
-
-    private String describeArray(Object array) {
-        if (array == null) {
-            return "null";
-        }
-        if (!array.getClass().isArray()) {
-            return shortObject(array);
-        }
-        int length = java.lang.reflect.Array.getLength(array);
-        StringBuilder builder = new StringBuilder("[");
-        for (int i = 0; i < length; i++) {
-            if (i > 0) {
-                builder.append(", ");
-            }
-            builder.append(shortObject(java.lang.reflect.Array.get(array, i)));
-        }
-        return builder.append(']').toString();
-    }
-
-    private String describeRemoteTarget(Object target) {
-        if (target == null) {
-            return "null";
-        }
-        try {
-            Object mode = readField(target, "mode");
-            Object prefixOrderIndex = readField(target, "prefixOrderIndex");
-            Object localBounds = readField(target, "localBounds");
-            Object screenSpaceBounds = readField(target, "screenSpaceBounds");
-            Object leash = readField(target, "leash");
-            Object windowConfiguration = readField(target, "windowConfiguration");
-            Object bounds = windowConfiguration == null ? null
-                    : invokeAnyMethod(windowConfiguration, "getBounds", new Object[0]);
-            return target.getClass().getName()
-                    + "@" + Integer.toHexString(System.identityHashCode(target))
-                    + "{mode=" + mode
-                    + ", order=" + prefixOrderIndex
-                    + ", local=" + localBounds
-                    + ", screen=" + screenSpaceBounds
-                    + ", bounds=" + bounds
-                    + ", leash=" + shortObject(leash) + "}";
-        } catch (Throwable throwable) {
-            return shortObject(target);
-        }
-    }
-
-    private String describeBackMotionArgs(List<Object> args) {
-        if (args == null || args.isEmpty()) {
-            return "none";
-        }
-        Object event = args.get(0);
-        if (event == null || !event.getClass().getName().contains("BackMotionEvent")) {
-            return "none";
-        }
-        try {
-            BackMotionEvent motionEvent = (BackMotionEvent) event;
-            return "{touchX=" + motionEvent.getTouchX()
-                    + ", touchY=" + motionEvent.getTouchY()
-                    + ", progress=" + motionEvent.getProgress()
-                    + ", triggerBack=" + motionEvent.getTriggerBack()
-                    + ", swipeEdge=" + motionEvent.getSwipeEdge()
-                    + ", departing=" + describeRemoteTarget(
-                    motionEvent.getDepartingAnimationTarget()) + "}";
-        } catch (Throwable throwable) {
-            return "error:" + throwable.getClass().getSimpleName();
-        }
-    }
-
     private boolean sparseArrayContains(Object sparseArray, int key) {
         try {
             int size = ((Integer) invokeAnyMethod(sparseArray, "size", new Object[0])).intValue();
@@ -2447,26 +1696,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.WARN, TAG, "Failed to inspect SparseArray contains key=" + key, throwable);
         }
         return false;
-    }
-
-    private String sparseArrayKeys(Object sparseArray) {
-        if (sparseArray == null) {
-            return "null";
-        }
-        try {
-            int size = ((Integer) invokeAnyMethod(sparseArray, "size", new Object[0])).intValue();
-            StringBuilder builder = new StringBuilder("[");
-            for (int i = 0; i < size; i++) {
-                if (i > 0) {
-                    builder.append(", ");
-                }
-                builder.append(invokeAnyMethod(sparseArray, "keyAt",
-                        new Object[]{Integer.valueOf(i)}));
-            }
-            return builder.append(']').toString();
-        } catch (Throwable throwable) {
-            return "unknown:" + throwable.getClass().getSimpleName();
-        }
     }
 
     private void recordHookHandle(XposedInterface.HookHandle hookHandle) {
@@ -2522,13 +1751,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         field.set(target, value);
     }
 
-    private static void setFieldIfPresent(Object target, String fieldName, Object value) {
-        try {
-            writeField(target, fieldName, value);
-        } catch (Throwable ignored) {
-        }
-    }
-
     private static Field findField(Class<?> ownerClass, String fieldName)
             throws NoSuchFieldException {
         Class<?> current = ownerClass;
@@ -2540,18 +1762,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
         throw new NoSuchFieldException(ownerClass.getName() + "." + fieldName);
-    }
-
-    private static String describeArgs(XposedInterface.Chain chain) {
-        StringBuilder builder = new StringBuilder("[");
-        List<Object> args = chain.getArgs();
-        for (int i = 0; i < args.size(); i++) {
-            if (i > 0) {
-                builder.append(", ");
-            }
-            builder.append(shortObject(args.get(i)));
-        }
-        return builder.append(']').toString();
     }
 
     private static String shortObject(Object object) {
@@ -2630,7 +1840,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private final Context context;
         private final Object edgeBackGestureHandler;
         private final InputMonitor inputMonitor;
-        private final SystemUiBackInputOverlay driver;
+        private final SystemUiBackGestureDriver driver;
         private Object backAnimationImpl;
         private boolean gestureCandidate;
         private boolean pilfered;
@@ -2646,7 +1856,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.edgeBackGestureHandler = edgeBackGestureHandler;
             this.backAnimationImpl = backAnimationImpl;
             this.inputMonitor = inputMonitor;
-            this.driver = new SystemUiBackInputOverlay(context, edgeBackGestureHandler,
+            this.driver = new SystemUiBackGestureDriver(context, edgeBackGestureHandler,
                     controller, backAnimationImpl);
         }
 
@@ -2743,6 +1953,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                 cancelNativeCandidate(event, "vertical gesture before pilfer");
                 return false;
             }
+            if (!pilfered && driver.isRecentsVisualOnlyGesture()) {
+                // MiuiHome can report Overview before WMS exposes Launcher as the back target.
+                // Keep the native panel responsive, but leave the real input stream untouched
+                // and never retry this gesture against a later navigation target.
+                if (!driver.handleTouch(event, activeEdge)) {
+                    resetCandidate();
+                    return false;
+                }
+                return false;
+            }
             if (!pilfered && distance > dp(MIUI_INDICATOR_PILFER_THRESHOLD_DP)) {
                 pilferPointers(distance);
             }
@@ -2785,7 +2005,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!gestureCandidate) {
                 return false;
             }
-            if (allowTrigger && pilfered) {
+            if (driver.isRecentsVisualOnlyGesture()) {
+                // Let BackPanelController finish its local animation. No Shell navigation is
+                // active, and the monitor must not claim this input stream.
+                driver.handleTouch(event, activeEdge);
+            } else if (allowTrigger && pilfered) {
                 driver.handleTouch(event, activeEdge);
             } else {
                 MotionEvent cancel = MotionEvent.obtain(event);
@@ -2816,8 +2040,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (event.getPointerCount() != 1) {
                 return false;
             }
-            if (isLauncherTopActivity()) {
-                log(Log.INFO, TAG, "Ignored native back on launcher top activity");
+            if (isLauncherTopActivity() && !miuiOverviewVisible) {
+                log(Log.INFO, TAG, "Ignored native back on launcher Home"
+                        + ", overviewVisible=false");
                 return false;
             }
             if (areSystemBarsHidden() && !isNavBarShownTransiently()) {
@@ -3008,13 +2233,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private final class SystemUiBackInputOverlay {
+    private final class SystemUiBackGestureDriver {
         private final Context context;
         private final Object edgeBackGestureHandler;
-        private final WindowManager windowManager;
-        private final Handler mainHandler = new Handler(Looper.getMainLooper());
-        private final View leftView;
-        private final View rightView;
         private Object controller;
         private Object backAnimationImpl;
         private boolean gestureActive;
@@ -3024,80 +2245,23 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean shellGestureStarted;
         private boolean gestureSuppressed;
         private boolean legacyInterruptGesture;
+        private boolean launcherOverviewGesture;
+        private boolean recentsVisualOnlyGesture;
         private int activeEdge;
         private float downX;
         private float downY;
 
-        SystemUiBackInputOverlay(Context context, Object edgeBackGestureHandler,
+        SystemUiBackGestureDriver(Context context, Object edgeBackGestureHandler,
                                  Object controller, Object backAnimationImpl) {
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
-            this.windowManager = context.getSystemService(WindowManager.class);
             this.controller = controller;
             this.backAnimationImpl = backAnimationImpl;
-            this.leftView = createEdgeView(EDGE_LEFT);
-            this.rightView = createEdgeView(EDGE_RIGHT);
         }
 
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
             this.backAnimationImpl = newBackAnimationImpl;
             this.controller = readField(newBackAnimationImpl, "this$0");
-        }
-
-        void attach() {
-            mainHandler.post(() -> {
-                try {
-                    windowManager.addView(leftView, layoutParams(Gravity.LEFT));
-                    windowManager.addView(rightView, layoutParams(Gravity.RIGHT));
-                    log(Log.INFO, TAG, "SystemUI back input overlay attached");
-                } catch (Throwable throwable) {
-                    log(Log.ERROR, TAG, "Failed to attach SystemUI back input overlay",
-                            throwable);
-                }
-            });
-        }
-
-        void detach() {
-            mainHandler.post(() -> {
-                removeViewIfAttached(leftView);
-                removeViewIfAttached(rightView);
-                log(Log.INFO, TAG, "SystemUI back input overlay detached");
-            });
-        }
-
-        private void removeViewIfAttached(View view) {
-            try {
-                if (view.isAttachedToWindow()) {
-                    windowManager.removeViewImmediate(view);
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to detach SystemUI back input overlay view",
-                        throwable);
-            }
-        }
-
-        private View createEdgeView(int edge) {
-            View view = new View(context);
-            view.setBackgroundColor(Color.TRANSPARENT);
-            view.setOnTouchListener((v, event) -> handleTouch(event, edge));
-            return view;
-        }
-
-        private WindowManager.LayoutParams layoutParams(int horizontalGravity) {
-            int width = Math.max(1, Math.round(dp(EDGE_TOUCH_WIDTH_DP)));
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    width,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    TYPE_NAVIGATION_BAR_PANEL,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            lp.gravity = horizontalGravity | Gravity.TOP;
-            lp.setTitle("MiuiBackGestureHook.SystemUiBackInputOverlay");
-            addPrivateFlags(lp, PRIVATE_FLAG_TRUSTED_OVERLAY);
-            return lp;
         }
 
         private boolean handleTouch(MotionEvent event, int edge) {
@@ -3115,11 +2279,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                         return gestureActive;
                 }
             } catch (Throwable throwable) {
-                log(Log.ERROR, TAG, "SystemUI back overlay touch failed", throwable);
-                gestureActive = false;
-                legacyInterruptGesture = false;
+                log(Log.ERROR, TAG, "SystemUI back gesture driver failed", throwable);
+                clearLocalGestureState();
                 return false;
             }
+        }
+
+        private boolean isRecentsVisualOnlyGesture() {
+            return gestureActive && launcherOverviewGesture && recentsVisualOnlyGesture;
         }
 
         private boolean onDown(MotionEvent event, int edge) throws Exception {
@@ -3127,6 +2294,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             shellGestureStarted = false;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
+            launcherOverviewGesture = miuiOverviewVisible;
+            recentsVisualOnlyGesture = false;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
@@ -3139,9 +2308,21 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", state=" + describeShellState());
                 return true;
             }
+            if (launcherOverviewGesture) {
+                log(Log.INFO, TAG, "SystemUI-owned Recents back gesture candidate"
+                        + ", useShellCallback=true"
+                        + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
+            }
             // Home and Recents share the same launcher Activity. Resolve the actual back target
             // before feeding DOWN to BackPanelController so idle Home never shows the indicator.
             if (!startShellGesture()) {
+                if (recentsVisualOnlyGesture) {
+                    dispatchToEdgePlugin(event, activeEdge);
+                    log(Log.INFO, TAG, "Started visual-only Recents edge gesture"
+                            + ", staleShellTargetRejected=true"
+                            + ", inputWillRemainUnpilfered=true");
+                    return true;
+                }
                 gestureActive = false;
                 gestureSuppressed = false;
                 log(Log.INFO, TAG, "Ignored edge gesture without a back navigation target"
@@ -3149,7 +2330,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return false;
             }
             dispatchToEdgePlugin(event, activeEdge);
-            log(Log.INFO, TAG, "SystemUI overlay gesture candidate"
+            log(Log.INFO, TAG, "SystemUI gesture driver candidate"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
         }
@@ -3161,10 +2342,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (gestureSuppressed) {
                 return true;
             }
-            if (!legacyInterruptGesture
-                    && !shellGestureStarted && !startShellGesture()) {
-                cancelLocalGesture(event, "BackNavigationInfo unavailable");
-                return false;
+            if (recentsVisualOnlyGesture) {
+                dispatchToEdgePlugin(event, activeEdge);
+                return true;
             }
             dispatchToEdgePlugin(event, activeEdge);
             if (!legacyInterruptGesture) {
@@ -3195,8 +2375,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + distance);
             } else {
                 invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
-                log(Log.INFO, TAG, "SystemUI overlay intent threshold crossed, distance="
-                        + distance);
+                log(Log.INFO, TAG, launcherOverviewGesture
+                        ? "SystemUI Recents Shell callback threshold crossed, distance="
+                        + distance
+                        : "SystemUI gesture driver intent threshold crossed, distance=" + distance);
             }
         }
 
@@ -3205,14 +2387,29 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return false;
             }
             if (gestureSuppressed) {
-                gestureActive = false;
-                gestureSuppressed = false;
-                legacyInterruptGesture = false;
+                clearLocalGestureState();
                 log(Log.INFO, TAG, "Finished suppressed SystemUI back gesture");
                 return true;
             }
             if (legacyInterruptGesture) {
                 return finishLegacyInterruptGesture(event, allowTrigger);
+            }
+            if (recentsVisualOnlyGesture) {
+                // BackPanelController may set BackAnimationImpl's trigger bit while completing
+                // its local animation. Clear it after UP/CANCEL: the rejected Shell navigation
+                // was already finished, and this gesture must never be committed later.
+                dispatchToEdgePlugin(event, activeEdge);
+                float releaseDistance = activeEdge == EDGE_LEFT
+                        ? event.getRawX() - downX
+                        : downX - event.getRawX();
+                clearControllerTriggerAfterVisualOnlyGesture();
+                log(Log.INFO, TAG, "Finished visual-only Recents edge gesture"
+                        + ", releaseDistance=" + releaseDistance
+                        + ", wouldPassCommitThreshold="
+                        + (allowTrigger && releaseDistance > dp(TRIGGER_THRESHOLD_DP))
+                        + ", inputRemainedUnpilfered=true");
+                clearLocalGestureState();
+                return false;
             }
             if (!shellGestureStarted) {
                 cancelLocalGesture(event, "released before first MOVE");
@@ -3233,7 +2430,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
             if (tracker != null) {
                 if (startRemotePostCommitIfNeeded(tracker)) {
-                    log(Log.INFO, TAG, "SystemUI overlay delegated remote post-commit"
+                    log(Log.INFO, TAG, "SystemUI gesture driver delegated remote post-commit"
                             + ", trigger=" + trigger + ", edge=" + activeEdge);
                 } else {
                     invokeAnyMethod(controller, "invokeOrCancelBack", new Object[]{tracker});
@@ -3251,15 +2448,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                         new Object[]{Boolean.FALSE});
                 resetGestureState(null);
             }
-            log(Log.INFO, TAG, "SystemUI overlay finish, trigger=" + trigger
+            log(Log.INFO, TAG, "SystemUI gesture driver finish, trigger=" + trigger
+                    + ", recentsShellCallback=" + launcherOverviewGesture
                     + ", edge=" + activeEdge);
-            gestureActive = false;
-            shellGestureStarted = false;
-            gestureSuppressed = false;
-            legacyInterruptGesture = false;
-            thresholdCrossed = false;
-            nativePanelActive = false;
-            triggerBack = false;
+            clearLocalGestureState();
             return true;
         }
 
@@ -3281,13 +2473,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             log(Log.INFO, TAG, "Finished MIUI in-app interrupt gesture"
                     + ", trigger=" + trigger + ", edge=" + activeEdge);
-            gestureActive = false;
-            shellGestureStarted = false;
-            gestureSuppressed = false;
-            legacyInterruptGesture = false;
-            thresholdCrossed = false;
-            nativePanelActive = false;
-            triggerBack = false;
+            clearLocalGestureState();
             return true;
         }
 
@@ -3295,7 +2481,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             // A running Xiaomi OPEN transition is the native interruption source. Prefer it
             // even when system_server can already return a valid predictive-back navigation;
             // otherwise Shell starts a new cross-activity animation and misses reverse().
-            if (hasReversibleRunningOpenTransition()) {
+            if (!launcherOverviewGesture && hasReversibleRunningOpenTransition()) {
                 legacyInterruptGesture = true;
                 log(Log.INFO, TAG, "Preferred running Xiaomi OPEN transition before predictive back");
                 return true;
@@ -3314,7 +2500,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", receivedNull=" + receivedNull
                         + ", state=" + describeShellState());
                 cleanupRejectedShellGesture();
-                if (receivedNull && hasReversibleRunningOpenTransition()) {
+                if (launcherOverviewGesture) {
+                    recentsVisualOnlyGesture = true;
+                    log(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
+                            + ", mode=visual-only"
+                            + ", retry=false");
+                    return false;
+                }
+                if (!launcherOverviewGesture && receivedNull
+                        && hasReversibleRunningOpenTransition()) {
                     legacyInterruptGesture = true;
                     log(Log.INFO, TAG, "Using SystemUI-owned legacy BACK for possible "
                             + "MIUI in-app transition interruption");
@@ -3322,8 +2516,22 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 return false;
             }
+            if (launcherOverviewGesture) {
+                int navigationType = info instanceof BackNavigationInfo
+                        ? ((BackNavigationInfo) info).getType() : -1;
+                if (navigationType != TYPE_CALLBACK) {
+                    log(Log.WARN, TAG, "Rejected stale Recents Shell target"
+                            + ", type=" + navigationType
+                            + ", info=" + shortObject(info));
+                    cleanupRejectedShellGesture();
+                    recentsVisualOnlyGesture = true;
+                    return false;
+                }
+                log(Log.INFO, TAG, "Resolved Launcher Recents Shell callback, type="
+                        + navigationType);
+            }
             shellGestureStarted = true;
-            log(Log.INFO, TAG, "SystemUI overlay onGestureStarted"
+            log(Log.INFO, TAG, "SystemUI gesture driver onGestureStarted"
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
         }
@@ -3335,9 +2543,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                         continue;
                     }
                     try {
-                        log(Log.INFO, TAG, "Inspecting Shell transitions for legacy interrupt"
-                                + ", state="
-                                + describeDefaultTransitionState(handler, null));
                         Object transitionsObject = readField(handler, "mTransitions");
                         Object animationsObject = readField(handler, "mAnimations");
                         if (!(transitionsObject instanceof Map)
@@ -3377,11 +2582,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 return true;
                             }
                         }
-                    } catch (Throwable throwable) {
-                        if (ENABLE_VERBOSE_DIAGNOSTICS) {
-                            log(Log.WARN, TAG, "Failed to inspect running Shell transitions",
-                                    throwable);
-                        }
+                    } catch (Throwable ignored) {
                     }
                 }
             }
@@ -3443,6 +2644,35 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        private void clearControllerTriggerAfterVisualOnlyGesture() {
+            try {
+                // Queue the clear through the same BackAnimationImpl path used by the panel's
+                // BackCallback so it is ordered after any trigger=true posted by ACTION_UP.
+                invokeAnyMethod(backAnimationImpl, "setTriggerBack",
+                        new Object[]{Boolean.FALSE});
+                return;
+            } catch (Throwable ignored) {
+            }
+            try {
+                invokeAnyMethod(controller, "setTriggerBack",
+                        new Object[]{Boolean.FALSE});
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to clear visual-only Recents trigger", throwable);
+            }
+        }
+
+        private void clearLocalGestureState() {
+            gestureActive = false;
+            shellGestureStarted = false;
+            gestureSuppressed = false;
+            legacyInterruptGesture = false;
+            launcherOverviewGesture = false;
+            recentsVisualOnlyGesture = false;
+            thresholdCrossed = false;
+            nativePanelActive = false;
+            triggerBack = false;
+        }
+
         private void cancelLocalGesture(MotionEvent event, String reason) {
             try {
                 MotionEvent cancel = MotionEvent.obtain(event);
@@ -3452,13 +2682,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to cancel local edge panel", throwable);
             }
-            gestureActive = false;
-            shellGestureStarted = false;
-            gestureSuppressed = false;
-            legacyInterruptGesture = false;
-            thresholdCrossed = false;
-            nativePanelActive = false;
-            triggerBack = false;
+            clearLocalGestureState();
             log(Log.INFO, TAG, "Cancelled local SystemUI back gesture, reason=" + reason);
         }
 
@@ -3467,13 +2691,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             if (gestureActive) {
-                gestureActive = false;
-                shellGestureStarted = false;
-                gestureSuppressed = false;
-                legacyInterruptGesture = false;
-                thresholdCrossed = false;
-                nativePanelActive = false;
-                triggerBack = false;
+                clearLocalGestureState();
                 log(Log.WARN, TAG, "Cleared local gesture after Shell animation completion"
                         + ", reason=" + reason);
             }
@@ -3491,7 +2709,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 setTrackerState(tracker, "FINISHED");
                 if (isRemoteAnimationWaiting(info)) {
                     scheduleShellAnimationTimeout();
-                    log(Log.INFO, TAG, "SystemUI overlay waiting for remote animation start"
+                    log(Log.INFO, TAG, "SystemUI gesture driver waiting for remote animation start"
                             + ", type=" + ((BackNavigationInfo) info).getType());
                     return true;
                 }
@@ -3577,7 +2795,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if (newTriggerBack && thresholdCrossed) {
                     nativePanelActive = true;
                 }
-                log(Log.INFO, TAG, "SystemUI overlay triggerBack=" + newTriggerBack);
+                log(Log.INFO, TAG, "SystemUI gesture driver triggerBack=" + newTriggerBack);
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to update triggerBack=" + newTriggerBack,
                         throwable);
@@ -3750,24 +2968,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         return method.invoke(target, args);
     }
 
-    private static Object invokeBestMethod(Object target, String methodName, Object[] args)
-            throws Exception {
-        Method best = null;
-        for (Method method : target.getClass().getMethods()) {
-            if (!methodName.equals(method.getName())
-                    || method.getParameterCount() != args.length) {
-                continue;
-            }
-            best = method;
-            break;
-        }
-        if (best == null) {
-            throw new NoSuchMethodException(target.getClass().getName() + "." + methodName);
-        }
-        best.setAccessible(true);
-        return best.invoke(target, args);
-    }
-
     private static Object invokeAnyMethod(Object target, String methodName, Object[] args)
             throws Exception {
         Method best = findAnyMethod(target.getClass(), methodName, args.length);
@@ -3798,12 +2998,4 @@ public final class MiuiBackGestureHook extends XposedModule {
         return null;
     }
 
-    private static void addPrivateFlags(WindowManager.LayoutParams lp, int flags) {
-        try {
-            Field field = WindowManager.LayoutParams.class.getDeclaredField("privateFlags");
-            field.setAccessible(true);
-            field.setInt(lp, field.getInt(lp) | flags);
-        } catch (Throwable ignored) {
-        }
-    }
 }

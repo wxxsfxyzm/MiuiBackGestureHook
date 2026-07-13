@@ -100,7 +100,19 @@ Known transaction:
 
 Current hook blocks this Xiaomi gesture-line progress callback so gesture progress can remain on the SystemUI/AOSP path.
 
-The current module also prevents MiuiHome from adding/showing its back stub window. This is only to keep gesture ownership in SystemUI; it is not the old MiuiHome predictive-back adapter experiment.
+Keep MiuiHome `GestureStubView` initialization intact, but make its two side windows
+non-touchable, empty their touch regions, and block `showGestureStub()`. This only keeps
+gesture ownership in SystemUI; it is not the old MiuiHome predictive-back adapter experiment.
+
+Recents ownership rules:
+
+- Track the launcher's existing overview state and task-launch exit signals in SystemUI.
+- Start Shell once on `ACTION_DOWN` and accept only `BackNavigationInfo.TYPE_CALLBACK`.
+- For null or stale non-callback targets, clean the Shell navigation, keep the native panel
+  visual only, and leave the input stream unpilfered.
+- Do not add focus polling, retries, delayed commits, synthetic input, launcher binder back
+  transactions, or direct `RecentsContainer.onBackPressed()` calls. Before Recents owns
+  focus, an immediate BACK reaching the app below is expected Xiaomi behavior.
 
 The AOSP Shell path to verify in logs is:
 
@@ -261,11 +273,11 @@ remote-animation completion sequence is substantially aligned with Android 16 QP
 but the following module-specific differences remain:
 
 - Input is owned by a module-created SystemUI `InputMonitor` and a custom
-  `SystemUiBackInputOverlay`, rather than flowing entirely through the stock
+  `SystemUiBackGestureDriver`, rather than flowing entirely through the stock
   `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)` path.
-- The module pilfers on `ACTION_DOWN` to prevent the MiuiHome indicator from briefly
-  appearing. AOSP QPR0 normally starts the gestural Shell path on a later MOVE and
-  pilfers according to its threshold state.
+- The module starts Shell on `ACTION_DOWN` and pilfers on the first small outward MOVE to
+  prevent the MiuiHome indicator from briefly appearing. AOSP QPR0 normally starts the
+  gestural Shell path on a later MOVE and pilfers according to its threshold state.
 - When Shell is still busy, the module pilfers and silently suppresses the new
   gesture. AOSP supports a second gesture through `mQueuedTracker`; do not describe
   the current suppression behavior as native AOSP queuing.
@@ -371,6 +383,7 @@ Current static scope:
 
 ```text
 com.android.systemui
+com.miui.home
 system
 ```
 
@@ -383,7 +396,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v87-stable-cleanup
+systemui-aosp-back-v102-clean
 ```
 
 ## LSPosed API 102 Notes
