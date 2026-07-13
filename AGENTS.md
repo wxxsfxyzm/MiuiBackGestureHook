@@ -10,14 +10,11 @@ Current workspace:
 repository root (use the current working directory)
 ```
 
-Local reverse-engineering inputs and exported LSPosed logs are stored under:
+Previous jadx workspace:
 
 ```text
-origin/
+use the currently configured jadx MCP workspace; do not assume an absolute path
 ```
-
-`origin/` contains proprietary system artifacts and test logs. It is local-only and
-must never be committed or included in an upstream PR.
 
 ## Current Goal
 
@@ -28,10 +25,16 @@ The current direction is SystemUI-first: find and undo the Xiaomi path where Sys
 The same-activity
 `TYPE_CALLBACK` gesture baseline is currently usable. Preserve that baseline while researching and restoring the remaining AOSP WM Shell remote-animation behavior.
 
-The Xiaomi-native in-app Activity OPEN interruption path is also restored and stable.
-Preserve it alongside the AOSP predictive-back path: prefer a reversible running Xiaomi
-OPEN transition for that gesture, and use AOSP predictive back when no such transition
-exists.
+Preserve the restored Xiaomi-native in-app Activity OPEN interruption path alongside
+the AOSP predictive-back path.
+
+- Check for a reversible running Xiaomi OPEN transition before calling
+  `BackAnimationController.onGestureStarted(...)`.
+- Do not pause or manually animate the running OPEN animators; let Xiaomi finish or
+  reverse them through its native OPEN/CLOSE merge path.
+- Commit interruption gestures with a normal BACK. If the OPEN animation has already
+  ended or Xiaomi rejects the merge, ordinary CLOSE fallback is expected.
+- When no reversible OPEN exists, preserve the existing AOSP predictive-back path.
 
 Primary target process:
 
@@ -40,8 +43,7 @@ com.android.systemui
 ```
 
 Do not reintroduce MiuiHome `BackAnimationAdapter` injection, MiuiHome hand-written
-`SurfaceControl.Transaction` animations, animator pause/resume experiments, or broad
-system_server cleanup experiments unless the user explicitly asks to revisit them.
+`SurfaceControl.Transaction` animations, or system_server cleanup experiments unless the user explicitly asks to revisit them.
 
 Current remote-animation goal:
 
@@ -98,10 +100,7 @@ Known transaction:
 
 Current hook blocks this Xiaomi gesture-line progress callback so gesture progress can remain on the SystemUI/AOSP path.
 
-The stable module no longer injects the MiuiHome process. There is no MiuiHome
-break-open Binder bridge and `com.miui.home` is not in the static scope. Gesture
-ownership remains SystemUI-first by blocking the Xiaomi gesture-line progress callback
-and using the SystemUI-owned input path.
+The current module also prevents MiuiHome from adding/showing its back stub window. This is only to keep gesture ownership in SystemUI; it is not the old MiuiHome predictive-back adapter experiment.
 
 The AOSP Shell path to verify in logs is:
 
@@ -145,68 +144,6 @@ Progress distance mapping:
   `220dp`, while keeping the same cancel/commit state machine.
 - Do not reintroduce the later v22/v23 experiments that moved trigger ownership to the native panel or intercepted
   `setTriggerBack(false)`; those caused wrong cancellation behavior.
-
-## Xiaomi Native In-App Transition Interruption
-
-The stable Activity interruption implementation reuses Xiaomi's original transition
-objects and animation code. The module does not copy or recreate the Activity
-`TranslateAnimation`, Dimmer, leash transforms, or `SurfaceControl.Transaction`
-animation.
-
-Stable runtime path:
-
-```text
-SystemUI detects a reversible running OPEN transition
-→ gesture commit injects a normal BACK
-→ system_server TransitionControllerImpl pairs OPEN/CLOSE
-→ incoming.miuiTransitionInfo.inAppInterruptedSyncId = running.debugId
-→ SystemUI DefaultTransitionImpl.mergeAnimation(...)
-→ Xiaomi's native ValueAnimator.reverse()
-```
-
-Important entry ordering:
-
-- Check for a reversible running Xiaomi OPEN transition before calling
-  `BackAnimationController.onGestureStarted(...)`.
-- A valid `BackNavigationInfo` can otherwise start AOSP cross-activity predictive back
-  and bypass Xiaomi's native interruption path.
-- Keep the existing null-navigation fallback check to cover the race where an OPEN
-  transition appears between the early check and Shell gesture startup.
-
-Expected gesture behavior matches Xiaomi:
-
-- Commit while the OPEN animators are still valid: pair OPEN/CLOSE and reverse the
-  original native animators.
-- Hold until the OPEN animation finishes: inject the same normal BACK, which naturally
-  becomes an ordinary CLOSE transition because there is no running OPEN to merge.
-- Cancel the gesture: do not inject BACK; the OPEN animation continues naturally.
-- No reversible OPEN at gesture start: preserve the existing AOSP predictive-back path.
-- `DefaultTransitionImpl` may log
-  `Some animators has already ended, skip merge animation. origin size: 2 now size 1`.
-  This is an expected Xiaomi-native rejection and safe ordinary-CLOSE fallback, not a
-  module failure.
-
-Do not reintroduce the abandoned interruption experiments:
-
-- MiuiHome break-open Binder bridge or MiuiHome process scope
-- pausing/resuming OPEN `ValueAnimator` instances while the gesture is held
-- custom Activity surface animations or manual leash transforms
-- closing/entering target swaps, leash swaps, visibility forcing, or layer forcing
-- frame-level `DefaultAnimationAdapter.applyTransformation(...)` hooks/logging
-
-The v81-v85 pause/resume experiments are specifically invalid. `ValueAnimator` pause
-time compensation is deferred until a later frame, which caused first-frame jumps or a
-short forward movement before native reverse. v86 restored Xiaomi's play-through
-semantics; v87 removed the obsolete state machine and hot-path diagnostics.
-
-Stable v87 validation:
-
-- no MiuiHome process injection
-- no animator pause/resume
-- no frame-level reverse logging
-- no duplicate BACK events
-- no stuck transitions or cleanup timeouts
-- native merge rejection safely falls back to an ordinary CLOSE
 
 Remote animation registry finding:
 
@@ -464,8 +401,7 @@ API 102 facts used in this scaffold:
 
 - Prefer Java for now; current scaffold is Java-only.
 - Use modern LSPosed/libxposed API 102.
-- Keep hooks small and log lifecycle/decision points. Do not log every animation frame
-  or run repeated reflective diagnostics on hot animation paths.
+- Keep hooks small and heavily logged.
 - First target `com.android.systemui`.
 - Keep scope minimal while testing.
 - Do not hook `system_server` unless SystemUI evidence shows the AOSP Shell path is blocked by framework/server behavior.
