@@ -121,6 +121,15 @@ Remote-animation rules:
 - For prepared remote animations, mark the tracker finished and call or wait for
   `startPostCommitAnimation()` so the runner receives cancel/invoke before navigation
   cleanup. Do not finish an active prepared animation directly from the overlay.
+- Run the complete release transaction on the Shell executor: synchronize the requested
+  trigger, read the active tracker's actual trigger, update focused-task/tracker state,
+  inspect the runner, and finish or enter post-commit there. The SystemUI input Looper must
+  not read or mutate these Shell-owned fields directly.
+- On a committed gesture, publish `BackNavigationInfo.getFocusedTaskId()` to the Shell back
+  transition observer before post-commit. A missing or explicitly cancelled runner may
+  finish directly; a waiting runner must wait, and a ready runner must enter post-commit.
+- Treat reflection failures while reading remote runner state as unknown. Keep the tracker
+  finished and wait for Shell's animation timeout instead of finishing navigation early.
 - A released gesture whose runner is waiting must remain finished and wait for animation
   start. Null navigation must cancel and clean with `finishBackNavigation(false)` without a
   fallback key.
@@ -178,6 +187,7 @@ app/src/main/java/dev/codex/miuibackgesturehook/MiuiBackGestureHook.java
 app/src/main/resources/META-INF/xposed/module.prop
 app/src/main/resources/META-INF/xposed/java_init.list
 app/src/main/resources/META-INF/xposed/scope.list
+reports/
 ```
 
 Compile-only dependencies:
@@ -207,6 +217,14 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 - Use the modern LSPosed/libxposed API already declared by the project.
 - Keep hooks small and heavily logged.
 - Keep scope minimal while testing.
+- Keep `AGENTS.md` limited to goals, operating boundaries, preserved invariants,
+  prohibited approaches, and development workflow. Do not use it as an implementation
+  report, experiment timeline, log summary, or version changelog.
+- Put implementation notes, reverse-engineering evidence, experiment results, and
+  historical findings under a topic-specific directory in `reports/`.
+- Number experiment directories chronologically as
+  `reports/NNN-short-topic/README.md`, starting at `001`. Once assigned, do not renumber or
+  reuse a number; later work on the same experiment updates its existing report.
 - Keep behavior, diagnostics, and documentation changes in atomic commits.
 
 ## Useful Commands
