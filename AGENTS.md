@@ -7,23 +7,43 @@ This repository is an LSPosed module for researching Xiaomi/MIUI back gesture be
 Current workspace:
 
 ```text
-D:/code/miui-back-gesture-hook
+repository root (use the current working directory)
 ```
 
 Previous jadx workspace:
 
 ```text
-D:/code/jadx
+use the currently configured jadx MCP workspace; do not assume an absolute path
 ```
 
 ## Current Goal
 
-The old MiuiHome-side experiment is abandoned.
+The abandoned MiuiHome experiment is specifically the old GestureStub/
+`BackAnimationAdapter` injection path. Standard launcher callback/runner registration
+through Shell remains in scope for `TYPE_RETURN_TO_HOME`.
 
 The current direction is SystemUI-first: find and undo the Xiaomi path where SystemUI delegates gesture/back progress handling to MiuiHome, then restore the AOSP SystemUI/WM Shell back gesture pipeline.
 
 The same-activity
 `TYPE_CALLBACK` gesture baseline is currently usable. Preserve that baseline while researching and restoring the remaining AOSP WM Shell remote-animation behavior.
+
+Preserve the restored Xiaomi-native in-app Activity OPEN interruption path alongside
+the AOSP predictive-back path.
+
+- Check for a reversible running Xiaomi OPEN transition before calling
+  `BackAnimationController.onGestureStarted(...)`.
+- Do not pause or manually animate the running OPEN animators; let Xiaomi finish or
+  reverse them through its native OPEN/CLOSE merge path.
+- Commit interruption gestures with a normal BACK. If the OPEN animation has already
+  ended or Xiaomi rejects the merge, ordinary CLOSE fallback is expected.
+- When no reversible OPEN exists, preserve the existing AOSP predictive-back path.
+- Capture the transition/animator set on `DefaultTransitionHandler.startAnimation(...)`'s
+  owner thread, verify animator state on `mAnimExecutor`, and publish a module-owned
+  snapshot with immutable transition/animator identity and an atomic lifecycle state.
+  Do not read Shell's `ArrayMap` or animator state directly from the input Looper.
+- Duplicate BACK suppression must be tied to the current interruption attempt, controller,
+  and running `TransitionInfo`. It may consume at most one adjacent DOWN/UP pair after a
+  successful Xiaomi merge; never use a process-wide time window.
 
 Primary target process:
 
@@ -31,8 +51,11 @@ Primary target process:
 com.android.systemui
 ```
 
-Do not reintroduce MiuiHome `BackAnimationAdapter` injection, MiuiHome hand-written
-`SurfaceControl.Transaction` animations, or system_server cleanup experiments unless the user explicitly asks to revisit them.
+Do not reintroduce MiuiHome `BackAnimationAdapter` injection or hand-written GestureStub
+surface animations. `SurfaceControl.Transaction` use inside an AOSP-aligned launcher
+runner registered through Shell is allowed. Do not add system_server cleanup or
+compatibility hooks beyond the retained, evidence-backed hooks unless new SystemUI/server
+evidence requires them.
 
 Current remote-animation goal:
 
@@ -41,9 +64,11 @@ Current remote-animation goal:
 - Checked-in AOSP reference snippets are consolidated under `refs/aosp_back/`, split into `shell/` and `systemui/`.
 - Prefer restoring Shell registry/runner/adapter wiring before writing custom Surface animation code.
 - `TYPE_CROSS_ACTIVITY` and `TYPE_CROSS_TASK` can be restored from existing Xiaomi Shell animation objects if they exist.
--
-
-`TYPE_RETURN_TO_HOME` depends on launcher registering a back-to-launcher callback through Shell; do not fabricate it without confirming the MiuiHome/SystemUI registration path.
+- The `TYPE_RETURN_TO_HOME` registration path is confirmed: SystemUI's
+  `LauncherProxyService` includes the Shell `IBackAnimation` binder in its external-interface
+  bundle, while MiuiHome's `SystemUiProxyWrapper.setProxyByBundle(...)` currently ignores it.
+  Restore the standard launcher callback/runner registration through that binder; do not
+  revive the old adapter-injection path.
 
 ## Current Findings
 
@@ -89,7 +114,24 @@ Known transaction:
 
 Current hook blocks this Xiaomi gesture-line progress callback so gesture progress can remain on the SystemUI/AOSP path.
 
-The current module also prevents MiuiHome from adding/showing its back stub window. This is only to keep gesture ownership in SystemUI; it is not the old MiuiHome predictive-back adapter experiment.
+Keep MiuiHome `GestureStubView` initialization intact, but make its two side windows
+non-touchable, empty their touch regions, and block `showGestureStub()`. This only keeps
+gesture ownership in SystemUI; it is not the old MiuiHome predictive-back adapter experiment.
+
+Recents ownership rules:
+
+- Track the launcher's existing overview state and task-launch exit signals in SystemUI.
+- Mirror launcher state through the module's explicit SystemUI-targeted broadcast with
+  `BroadcastOptions.setShareIdentityEnabled(true)`, and validate that the sending UID owns
+  `com.miui.home` and the shared caller package is exactly `com.miui.home`. Do not trust the
+  unprotected native fullscreen-state broadcast directly.
+- For a Recents gesture, start Shell once on `ACTION_DOWN` and accept only
+  `BackNavigationInfo.TYPE_CALLBACK`.
+- For null or stale non-callback Recents targets, clean the Shell navigation, keep the native panel
+  visual only, and leave the input stream unpilfered.
+- Do not add focus polling, retries, delayed commits, synthetic input, launcher binder back
+  transactions, or direct `RecentsContainer.onBackPressed()` calls. Before Recents owns
+  focus, an immediate BACK reaching the app below is expected Xiaomi behavior.
 
 The AOSP Shell path to verify in logs is:
 
@@ -147,15 +189,20 @@ Remote animation registry finding:
   `invokeOrCancelBack(tracker)` from the overlay. AOSP release flow marks the tracker finished and calls
   `startPostCommitAnimation()`, which dispatches `onBackCancelled`/
   `onBackInvoked` to the animation runner callback first. Bypassing that leaves cross-activity leashes transformed when cancellation occurs.
-- Current cross-activity logs show `TYPE_CROSS_ACTIVITY=2`, `prepareRemoteAnimation=true`, and `DefaultCrossActivityBackAnimation` with
+Historical cross-activity diagnostics below are retained to prevent replaying failed
+surface patches:
+
+- Cross-activity logs showed `TYPE_CROSS_ACTIVITY=2`, `prepareRemoteAnimation=true`, and `DefaultCrossActivityBackAnimation` with
   `closingTarget mode=1 order=93` and
-  `enteringTarget mode=0 order=90`. On paper that matches AOSP target assignment, but the user visually observes the top activity playing the lower/entering animation. Next diagnostics should compare
-  `BackMotionEvent.getDepartingAnimationTarget()` identity against `closingTarget` and `enteringTarget`.
+  `enteringTarget mode=0 order=90`. On paper that matched AOSP target assignment, but the
+  user visually observed the top activity playing the lower/entering animation. The
+  subsequent diagnostics compared `BackMotionEvent.getDepartingAnimationTarget()` identity
+  against `closingTarget` and `enteringTarget`.
 - v30 logs confirmed `BackMotionEvent.getDepartingAnimationTarget()` identity matches `closingTarget`, not
   `enteringTarget`. The target mode assignment is therefore not directly reversed.
-- v31 changes only the overlay start X from fixed edge
-  `0/displayWidth` to the real touch down X, preserving the v24 trigger/cancel state machine. This should make remote animation
-  `BackMotionEvent.touchX` match AOSP input semantics more closely.
+- v31 changed only the overlay start X from fixed edge
+  `0/displayWidth` to the real touch down X, preserving the v24 trigger/cancel state machine.
+  This was intended to align remote-animation `BackMotionEvent.touchX` with AOSP input semantics.
 - v31 logs confirmed real touch X is now used, but the user still visually observes the top activity playing the lower/entering animation.
 - v32 forced `enteringTarget.leash` below `closingTarget.leash` with `SurfaceControl.Transaction.setRelativeLayer(entering, closing, -1)` after
   `cross_activity_startBackAnimation`; logs confirmed the code ran, but the user saw no improvement. This SystemUI-side layer patch was removed in v33 and should not be reintroduced.
@@ -189,16 +236,16 @@ Remote animation registry finding:
 - v38 logs showed Shell transform mapping is not reversed: `closingTarget` (`AppDetailActivity`) receives closing rect/alpha and
   `enteringTarget` (
   `MainActivity`) receives entering rect/alpha. If the visual still looks reversed, investigate server-side animation leash creation and actual surface contents rather than Shell transform assignment.
-- v39 adds server-side diagnostics only: hook `BackWindowAnimationAdaptor.startAnimation(...)` and
+- v39 added server-side diagnostics only: hook `BackWindowAnimationAdaptor.startAnimation(...)` and
   `SurfaceAnimator.createAnimationLeash(...)` for predictive back (
   `type=256`) to log animatable target, original surface, animation leash parent, captured leash, and resulting
-  `RemoteAnimationTarget`. This is to determine whether system_server reparented the wrong surface into an otherwise correctly named remote target leash.
+  `RemoteAnimationTarget`. This determined whether system_server reparented the wrong surface into an otherwise correctly named remote target leash.
 - v39 logs show system_server did not swap cross-activity targets or reparent the wrong surface: `AppDetailActivity` is
   `isOpen=false/mode=1` with its own ActivityRecord surface, and `MainActivity` is
   `isOpen=true/mode=0` with its own ActivityRecord surface. Shell also applies closing rect/alpha to AppDetail and entering rect/alpha to Main. The remaining suspected failure is opening Activity visibility/preview exposure or parent-layer state, not transform assignment.
-- v40 adds visibility-chain diagnostics only: hook `ScheduleAnimationBuilder.applyPreviewStrategy(...)`,
+- v40 added visibility-chain diagnostics only: hook `ScheduleAnimationBuilder.applyPreviewStrategy(...)`,
   `WindowContainer.enforceSurfaceVisible(...)`, and
-  `ActivityRecord.setVisibility(boolean)` around predictive back. Use the next log to verify whether the entering activity is actually forced visible and whether a windowless/starting surface path is involved.
+  `ActivityRecord.setVisibility(boolean)` around predictive back. The following log verified whether the entering activity was forced visible and whether a windowless/starting surface path was involved.
 - v40 logs show the entering `MainActivity` is explicitly `setVisibility(true)` and passed to
   `WindowContainer.enforceSurfaceVisible(...)`, but its animation leash parent remains its own `TaskFragment`. AOSP
   `BackNavigationController.AnimationHandler.createAdaptor(...)` contains an activity-switch workaround for opening
@@ -250,11 +297,11 @@ remote-animation completion sequence is substantially aligned with Android 16 QP
 but the following module-specific differences remain:
 
 - Input is owned by a module-created SystemUI `InputMonitor` and a custom
-  `SystemUiBackInputOverlay`, rather than flowing entirely through the stock
+  `SystemUiBackGestureDriver`, rather than flowing entirely through the stock
   `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)` path.
-- The module pilfers on `ACTION_DOWN` to prevent the MiuiHome indicator from briefly
-  appearing. AOSP QPR0 normally starts the gestural Shell path on a later MOVE and
-  pilfers according to its threshold state.
+- The module starts Shell on `ACTION_DOWN` and pilfers on the first small outward MOVE to
+  prevent the MiuiHome indicator from briefly appearing. AOSP QPR0 normally starts the
+  gestural Shell path on a later MOVE and pilfers according to its threshold state.
 - When Shell is still busy, the module pilfers and silently suppresses the new
   gesture. AOSP supports a second gesture through `mQueuedTracker`; do not describe
   the current suppression behavior as native AOSP queuing.
@@ -286,8 +333,8 @@ Hidden API optimization boundary:
 - Continue accessing SystemUI/WM Shell implementation classes through the real
   package ClassLoader and reflection. Optimize hot calls by resolving and caching
   `Method`/`Field` objects, rather than introducing static Shell type references.
-- The failed v60 Shell-controller-stub experiment was not committed. The stable
-  committed baseline is v59 (`91776ee`).
+- The failed v60 Shell-controller-stub experiment was not committed. Its stable baseline
+  at the time was v59 (`91776ee`); the current branch has moved beyond that historical point.
 
 The currently aligned remote-animation behavior includes:
 
@@ -334,6 +381,9 @@ Important files:
 settings.gradle
 build.gradle
 app/build.gradle
+hidden-api/build.gradle
+hidden-api/src/main/java/android/view/
+hidden-api/src/main/java/android/window/
 app/src/main/AndroidManifest.xml
 app/src/main/java/dev/codex/miuibackgesturehook/MiuiBackGestureHook.java
 app/src/main/resources/META-INF/xposed/module.prop
@@ -341,10 +391,11 @@ app/src/main/resources/META-INF/xposed/java_init.list
 app/src/main/resources/META-INF/xposed/scope.list
 ```
 
-API dependency:
+Compile-only dependencies:
 
 ```gradle
 compileOnly "io.github.libxposed:api:102.0.0"
+compileOnly project(":hidden-api")
 ```
 
 LSPosed metadata:
@@ -360,6 +411,7 @@ Current static scope:
 
 ```text
 com.android.systemui
+com.miui.home
 system
 ```
 
@@ -372,7 +424,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 Current build marker:
 
 ```text
-systemui-aosp-back-v70-clear-overview-on-back
+systemui-aosp-back-v103-interrupt-quality
 ```
 
 ## LSPosed API 102 Notes
@@ -393,7 +445,8 @@ API 102 facts used in this scaffold:
 - Keep hooks small and heavily logged.
 - First target `com.android.systemui`.
 - Keep scope minimal while testing.
-- Do not hook `system_server` unless SystemUI evidence shows the AOSP Shell path is blocked by framework/server behavior.
+- Do not add further `system_server` hooks unless new SystemUI evidence shows the AOSP
+  Shell path is blocked by framework/server behavior.
 - Use jadx MCP to confirm method names and transaction codes before adding new hooks.
 
 ## Useful Commands
@@ -407,14 +460,20 @@ Build:
 Check APK metadata:
 
 ```powershell
-jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes.dex|AndroidManifest.xml'
+jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
+```
+
+Check that the APK is from the current build:
+
+```powershell
+Get-Item app\build\outputs\apk\debug\app-debug.apk | Select-Object FullName,Length,LastWriteTime
 ```
 
 If `jar` is not on `PATH`, resolve it from the active Java runtime:
 
 ```powershell
 $jar = Join-Path (Split-Path (Get-Command java).Source -Parent) 'jar.exe'
-& $jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes.dex|AndroidManifest.xml'
+& $jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
 ```
 
 Git status:
