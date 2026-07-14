@@ -64,7 +64,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-v103-interrupt-quality";
+            "systemui-aosp-back-v107-reused-close-open";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -80,6 +80,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.views.TaskView";
     private static final String MIUI_HOME_STATE_NOTIFY_UTILS =
             "com.miui.home.recents.util.StateNotifyUtils";
+    private static final String MIUI_HOME_BACK_GESTURE_BREAK_CONTROLLER =
+            "com.miui.home.recents.BackGestureBreakController";
+    private static final String MIUI_HOME_WINDOW_ELEMENT_ANIM_LISTENER =
+            "com.miui.home.recents.anim.StateManager$windowElementAnimListener$1";
+    private static final String MIUI_HOME_STATE_MANAGER =
+            "com.miui.home.recents.anim.StateManager";
     private static final String NAVIGATION_BAR =
             "com.android.systemui.navigationbar.views.NavigationBar";
     private static final String BACK_ANIMATION_CONTROLLER =
@@ -103,6 +109,17 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int EDGE_RIGHT = 1;
     private static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
             "dev.codex.miuibackgesturehook.action.MIUI_OVERVIEW_STATE_CHANGE";
+    private static final String MODULE_MIUI_HOME_OPEN_BREAK_COMMAND =
+            "dev.codex.miuibackgesturehook.action.MIUI_HOME_OPEN_BREAK";
+    private static final String EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE =
+            "launcher_open_break_available";
+    private static final String EXTRA_LAUNCHER_OPEN_BREAK_GENERATION =
+            "launcher_open_break_generation";
+    private static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
+            "launcher_open_break_attempt";
+    private static final int LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER = 0;
+    private static final int LAUNCHER_OPEN_BREAK_RESULT_REJECTED = 1;
+    private static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
     private static final int KEY_ACTION_UP = 1;
     private static final int KEY_ACTION_DOWN = 0;
     private static final int TYPE_CROSS_ACTIVITY = 2;
@@ -144,11 +161,27 @@ public final class MiuiBackGestureHook extends XposedModule {
     private final Object legacyBackGuardLock = new Object();
     private final AtomicLong legacyBackAttemptIds = new AtomicLong();
     private final AtomicLong openSnapshotGeneration = new AtomicLong();
+    private final AtomicLong launcherOpenBreakAttemptIds = new AtomicLong();
+    private final AtomicInteger launcherOpenBreakCommandsInFlight = new AtomicInteger();
+    private final AtomicLong miuiHomeOpenBreakGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    private final AtomicLong miuiHomeOpenBreakCallbackEpoch = new AtomicLong();
     private volatile boolean acceptingOpenSnapshots = true;
     private volatile boolean miuiOverviewVisible;
+    private volatile boolean miuiLauncherOpenBreakAvailable;
+    private volatile long miuiLauncherOpenBreakGeneration;
     private volatile long miuiOverviewDismissPendingUntilUptime;
     private Context miuiOverviewReceiverContext;
     private BroadcastReceiver miuiOverviewReceiver;
+    private volatile Object miuiHomeOpenBreakController;
+    private volatile boolean miuiHomeOpenBreakCommandPending;
+    private volatile long miuiHomeOpenBreakGeneration;
+    private volatile Object miuiHomeOpenBreakAnimationIdentity;
+    private volatile boolean miuiHomeOpenBreakGenerationPrepared;
+    private volatile boolean miuiHomeOpenBreakAnimationActive;
+    private Context miuiHomeOpenBreakContext;
+    private Context miuiHomeOpenBreakCommandReceiverContext;
+    private BroadcastReceiver miuiHomeOpenBreakCommandReceiver;
     private String processName;
     private boolean nativePluginDiagnosticsLogged;
     private volatile Field defaultTransitionAnimationsField;
@@ -277,11 +310,26 @@ public final class MiuiBackGestureHook extends XposedModule {
                 + ", hooks=" + hookHandles.size());
         boolean savedMiuiOverviewVisible = miuiOverviewVisible;
         long savedMiuiOverviewDismissDeadline = miuiOverviewDismissPendingUntilUptime;
+        Object savedMiuiHomeOpenBreakController = miuiHomeOpenBreakController;
+        Context savedMiuiHomeOpenBreakContext = miuiHomeOpenBreakContext;
+        long savedMiuiHomeOpenBreakGeneration = miuiHomeOpenBreakGeneration;
+        Object savedMiuiHomeOpenBreakAnimationIdentity =
+                miuiHomeOpenBreakAnimationIdentity;
+        boolean savedMiuiHomeOpenBreakGenerationPrepared =
+                miuiHomeOpenBreakGenerationPrepared;
+        boolean savedMiuiHomeOpenBreakAnimationActive =
+                miuiHomeOpenBreakAnimationActive;
+        boolean savedMiuiHomeOpenBreakCommandPending =
+                miuiHomeOpenBreakCommandPending;
         acceptingOpenSnapshots = false;
+        miuiHomeOpenBreakCallbackEpoch.incrementAndGet();
         openSnapshotGeneration.incrementAndGet();
         invalidateAllOpenTransitionSnapshots("hotReload");
         clearLegacyBackGuard("hotReload");
+        miuiLauncherOpenBreakAvailable = false;
+        miuiLauncherOpenBreakGeneration = 0L;
         unregisterMiuiOverviewStateReceiver();
+        unregisterMiuiHomeOpenBreakCommandReceiver();
         Object[][] inputState = new Object[nativeInputMonitors.size()][2];
         int index = 0;
         for (Map.Entry<Object, NativeBackInputMonitor> entry
@@ -296,7 +344,13 @@ public final class MiuiBackGestureHook extends XposedModule {
         nativeInputMonitors.clear();
         param.setSavedInstanceState(new Object[]{
                 inputState, Boolean.valueOf(savedMiuiOverviewVisible),
-                Long.valueOf(savedMiuiOverviewDismissDeadline)
+                Long.valueOf(savedMiuiOverviewDismissDeadline),
+                savedMiuiHomeOpenBreakController, savedMiuiHomeOpenBreakContext,
+                Long.valueOf(savedMiuiHomeOpenBreakGeneration),
+                savedMiuiHomeOpenBreakAnimationIdentity,
+                Boolean.valueOf(savedMiuiHomeOpenBreakGenerationPrepared),
+                Boolean.valueOf(savedMiuiHomeOpenBreakAnimationActive),
+                Boolean.valueOf(savedMiuiHomeOpenBreakCommandPending)
         });
         return true;
     }
@@ -315,6 +369,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomeRecentsStateHook = false;
         boolean hadMiuiHomeTaskLaunchHook = false;
         boolean hadMiuiHomeFullscreenStateHook = false;
+        boolean hadMiuiHomeOpenBreakEnableHook = false;
+        boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
+        boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
+        boolean hadMiuiHomeReusedCloseOpenHook = false;
         boolean hadDefaultTransitionStartHook = false;
         boolean hadDefaultTransitionMergeHook = false;
         boolean hadBackSendEventHook = false;
@@ -350,6 +408,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                     hadMiuiHomeTaskLaunchHook = true;
                 } else if ("miui_home_fullscreen_state".equals(oldHandle.getId())) {
                     hadMiuiHomeFullscreenStateHook = true;
+                } else if ("miui_home_open_break_enable".equals(oldHandle.getId())) {
+                    hadMiuiHomeOpenBreakEnableHook = true;
+                } else if ("miui_home_open_break_animation_start".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeOpenBreakAnimationStartHook = true;
+                } else if ("miui_home_open_break_animation_end".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeOpenBreakAnimationEndHook = true;
+                } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
+                    hadMiuiHomeReusedCloseOpenHook = true;
                 } else if ("systemui_default_transition_start".equals(oldHandle.getId())) {
                     hadDefaultTransitionStartHook = true;
                 } else if ("systemui_default_transition_merge".equals(oldHandle.getId())) {
@@ -438,6 +506,28 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!hadMiuiHomeFullscreenStateHook) {
                     hookMiuiHomeFullscreenState(hotReloadClassLoader);
                 }
+                if (!hadMiuiHomeOpenBreakEnableHook) {
+                    Class<?> breakControllerClass = Class.forName(
+                            MIUI_HOME_BACK_GESTURE_BREAK_CONTROLLER, false,
+                            hotReloadClassLoader);
+                    hookMiuiHomeOpenBreakEnable(breakControllerClass);
+                }
+                if (!hadMiuiHomeOpenBreakAnimationStartHook
+                        || !hadMiuiHomeOpenBreakAnimationEndHook) {
+                    Class<?> listenerClass = Class.forName(
+                            MIUI_HOME_WINDOW_ELEMENT_ANIM_LISTENER, false,
+                            hotReloadClassLoader);
+                    if (!hadMiuiHomeOpenBreakAnimationStartHook) {
+                        hookMiuiHomeOpenBreakAnimationStart(listenerClass);
+                    }
+                    if (!hadMiuiHomeOpenBreakAnimationEndHook) {
+                        hookMiuiHomeOpenBreakAnimationEnd(listenerClass);
+                    }
+                }
+                if (!hadMiuiHomeReusedCloseOpenHook) {
+                    hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
+                }
+                restoreMiuiHomeOpenBreakAfterHotReload();
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Failed to restore MiuiHome hooks",
                         throwable);
@@ -481,6 +571,18 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("miui_home_fullscreen_state".equals(hookId)) {
             return this::mirrorMiuiHomeFullscreenState;
+        }
+        if ("miui_home_open_break_enable".equals(hookId)) {
+            return this::captureMiuiHomeOpenBreakEnable;
+        }
+        if ("miui_home_open_break_animation_start".equals(hookId)) {
+            return this::mirrorMiuiHomeOpenBreakAnimationStart;
+        }
+        if ("miui_home_open_break_animation_end".equals(hookId)) {
+            return this::mirrorMiuiHomeOpenBreakAnimationEnd;
+        }
+        if ("miui_home_reused_close_open".equals(hookId)) {
+            return this::restoreMiuiHomeReusedCloseOpen;
         }
         if (hookId.startsWith("miui_home_block_gesture_window_")) {
             // v88 blocked BaseRecentsImpl.addBackStubWindow(), leaving its gesture-stub
@@ -546,6 +648,23 @@ public final class MiuiBackGestureHook extends XposedModule {
                 miuiOverviewVisible = ((Boolean) state[1]).booleanValue();
                 if (state.length >= 3 && state[2] instanceof Long) {
                     miuiOverviewDismissPendingUntilUptime = ((Long) state[2]).longValue();
+                }
+                if (state.length >= 10) {
+                    miuiHomeOpenBreakController = state[3];
+                    if (state[4] instanceof Context) {
+                        miuiHomeOpenBreakContext = (Context) state[4];
+                    }
+                    if (state[5] instanceof Long) {
+                        miuiHomeOpenBreakGeneration = ((Long) state[5]).longValue();
+                        miuiHomeOpenBreakGenerationIds.set(Math.max(
+                                miuiHomeOpenBreakGenerationIds.get(),
+                                miuiHomeOpenBreakGeneration));
+                    }
+                    miuiHomeOpenBreakAnimationIdentity = state[6];
+                    miuiHomeOpenBreakGenerationPrepared =
+                            Boolean.TRUE.equals(state[7]);
+                    miuiHomeOpenBreakAnimationActive = Boolean.TRUE.equals(state[8]);
+                    miuiHomeOpenBreakCommandPending = Boolean.TRUE.equals(state[9]);
                 }
             }
         }
@@ -619,11 +738,20 @@ public final class MiuiBackGestureHook extends XposedModule {
             Class<?> taskViewClass = Class.forName(MIUI_HOME_TASK_VIEW, false, classLoader);
             hookMiuiHomeRecentsTaskLaunch(taskViewClass);
             hookMiuiHomeFullscreenState(classLoader);
+            Class<?> breakControllerClass = Class.forName(
+                    MIUI_HOME_BACK_GESTURE_BREAK_CONTROLLER, false, classLoader);
+            hookMiuiHomeOpenBreakEnable(breakControllerClass);
+            Class<?> windowElementAnimListenerClass = Class.forName(
+                    MIUI_HOME_WINDOW_ELEMENT_ANIM_LISTENER, false, classLoader);
+            hookMiuiHomeOpenBreakAnimationStart(windowElementAnimListenerClass);
+            hookMiuiHomeOpenBreakAnimationEnd(windowElementAnimListenerClass);
+            hookMiuiHomeReusedCloseOpen(classLoader);
             log(Log.INFO, TAG, "Disabled MiuiHome side back gesture input"
                     + ", preservedGestureStubInitialization=true"
                     + ", mirrorsActualRecentsState=true"
                     + ", mirrorsTaskLaunchExit=true"
                     + ", mirrorsAuthenticatedFullscreenState=true"
+                    + ", mirrorsLauncherOpenBreakState=true"
                     + ", usesStandardLauncherBackCallback=true");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to block MiuiHome gesture windows", throwable);
@@ -693,6 +821,483 @@ public final class MiuiBackGestureHook extends XposedModule {
         recordHookHandle(hook(method)
                 .setId("miui_home_fullscreen_state")
                 .intercept(this::mirrorMiuiHomeFullscreenState));
+    }
+
+    private void hookMiuiHomeOpenBreakEnable(Class<?> breakControllerClass)
+            throws NoSuchMethodException {
+        Method method = breakControllerClass.getDeclaredMethod("enableBackBreakOpenAnim");
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_open_break_enable")
+                .intercept(this::captureMiuiHomeOpenBreakEnable));
+    }
+
+    private void hookMiuiHomeOpenBreakAnimationStart(Class<?> listenerClass)
+            throws NoSuchMethodException {
+        Method method = listenerClass.getDeclaredMethod("onAnimationStart", Object.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_open_break_animation_start")
+                .intercept(this::mirrorMiuiHomeOpenBreakAnimationStart));
+    }
+
+    private void hookMiuiHomeOpenBreakAnimationEnd(Class<?> listenerClass)
+            throws NoSuchMethodException {
+        Method method = listenerClass.getDeclaredMethod("onAnimationEnd", Object.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_open_break_animation_end")
+                .intercept(this::mirrorMiuiHomeOpenBreakAnimationEnd));
+    }
+
+    private void hookMiuiHomeReusedCloseOpen(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> stateManagerClass = Class.forName(MIUI_HOME_STATE_MANAGER, false,
+                classLoader);
+        Method method = stateManagerClass.getDeclaredMethod("animToFullScreen", View.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_reused_close_open")
+                .intercept(this::restoreMiuiHomeReusedCloseOpen));
+    }
+
+    private Object captureMiuiHomeOpenBreakEnable(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        Object controller = chain.getThisObject();
+        miuiHomeOpenBreakController = controller;
+        miuiHomeOpenBreakGeneration = nextMiuiHomeOpenBreakGeneration();
+        miuiHomeOpenBreakAnimationIdentity = null;
+        miuiHomeOpenBreakGenerationPrepared = true;
+        miuiHomeOpenBreakAnimationActive = false;
+        miuiHomeOpenBreakCommandPending = false;
+        refreshMiuiHomeOpenBreakAvailability(controller, "enable");
+        return result;
+    }
+
+    private Object mirrorMiuiHomeOpenBreakAnimationStart(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        if (!miuiHomeOpenBreakGenerationPrepared
+                || miuiHomeOpenBreakGeneration == 0L) {
+            miuiHomeOpenBreakGeneration = nextMiuiHomeOpenBreakGeneration();
+        }
+        miuiHomeOpenBreakGenerationPrepared = false;
+        Object animationIdentity = chain.getArg(0);
+        miuiHomeOpenBreakAnimationIdentity = animationIdentity;
+        miuiHomeOpenBreakAnimationActive = true;
+        miuiHomeOpenBreakCommandPending = false;
+        long generation = miuiHomeOpenBreakGeneration;
+        long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
+        // The StateManager listener runs from inside the implementor's start callback. At
+        // that point isRunning()/lastAnimType can still expose the pre-start values. Query on
+        // the next main-loop turn, after animTo() has finished publishing the active state.
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (miuiHomeOpenBreakCallbackEpoch.get() == callbackEpoch
+                    && miuiHomeOpenBreakGeneration == generation
+                    && miuiHomeOpenBreakAnimationIdentity == animationIdentity
+                    && miuiHomeOpenBreakAnimationActive) {
+                refreshMiuiHomeOpenBreakAvailability(
+                        miuiHomeOpenBreakController, "animationStartSettled");
+            }
+        });
+        return result;
+    }
+
+    private Object mirrorMiuiHomeOpenBreakAnimationEnd(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        Object endedAnimationIdentity = chain.getArg(0);
+        long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
+        // Xiaomi's listener posts its actual StateManager cleanup to the main executor.
+        // Queue behind it so isOpenAnimRunning() observes the final state. If another OPEN
+        // has already replaced this one, the native availability query keeps the new state.
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch) {
+                return;
+            }
+            if (miuiHomeOpenBreakAnimationIdentity == endedAnimationIdentity) {
+                miuiHomeOpenBreakAnimationActive = false;
+                miuiHomeOpenBreakGenerationPrepared = false;
+            }
+            refreshMiuiHomeOpenBreakAvailability(
+                    miuiHomeOpenBreakController, "animationEnd");
+        });
+        return result;
+    }
+
+    private Object restoreMiuiHomeReusedCloseOpen(XposedInterface.Chain chain)
+            throws Throwable {
+        Object stateManager = chain.getThisObject();
+        Object closingElement;
+        boolean reusableClose;
+        try {
+            closingElement = readField(stateManager, "windowElement");
+            reusableClose = closingElement != null
+                    && Boolean.TRUE.equals(
+                    invokeAnyMethod(closingElement,
+                            "isClosingAnimRunning", new Object[0]))
+                    && Boolean.TRUE.equals(
+                    invokeAnyMethod(closingElement,
+                            "isReusefulAnimRunning", new Object[0]));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to inspect reusable launcher CLOSE; proceeding native",
+                    throwable);
+            return chain.proceed();
+        }
+
+        Object result = chain.proceed();
+        if (!reusableClose) {
+            return result;
+        }
+
+        try {
+            Object openingElement = readField(stateManager, "windowElement");
+            boolean sameElement = openingElement == closingElement;
+            boolean openRunning = sameElement && Boolean.TRUE.equals(invokeAnyMethod(
+                    openingElement, "isOpenAnimRunning", new Object[0]));
+            Object currentAnimType = sameElement
+                    ? invokeAnyMethod(openingElement, "getCurrentAnimType", new Object[0])
+                    : null;
+            boolean openFromHome = currentAnimType instanceof Enum<?>
+                    && "OPEN_FROM_HOME".equals(((Enum<?>) currentAnimType).name());
+            if (!openRunning || !openFromHome) {
+                log(Log.WARN, TAG, "Did not restore reused CLOSE-to-OPEN break state"
+                        + ", sameElement=" + sameElement
+                        + ", openRunning=" + openRunning
+                        + ", openFromHome=" + openFromHome
+                        + ", currentAnimType=" + currentAnimType
+                        + ", closingElement=" + shortObject(closingElement)
+                        + ", openingElement=" + shortObject(openingElement));
+                return result;
+            }
+
+            Object controller = miuiHomeOpenBreakController;
+            if (controller == null) {
+                log(Log.WARN, TAG, "Cannot restore reused CLOSE-to-OPEN break state"
+                        + ", controller=null"
+                        + ", currentAnimType=" + currentAnimType
+                        + ", windowElement=" + shortObject(openingElement));
+                return result;
+            }
+            Object animationIdentity = invokeAnyMethod(
+                    openingElement, "getAnimSymbol", new Object[0]);
+            if (animationIdentity == null) {
+                log(Log.WARN, TAG, "Cannot identify reused CLOSE-to-OPEN animation"
+                        + ", animationIdentity=null"
+                        + ", currentAnimType=" + currentAnimType
+                        + ", windowElement=" + shortObject(openingElement));
+                return result;
+            }
+
+            // Xiaomi retargets a reusable CLOSE_TO_HOME animator to OPEN_FROM_HOME in place.
+            // That path has no new WindowElement animation-start callback and does not call
+            // enableBackBreakOpenAnim(), so the controller and our generation both remain tied
+            // to the old CLOSE. Restore Xiaomi's native enable state, then adopt the already
+            // running animator under the new generation instead of creating a surface animation.
+            long previousGeneration = miuiHomeOpenBreakGeneration;
+            invokeAnyMethod(controller, "enableBackBreakOpenAnim", new Object[0]);
+            long generation = miuiHomeOpenBreakGeneration;
+            if (generation == 0L || generation == previousGeneration) {
+                log(Log.WARN, TAG, "Cannot assign reused CLOSE-to-OPEN generation"
+                        + ", previousGeneration=" + previousGeneration
+                        + ", currentGeneration=" + generation
+                        + ", currentAnimType=" + currentAnimType
+                        + ", animationIdentity=" + shortObject(animationIdentity)
+                        + ", windowElement=" + shortObject(openingElement));
+                return result;
+            }
+
+            miuiHomeOpenBreakAnimationIdentity = animationIdentity;
+            miuiHomeOpenBreakGenerationPrepared = false;
+            miuiHomeOpenBreakAnimationActive = true;
+            miuiHomeOpenBreakCommandPending = false;
+            log(Log.INFO, TAG, "Restored native launcher OPEN break for reused CLOSE animation"
+                    + ", generation=" + generation
+                    + ", currentAnimType=" + currentAnimType
+                    + ", animationIdentity=" + shortObject(animationIdentity)
+                    + ", windowElement=" + shortObject(openingElement));
+
+            long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch
+                        || miuiHomeOpenBreakGeneration != generation
+                        || miuiHomeOpenBreakAnimationIdentity != animationIdentity
+                        || !miuiHomeOpenBreakAnimationActive) {
+                    return;
+                }
+                Object currentElement = null;
+                try {
+                    currentElement = readField(stateManager, "windowElement");
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "Failed to verify reused CLOSE-to-OPEN element",
+                            throwable);
+                }
+                if (currentElement != openingElement) {
+                    miuiHomeOpenBreakAnimationActive = false;
+                    refreshMiuiHomeOpenBreakAvailability(
+                            controller, "reusedCloseOpenReplaced");
+                    return;
+                }
+                refreshMiuiHomeOpenBreakAvailability(controller, "reusedCloseOpenSettled");
+            });
+        } catch (Throwable throwable) {
+            // The native retarget already completed. A module-side bookkeeping failure must
+            // never turn a successful launcher click into an exception for MiuiHome.
+            log(Log.ERROR, TAG, "Failed to restore reused CLOSE-to-OPEN break state",
+                    throwable);
+        }
+        return result;
+    }
+
+    private long nextMiuiHomeOpenBreakGeneration() {
+        return miuiHomeOpenBreakGenerationIds.incrementAndGet();
+    }
+
+    private void restoreMiuiHomeOpenBreakAfterHotReload() {
+        Object controller = miuiHomeOpenBreakController;
+        if (controller == null) {
+            return;
+        }
+        long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (miuiHomeOpenBreakCallbackEpoch.get() == callbackEpoch) {
+                refreshMiuiHomeOpenBreakAvailability(controller, "hotReload");
+            }
+        });
+    }
+
+    private void refreshMiuiHomeOpenBreakAvailability(Object controller, String reason) {
+        if (controller == null) {
+            log(Log.INFO, TAG, "MiuiHome launcher OPEN break controller unavailable"
+                    + ", reason=" + reason);
+            return;
+        }
+        miuiHomeOpenBreakController = controller;
+        Context context = resolveMiuiHomeOpenBreakContext(controller);
+        if (context == null) {
+            log(Log.WARN, TAG, "Cannot publish MiuiHome launcher OPEN break state"
+                    + ", reason=" + reason
+                    + ", controller=" + shortObject(controller));
+            return;
+        }
+        boolean receiverReady = ensureMiuiHomeOpenBreakCommandReceiver(context);
+        long generation = miuiHomeOpenBreakGeneration;
+        boolean available = receiverReady
+                && generation != 0L
+                && miuiHomeOpenBreakAnimationActive
+                && !miuiHomeOpenBreakCommandPending
+                && canUseMiuiHomeOpenBreak(controller, reason);
+        String nativeState = describeMiuiHomeOpenBreakNativeState(controller);
+        try {
+            Intent stateIntent = new Intent(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+            stateIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE, available);
+            stateIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, generation);
+            sendAuthenticatedMiuiHomeState(context, stateIntent);
+            log(Log.INFO, TAG, "Published MiuiHome launcher OPEN break state"
+                    + ", available=" + available
+                    + ", receiverReady=" + receiverReady
+                    + ", generation=" + generation
+                    + ", commandPending=" + miuiHomeOpenBreakCommandPending
+                    + ", nativeState=" + nativeState
+                    + ", reason=" + reason
+                    + ", controller=" + shortObject(controller));
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to publish MiuiHome launcher OPEN break state"
+                    + ", reason=" + reason, throwable);
+        }
+    }
+
+    private Context resolveMiuiHomeOpenBreakContext(Object controller) {
+        Context context = miuiHomeOpenBreakContext;
+        if (context != null) {
+            return context;
+        }
+        try {
+            Object navStubView = invokeAnyMethod(controller, "getNavStubView", new Object[0]);
+            if (navStubView instanceof View) {
+                context = ((View) navStubView).getContext().getApplicationContext();
+                miuiHomeOpenBreakContext = context;
+                return context;
+            }
+            log(Log.INFO, TAG, "MiuiHome NavStubView unavailable while resolving context"
+                    + ", view=" + shortObject(navStubView));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to resolve MiuiHome OPEN break context", throwable);
+        }
+        return null;
+    }
+
+    private boolean canUseMiuiHomeOpenBreak(Object controller, String reason) {
+        try {
+            return Boolean.TRUE.equals(invokeAnyMethod(controller,
+                    "canUseBackGestureBreakOpenAnim", new Object[0]));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to query native MiuiHome OPEN break availability"
+                    + ", reason=" + reason, throwable);
+            return false;
+        }
+    }
+
+    private String describeMiuiHomeOpenBreakNativeState(Object controller) {
+        if (controller == null) {
+            return "controller=null";
+        }
+        Object navStubView = null;
+        Object openRunning = null;
+        Object belowThreshold = null;
+        Object appLaunching = null;
+        try {
+            navStubView = invokeAnyMethod(controller, "getNavStubView", new Object[0]);
+        } catch (Throwable ignored) {
+        }
+        try {
+            openRunning = invokeAnyMethod(controller, "isOpenAnimRunning", new Object[0]);
+        } catch (Throwable ignored) {
+        }
+        try {
+            belowThreshold = invokeAnyMethod(controller,
+                    "isOpenAnimBelowBackBreakThreshold", new Object[0]);
+        } catch (Throwable ignored) {
+        }
+        try {
+            appLaunching = readField(controller, "mAppLaunchingButNotResume");
+        } catch (Throwable ignored) {
+        }
+        return "navStub=" + (navStubView != null)
+                + ", openRunning=" + openRunning
+                + ", belowThreshold=" + belowThreshold
+                + ", appLaunching=" + appLaunching;
+    }
+
+    private synchronized boolean ensureMiuiHomeOpenBreakCommandReceiver(Context context) {
+        if (miuiHomeOpenBreakCommandReceiver != null) {
+            return true;
+        }
+        if (context == null) {
+            return false;
+        }
+        Context appContext = context.getApplicationContext();
+        BroadcastReceiver receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                if (intent == null || !MODULE_MIUI_HOME_OPEN_BREAK_COMMAND.equals(
+                        intent.getAction())) {
+                    return;
+                }
+                if (!isOrderedBroadcast()) {
+                    log(Log.WARN, TAG, "Rejected unordered launcher OPEN break command");
+                    return;
+                }
+                setResultCode(LAUNCHER_OPEN_BREAK_RESULT_REJECTED);
+                setResultData("rejected");
+                int senderUid = getSentFromUid();
+                String senderPackage = getSentFromPackage();
+                if (!isTrustedSystemUiBroadcastSender(
+                        receiverContext, senderUid, senderPackage)) {
+                    log(Log.WARN, TAG, "Rejected untrusted launcher OPEN break command"
+                            + ", uid=" + senderUid
+                            + ", package=" + senderPackage);
+                    setResultData("untrustedSender");
+                    return;
+                }
+                long commandGeneration = intent.getLongExtra(
+                        EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, 0L);
+                long attemptId = intent.getLongExtra(
+                        EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT, 0L);
+                Object controller = miuiHomeOpenBreakController;
+                if (commandGeneration == 0L
+                        || attemptId == 0L
+                        || commandGeneration != miuiHomeOpenBreakGeneration
+                        || !miuiHomeOpenBreakAnimationActive
+                        || miuiHomeOpenBreakCommandPending
+                        || controller == null
+                        || !canUseMiuiHomeOpenBreak(controller, "command")) {
+                    log(Log.WARN, TAG, "Rejected stale launcher OPEN break command"
+                            + ", commandGeneration=" + commandGeneration
+                            + ", currentGeneration=" + miuiHomeOpenBreakGeneration
+                            + ", attempt=" + attemptId
+                            + ", animationActive=" + miuiHomeOpenBreakAnimationActive
+                            + ", commandPending=" + miuiHomeOpenBreakCommandPending
+                            + ", controller=" + shortObject(controller));
+                    setResultData(commandGeneration != miuiHomeOpenBreakGeneration
+                            ? "generationMismatch" : "nativeUnavailable");
+                    refreshMiuiHomeOpenBreakAvailability(controller, "commandRejected");
+                    return;
+                }
+                miuiHomeOpenBreakCommandPending = true;
+                refreshMiuiHomeOpenBreakAvailability(controller, "commandAccepted");
+                try {
+                    // Dynamic receivers run on MiuiHome's main thread. Xiaomi's
+                    // MainThreadExecutor executes inline when already on that Looper, so an
+                    // accepted ordered result means executeBackGestureBreak() has returned.
+                    invokeAnyMethod(controller, "breakOpenAnim", new Object[0]);
+                    setResultCode(LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED);
+                    setResultData("accepted");
+                    log(Log.INFO, TAG, "Requested native MiuiHome launcher OPEN break"
+                            + ", uid=" + senderUid
+                            + ", package=" + senderPackage
+                            + ", generation=" + commandGeneration
+                            + ", attempt=" + attemptId
+                            + ", controller=" + shortObject(controller));
+                } catch (Throwable throwable) {
+                    setResultData("nativeException");
+                    log(Log.ERROR, TAG, "Failed to request native MiuiHome launcher OPEN break",
+                            throwable);
+                }
+            }
+        };
+        try {
+            IntentFilter filter = new IntentFilter(MODULE_MIUI_HOME_OPEN_BREAK_COMMAND);
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            miuiHomeOpenBreakCommandReceiverContext = appContext;
+            miuiHomeOpenBreakCommandReceiver = receiver;
+            log(Log.INFO, TAG, "Registered MiuiHome launcher OPEN break command receiver");
+            return true;
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to register MiuiHome launcher OPEN break receiver",
+                    throwable);
+            return false;
+        }
+    }
+
+    private boolean isTrustedSystemUiBroadcastSender(Context context, int uid,
+                                                       String senderPackage) {
+        if (context == null || uid == Process.INVALID_UID
+                || !SYSTEM_UI.equals(senderPackage)) {
+            return false;
+        }
+        try {
+            String[] packages = context.getPackageManager().getPackagesForUid(uid);
+            if (packages != null) {
+                for (String packageName : packages) {
+                    if (SYSTEM_UI.equals(packageName)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to validate SystemUI command sender uid=" + uid,
+                    throwable);
+        }
+        return false;
+    }
+
+    private synchronized void unregisterMiuiHomeOpenBreakCommandReceiver() {
+        BroadcastReceiver receiver = miuiHomeOpenBreakCommandReceiver;
+        Context receiverContext = miuiHomeOpenBreakCommandReceiverContext;
+        miuiHomeOpenBreakCommandReceiver = null;
+        miuiHomeOpenBreakCommandReceiverContext = null;
+        if (receiver == null || receiverContext == null) {
+            return;
+        }
+        try {
+            receiverContext.unregisterReceiver(receiver);
+            log(Log.INFO, TAG, "Unregistered MiuiHome launcher OPEN break receiver");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to unregister MiuiHome launcher OPEN break receiver",
+                    throwable);
+        }
     }
 
     private Object mirrorMiuiHomeRecentsActualState(XposedInterface.Chain chain)
@@ -776,6 +1381,38 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .setShareIdentityEnabled(true)
                 .toBundle();
         appContext.sendBroadcast(explicitIntent, null, options);
+    }
+
+    private void sendAuthenticatedMiuiHomeOpenBreakCommand(
+            Context context, long generation, long attemptId,
+            SystemUiBackGestureDriver driver) {
+        // Close the local admission gate as soon as one committed command is emitted. The
+        // MiuiHome receiver independently revalidates its native controller before acting.
+        if (miuiLauncherOpenBreakGeneration == generation) {
+            miuiLauncherOpenBreakAvailable = false;
+        }
+        Context appContext = context.getApplicationContext();
+        Intent commandIntent = new Intent(MODULE_MIUI_HOME_OPEN_BREAK_COMMAND);
+        commandIntent.setPackage(MIUI_HOME);
+        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, generation);
+        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT, attemptId);
+        Bundle options = BroadcastOptions.makeBasic()
+                .setShareIdentityEnabled(true)
+                .toBundle();
+        BroadcastReceiver resultReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                driver.onLauncherOpenBreakCommandResult(
+                        generation, attemptId, getResultCode(), getResultData());
+            }
+        };
+        appContext.sendOrderedBroadcast(commandIntent, null, options,
+                resultReceiver, new Handler(Looper.getMainLooper()),
+                LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER, "noReceiver", null);
+        log(Log.INFO, TAG, "Sent authenticated MiuiHome launcher OPEN break command"
+                + ", generation=" + generation
+                + ", attempt=" + attemptId
+                + ", ordered=true");
     }
 
     private Object makeMiuiHomeGestureStubNotTouchable(XposedInterface.Chain chain)
@@ -1967,6 +2604,28 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", package=" + senderPackage);
                     return;
                 }
+                if (intent.hasExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)) {
+                    long generation = intent.getLongExtra(
+                            EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, 0L);
+                    boolean available = intent.getBooleanExtra(
+                            EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE, false);
+                    if (generation == 0L
+                            || generation < miuiLauncherOpenBreakGeneration) {
+                        log(Log.WARN, TAG, "Ignored stale MiuiHome launcher OPEN break state"
+                                + ", available=" + available
+                                + ", generation=" + generation
+                                + ", currentGeneration="
+                                + miuiLauncherOpenBreakGeneration);
+                    } else {
+                        miuiLauncherOpenBreakGeneration = generation;
+                        miuiLauncherOpenBreakAvailable = available;
+                        log(Log.INFO, TAG, "MiuiHome launcher OPEN break state changed"
+                                + ", available=" + available
+                                + ", generation=" + generation
+                                + ", uid=" + senderUid
+                                + ", package=" + senderPackage);
+                    }
+                }
                 String state = intent == null ? null : intent.getStringExtra("state");
                 boolean overviewVisible;
                 String source;
@@ -2034,6 +2693,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         Context receiverContext = miuiOverviewReceiverContext;
         miuiOverviewReceiver = null;
         miuiOverviewReceiverContext = null;
+        miuiLauncherOpenBreakAvailable = false;
+        miuiLauncherOpenBreakGeneration = 0L;
         if (receiver == null || receiverContext == null) {
             return;
         }
@@ -2482,7 +3143,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + shortObject(inputChannel));
         }
         return new NativeBackInputMonitor(context, edgeBackGestureHandler, controller,
-                backAnimationImpl, (InputMonitor) monitor, (InputChannel) inputChannel);
+                backAnimationImpl, (InputMonitor) monitor, (InputChannel) inputChannel,
+                displayId);
     }
 
     private final class NativeBackInputMonitor extends InputEventReceiver {
@@ -2490,8 +3152,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         private final Object edgeBackGestureHandler;
         private final InputMonitor inputMonitor;
         private final SystemUiBackGestureDriver driver;
+        private final int displayId;
         private Object backAnimationImpl;
         private boolean gestureCandidate;
+        private boolean launcherOpenBreakCandidate;
+        private long launcherOpenBreakGenerationCandidate;
         private boolean pilfered;
         private int activeEdge;
         private float downX;
@@ -2499,12 +3164,13 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private NativeBackInputMonitor(Context context, Object edgeBackGestureHandler,
                                        Object controller, Object backAnimationImpl, InputMonitor inputMonitor,
-                                       InputChannel inputChannel) {
+                                       InputChannel inputChannel, int displayId) {
             super(inputChannel, Looper.getMainLooper());
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
             this.backAnimationImpl = backAnimationImpl;
             this.inputMonitor = inputMonitor;
+            this.displayId = displayId;
             this.driver = new SystemUiBackGestureDriver(context, edgeBackGestureHandler,
                     controller, backAnimationImpl);
         }
@@ -2514,6 +3180,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         void detach() {
+            driver.detach();
             try {
                 dispose();
             } catch (Throwable throwable) {
@@ -2576,11 +3243,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             activeEdge = edge;
             downX = event.getRawX();
             downY = event.getRawY();
-            if (!driver.handleTouch(event, activeEdge)) {
+            if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
+                    launcherOpenBreakGenerationCandidate)) {
                 resetCandidate();
                 return false;
             }
             log(Log.INFO, TAG, "Native SystemUI back candidate started"
+                    + ", launcherOpenBreak=" + launcherOpenBreakCandidate
+                    + ", launcherOpenBreakGeneration="
+                    + launcherOpenBreakGenerationCandidate
+                    + ", displayId=" + displayId
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return pilfered;
         }
@@ -2606,7 +3278,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // MiuiHome can report Overview before WMS exposes Launcher as the back target.
                 // Keep the native panel responsive, but leave the real input stream untouched
                 // and never retry this gesture against a later navigation target.
-                if (!driver.handleTouch(event, activeEdge)) {
+                if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate)) {
                     resetCandidate();
                     return false;
                 }
@@ -2615,7 +3288,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!pilfered && distance > dp(MIUI_INDICATOR_PILFER_THRESHOLD_DP)) {
                 pilferPointers(distance);
             }
-            if (!driver.handleTouch(event, activeEdge)) {
+            if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
+                    launcherOpenBreakGenerationCandidate)) {
                 resetCandidate();
                 return false;
             }
@@ -2637,7 +3311,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
-                driver.handleTouch(cancel, activeEdge);
+                driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate);
                 cancel.recycle();
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to cancel native back candidate", throwable);
@@ -2657,13 +3332,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (driver.isRecentsVisualOnlyGesture()) {
                 // Let BackPanelController finish its local animation. No Shell navigation is
                 // active, and the monitor must not claim this input stream.
-                driver.handleTouch(event, activeEdge);
+                driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate);
             } else if (allowTrigger && pilfered) {
-                driver.handleTouch(event, activeEdge);
+                driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate);
             } else {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
-                driver.handleTouch(cancel, activeEdge);
+                driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate);
                 cancel.recycle();
             }
             boolean handled = pilfered;
@@ -2689,10 +3367,30 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (event.getPointerCount() != 1) {
                 return false;
             }
-            if (isLauncherTopActivity() && !miuiOverviewVisible) {
+            boolean launcherTop = isLauncherTopActivity();
+            boolean launcherOpenBreak = displayId == 0
+                    && !miuiOverviewVisible
+                    && miuiLauncherOpenBreakAvailable
+                    && miuiLauncherOpenBreakGeneration != 0L
+                    && launcherOpenBreakCommandsInFlight.get() == 0;
+            if (launcherTop && !miuiOverviewVisible && !launcherOpenBreak) {
                 log(Log.INFO, TAG, "Ignored native back on launcher Home"
-                        + ", overviewVisible=false");
+                        + ", overviewVisible=false"
+                        + ", launcherOpenBreakAvailable="
+                        + miuiLauncherOpenBreakAvailable
+                        + ", commandsInFlight="
+                        + launcherOpenBreakCommandsInFlight.get()
+                        + ", generation=" + miuiLauncherOpenBreakGeneration
+                        + ", displayId=" + displayId);
                 return false;
+            }
+            if (launcherOpenBreak) {
+                log(Log.INFO, TAG, "Accepted native back during launcher OPEN animation"
+                        + ", launcherOpenBreakAvailable=true"
+                        + ", launcherTop=" + launcherTop
+                        + ", generation=" + miuiLauncherOpenBreakGeneration
+                        + ", displayId=" + displayId
+                        + ", edge=" + edge);
             }
             if (areSystemBarsHidden() && !isNavBarShownTransiently()) {
                 log(Log.INFO, TAG, "Deferred native back to immersive transient bars"
@@ -2719,6 +3417,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", x=" + event.getRawX() + ", y=" + event.getRawY());
                 return false;
             }
+            launcherOpenBreakCandidate = launcherOpenBreak;
+            launcherOpenBreakGenerationCandidate = launcherOpenBreak
+                    ? miuiLauncherOpenBreakGeneration : 0L;
             return true;
         }
 
@@ -2767,16 +3468,41 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean isLauncherTopActivity() {
             try {
                 ActivityManager activityManager = context.getSystemService(ActivityManager.class);
-                List<ActivityManager.RunningTaskInfo> tasks = activityManager.getRunningTasks(1);
+                List<ActivityManager.RunningTaskInfo> tasks = activityManager.getRunningTasks(20);
                 if (tasks == null || tasks.isEmpty()) {
                     return false;
                 }
-                ComponentName top = tasks.get(0).topActivity;
-                return top != null && MIUI_HOME.equals(top.getPackageName());
+                for (ActivityManager.RunningTaskInfo task : tasks) {
+                    int taskDisplayId = readRunningTaskDisplayId(task);
+                    if (taskDisplayId != displayId || task.topActivity == null) {
+                        continue;
+                    }
+                    ComponentName top = task.topActivity;
+                    return MIUI_HOME.equals(top.getPackageName());
+                }
+                return false;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to inspect top activity for native back", throwable);
                 return false;
             }
+        }
+
+        private int readRunningTaskDisplayId(ActivityManager.RunningTaskInfo task) {
+            try {
+                Object value = readField(task, "displayId");
+                if (value instanceof Number) {
+                    return ((Number) value).intValue();
+                }
+            } catch (Throwable throwable) {
+                if (displayId != 0) {
+                    log(Log.WARN, TAG, "Failed to inspect running-task display"
+                            + ", monitorDisplayId=" + displayId, throwable);
+                }
+            }
+            // The SDK stub hides TaskInfo.displayId. Default-display SystemUI can safely use
+            // the historical default when reflection is unavailable; secondary displays fail
+            // closed instead of borrowing another display's launcher state.
+            return displayId == 0 ? 0 : Integer.MIN_VALUE;
         }
 
         private boolean isInImeRegion(MotionEvent event) {
@@ -2871,6 +3597,8 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private void resetCandidate() {
             gestureCandidate = false;
+            launcherOpenBreakCandidate = false;
+            launcherOpenBreakGenerationCandidate = 0L;
             pilfered = false;
             activeEdge = EDGE_LEFT;
             downX = 0.0f;
@@ -2895,6 +3623,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean gestureSuppressed;
         private boolean legacyInterruptGesture;
         private Object legacyRunningOpenInfo;
+        private boolean launcherOpenBreakGesture;
+        private long launcherOpenBreakGeneration;
+        private long launcherOpenBreakAttemptId;
+        private long pendingLauncherOpenBreakGeneration;
+        private long pendingLauncherOpenBreakAttemptId;
         private boolean launcherOverviewGesture;
         private boolean recentsVisualOnlyGesture;
         private int activeEdge;
@@ -2914,11 +3647,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.controller = readField(newBackAnimationImpl, "this$0");
         }
 
-        private boolean handleTouch(MotionEvent event, int edge) {
+        private boolean handleTouch(MotionEvent event, int edge,
+                                    boolean launcherOpenBreakCandidate,
+                                    long launcherOpenBreakGenerationCandidate) {
             try {
                 switch (event.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
-                        return onDown(event, edge);
+                        return onDown(event, edge, launcherOpenBreakCandidate,
+                                launcherOpenBreakGenerationCandidate);
                     case MotionEvent.ACTION_MOVE:
                         return onMove(event);
                     case MotionEvent.ACTION_UP:
@@ -2939,13 +3675,20 @@ public final class MiuiBackGestureHook extends XposedModule {
             return gestureActive && launcherOverviewGesture && recentsVisualOnlyGesture;
         }
 
-        private boolean onDown(MotionEvent event, int edge) throws Exception {
+        private boolean onDown(MotionEvent event, int edge,
+                               boolean launcherOpenBreakCandidate,
+                               long launcherOpenBreakGenerationCandidate) throws Exception {
             clearLegacyBackGuard("newPhysicalGesture");
             gestureActive = true;
             shellGestureStarted = false;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             legacyRunningOpenInfo = null;
+            launcherOpenBreakGesture = launcherOpenBreakCandidate;
+            launcherOpenBreakGeneration = launcherOpenBreakCandidate
+                    ? launcherOpenBreakGenerationCandidate : 0L;
+            launcherOpenBreakAttemptId = launcherOpenBreakCandidate
+                    ? launcherOpenBreakAttemptIds.incrementAndGet() : 0L;
             launcherOverviewGesture = miuiOverviewVisible;
             recentsVisualOnlyGesture = false;
             thresholdCrossed = false;
@@ -2958,6 +3701,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                 gestureSuppressed = true;
                 log(Log.WARN, TAG, "Suppressed SystemUI back while Shell is busy"
                         + ", state=" + describeShellState());
+                return true;
+            }
+            if (launcherOpenBreakGesture) {
+                dispatchToEdgePlugin(event, activeEdge);
+                log(Log.INFO, TAG, "SystemUI-owned launcher OPEN break candidate"
+                        + ", useMiuiHomeNativeController=true"
+                        + ", shellGestureStarted=false"
+                        + ", generation=" + launcherOpenBreakGeneration
+                        + ", attempt=" + launcherOpenBreakAttemptId
+                        + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
                 return true;
             }
             if (launcherOverviewGesture) {
@@ -2999,7 +3752,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return true;
             }
             dispatchToEdgePlugin(event, activeEdge);
-            if (!legacyInterruptGesture) {
+            if (!legacyInterruptGesture && !launcherOpenBreakGesture) {
                 updateActiveTracker(event.getRawX(), event.getRawY());
             }
             float distance = activeEdge == EDGE_LEFT
@@ -3008,7 +3761,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!thresholdCrossed && distance > dp(PILFER_THRESHOLD_DP)) {
                 crossIntentThreshold(distance);
             }
-            if (thresholdCrossed && !legacyInterruptGesture) {
+            if (thresholdCrossed && !legacyInterruptGesture
+                    && !launcherOpenBreakGesture) {
                 dispatchExplicitProgress(distance);
             }
             boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
@@ -3024,6 +3778,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             nativePanelActive = true;
             if (legacyInterruptGesture) {
                 log(Log.INFO, TAG, "MIUI in-app interrupt threshold crossed, distance="
+                        + distance);
+            } else if (launcherOpenBreakGesture) {
+                log(Log.INFO, TAG, "MiuiHome launcher OPEN break threshold crossed, distance="
                         + distance);
             } else {
                 invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
@@ -3042,6 +3799,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 clearLocalGestureState();
                 log(Log.INFO, TAG, "Finished suppressed SystemUI back gesture");
                 return true;
+            }
+            if (launcherOpenBreakGesture) {
+                return finishLauncherOpenBreakGesture(event, allowTrigger);
             }
             if (legacyInterruptGesture) {
                 return finishLegacyInterruptGesture(event, allowTrigger);
@@ -3127,6 +3887,95 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", trigger=" + trigger + ", edge=" + activeEdge);
             clearLocalGestureState();
             return true;
+        }
+
+        void detach() {
+            if (pendingLauncherOpenBreakAttemptId != 0L) {
+                decrementLauncherOpenBreakCommandsInFlight();
+            }
+            pendingLauncherOpenBreakGeneration = 0L;
+            pendingLauncherOpenBreakAttemptId = 0L;
+            clearLocalGestureState();
+        }
+
+        private boolean finishLauncherOpenBreakGesture(MotionEvent event,
+                                                       boolean allowTrigger)
+                throws Exception {
+            dispatchToEdgePlugin(event, activeEdge);
+            float releaseDistance = activeEdge == EDGE_LEFT
+                    ? event.getRawX() - downX
+                    : downX - event.getRawX();
+            boolean trigger = allowTrigger
+                    && thresholdCrossed
+                    && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
+            updateTriggerBack(trigger);
+            // This gesture never starts a Shell tracker. Clear any trigger value posted by
+            // BackPanelController after its release event, then hand a committed gesture to
+            // MiuiHome's own BackGestureBreakController.
+            clearControllerTriggerAfterVisualOnlyGesture();
+            if (trigger) {
+                long generation = launcherOpenBreakGeneration;
+                long attemptId = launcherOpenBreakAttemptId;
+                pendingLauncherOpenBreakGeneration = generation;
+                pendingLauncherOpenBreakAttemptId = attemptId;
+                launcherOpenBreakCommandsInFlight.incrementAndGet();
+                try {
+                    sendAuthenticatedMiuiHomeOpenBreakCommand(
+                            context, generation, attemptId, this);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG, "Failed to send launcher OPEN break command",
+                            throwable);
+                    onLauncherOpenBreakCommandResult(generation, attemptId,
+                            LAUNCHER_OPEN_BREAK_RESULT_REJECTED, "sendException");
+                }
+            }
+            log(Log.INFO, TAG, "Finished MiuiHome launcher OPEN break gesture"
+                    + ", trigger=" + trigger
+                    + ", generation=" + launcherOpenBreakGeneration
+                    + ", attempt=" + launcherOpenBreakAttemptId
+                    + ", releaseDistance=" + releaseDistance
+                    + ", edge=" + activeEdge);
+            clearLocalGestureState();
+            return true;
+        }
+
+        private void onLauncherOpenBreakCommandResult(long generation, long attemptId,
+                                                       int resultCode, String reason) {
+            if (pendingLauncherOpenBreakGeneration != generation
+                    || pendingLauncherOpenBreakAttemptId != attemptId) {
+                log(Log.WARN, TAG, "Ignored stale launcher OPEN break command result"
+                        + ", generation=" + generation
+                        + ", attempt=" + attemptId
+                        + ", pendingGeneration=" + pendingLauncherOpenBreakGeneration
+                        + ", pendingAttempt=" + pendingLauncherOpenBreakAttemptId
+                        + ", resultCode=" + resultCode
+                        + ", reason=" + reason);
+                return;
+            }
+            decrementLauncherOpenBreakCommandsInFlight();
+            pendingLauncherOpenBreakGeneration = 0L;
+            pendingLauncherOpenBreakAttemptId = 0L;
+            if (resultCode == LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED) {
+                log(Log.INFO, TAG, "MiuiHome accepted launcher OPEN break command"
+                        + ", generation=" + generation
+                        + ", attempt=" + attemptId);
+                return;
+            }
+            log(Log.WARN, TAG, "Falling back to one ordinary BACK after launcher OPEN "
+                    + "break rejection"
+                    + ", generation=" + generation
+                    + ", attempt=" + attemptId
+                    + ", resultCode=" + resultCode
+                    + ", reason=" + reason);
+            injectLegacyBackKey();
+        }
+
+        private void decrementLauncherOpenBreakCommandsInFlight() {
+            int remaining = launcherOpenBreakCommandsInFlight.decrementAndGet();
+            if (remaining < 0) {
+                launcherOpenBreakCommandsInFlight.set(0);
+                log(Log.WARN, TAG, "Corrected launcher OPEN break in-flight underflow");
+            }
         }
 
         private boolean startShellGesture() throws Exception {
@@ -3283,6 +4132,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             legacyRunningOpenInfo = null;
+            launcherOpenBreakGesture = false;
+            launcherOpenBreakGeneration = 0L;
+            launcherOpenBreakAttemptId = 0L;
             launcherOverviewGesture = false;
             recentsVisualOnlyGesture = false;
             thresholdCrossed = false;
@@ -3403,7 +4255,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             triggerBack = newTriggerBack;
             try {
-                if (!legacyInterruptGesture) {
+                if (!legacyInterruptGesture && !launcherOpenBreakGesture) {
                     invokeAnyMethod(controller, "setTriggerBack",
                             new Object[]{Boolean.valueOf(newTriggerBack)});
                 }
