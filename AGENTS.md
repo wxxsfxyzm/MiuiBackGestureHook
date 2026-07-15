@@ -85,6 +85,21 @@ system
 Keep scope minimal. Do not add target applications or further `system_server` cleanup or
 compatibility hooks unless new SystemUI/server evidence requires them.
 
+Hot-reload rules:
+
+- Preserve `autoHotReload=true`. Treat hook IDs as lifecycle keys: whenever a hook is added,
+  renamed, or retired, update its normal installation, old-handle replacement mapping,
+  presence tracking, and missing-hook backfill together.
+- In `onHotReloading(...)`, detach module-owned input monitors, unregister receivers, and
+  invalidate pending snapshots/attempts before saving only the state that is explicitly
+  restored. In `onHotReloaded(...)`, replace or neutralize every old hook and restore state
+  without duplicating monitors, receivers, or callbacks.
+- For `system_server`, do not rely only on `HotReloadedParam.isSystemServer()`. Also treat
+  `processName == "system"` or an existing `server_*` hook as system-server evidence, and
+  recover the real package ClassLoader from an old hook executable or the normal resolver.
+  Keep `system` in the static scope so `onSystemServerStarting(...)` can obtain the real
+  system-server ClassLoader after a cold start.
+
 Keep MiuiHome `GestureStubView` initialization intact, but keep its side windows
 non-touchable, empty their touch regions, and block `showGestureStub()`. Keep the Xiaomi
 gesture-line progress callback blocked so progress remains on the SystemUI/AOSP path.
@@ -118,6 +133,8 @@ Remote-animation rules:
 - Restore the whole AOSP WM Shell behavior, not only `TYPE_CROSS_ACTIVITY`.
 - Prefer restoring Shell registry/runner/adapter wiring before writing custom Surface
   animation code.
+- Restore cross-activity and cross-task registry entries only from non-null backing Xiaomi
+  Shell animation objects; do not replace missing objects with hand-written surface code.
 - For prepared remote animations, mark the tracker finished and call or wait for
   `startPostCommitAnimation()` so the runner receives cancel/invoke before navigation
   cleanup. Do not finish an active prepared animation directly from the overlay.
@@ -138,7 +155,23 @@ Remote-animation rules:
 - Use SystemUI's native `BackPanelController` indicator. Avoid Xiaomi/MiuiHome arrow paths
   and custom-drawn fallbacks except for native-indicator attachment diagnostics.
 - Restore `TYPE_RETURN_TO_HOME` through the standard Shell-to-launcher callback/runner
-  registration; do not revive adapter injection or hand-written launcher surface animation.
+  registration. The confirmed entry is the Shell `IBackAnimation` binder in
+  `LauncherProxyService`'s external-interface bundle; make MiuiHome consume that standard
+  interface instead of reviving adapter injection or hand-written launcher surface
+  animation. `SurfaceControl.Transaction` remains allowed inside an AOSP-aligned launcher
+  runner registered through Shell.
+
+System-server compatibility rules:
+
+- Resolve window flags from `com.android.window.flags.Flags` first. The legacy
+  `android.window.flags.Flags` lookup may remain only as a compatibility fallback. If
+  `migratePredictiveBackTransition()` cannot be read, default to `false`.
+- Gate the `ScheduleAnimationBuilder.prepareTransitionIfNeeded(...)` skip through
+  `unifyBackNavigationTransition()`. When that flag resolves to `false`, preserve the
+  original `setLaunchBehind()` path; do not blanket-skip transition preparation.
+- Navigation-done cleanup may call `clearBackAnimations(false)` only after a committed
+  navigation when the handler is still composed and both prepared-open and prepared-close
+  transition fields are null. Leave normal transition-owned cleanup untouched.
 
 Do not use direct `android.util.Log` writes for module diagnostics; keep diagnostics in
 LSPosed/module logs.
@@ -156,6 +189,18 @@ Discover a suitable local checkout instead of hard-coding a machine-specific pat
 is unavailable, fetch only the exact tag/projects/files needed. Checked-in reference
 snippets are under `refs/aosp_back/shell/` and `refs/aosp_back/systemui/`; do not assume the
 controller snippet is an exact r1 copy.
+
+The current implementation is AOSP-aligned but is not a completely stock AOSP input
+pipeline:
+
+- A module-created SystemUI `InputMonitor` and driver own input instead of routing the whole
+  stream through stock `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)`.
+- The module starts Shell on `ACTION_DOWN` and pilfers on the first small outward move. When
+  Shell is busy, the current behavior suppresses the new gesture; it does not implement
+  AOSP `mQueuedTracker` semantics.
+- Release handling reflectively reproduces the relevant `onGestureFinished()` transaction
+  but does not call the complete private AOSP method. Preserve the Shell-executor ownership
+  and runner-state rules above unless new evidence justifies changing this boundary.
 
 Use the currently configured jadx MCP workspace to confirm Xiaomi method names,
 signatures, fields, transaction codes, and call sites before adding hooks. Jadx may render
@@ -197,6 +242,15 @@ compileOnly "io.github.libxposed:api:102.0.0"
 compileOnly project(":hidden-api")
 ```
 
+LSPosed metadata:
+
+```text
+minApiVersion=102
+targetApiVersion=102
+staticScope=true
+autoHotReload=true
+```
+
 The current module entry is:
 
 ```java
@@ -206,6 +260,9 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 ## LSPosed API 102 Notes
 
 - `XposedModule` has a no-argument constructor.
+- Use the API 102 lifecycle callbacks already implemented by the module:
+  `onModuleLoaded(...)`, `onPackageLoaded(...)`, `onSystemServerStarting(...)`,
+  `onHotReloading(...)`, and `onHotReloaded(...)`.
 - `PackageLoadedParam` exposes `getDefaultClassLoader()`, not `getClassLoader()`.
 - Logging uses `log(int priority, String tag, String message)`.
 - `XposedInterface.Chain` exposes `getArgs()`, `getArg(int)`, `getThisObject()`, and
@@ -229,11 +286,29 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 
 ## Useful Commands
 
-Build:
+Build debug only unless the user explicitly requests a release artifact:
 
 ```powershell
 .\gradlew.bat assembleDebug
-.\gradlew.bat assembleRelease
+```
+
+Check debug APK metadata:
+
+```powershell
+jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
+```
+
+Check that the debug APK is from the current build:
+
+```powershell
+Get-Item app\build\outputs\apk\debug\app-debug.apk | Select-Object FullName,Length,LastWriteTime
+```
+
+If `jar` is not on `PATH`, resolve it from the active Java runtime:
+
+```powershell
+$jar = Join-Path (Split-Path (Get-Command java).Source -Parent) 'jar.exe'
+& $jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
 ```
 
 Git status:
