@@ -94,24 +94,43 @@ Hot-reload rules:
   invalidate pending snapshots/attempts before saving only the state that is explicitly
   restored. In `onHotReloaded(...)`, replace or neutralize every old hook and restore state
   without duplicating monitors, receivers, or callbacks.
+- When restoring MiuiHome from an older non-touchable Stub build, clear the existing
+  `FLAG_NOT_TOUCHABLE` in WMS on each Stub's View owner Looper, request layout and internal
+  insets, then let `BaseRecentsImpl.adaptToTopActivity()` recompute native touchability policy.
+  Invalidate input-arbiter generations across reload; a stale readiness or accepted-input
+  token must never admit a gesture.
 - For `system_server`, do not rely only on `HotReloadedParam.isSystemServer()`. Also treat
   `processName == "system"` or an existing `server_*` hook as system-server evidence, and
   recover the real package ClassLoader from an old hook executable or the normal resolver.
   Keep `system` in the static scope so `onSystemServerStarting(...)` can obtain the real
   system-server ClassLoader after a cold start.
 
-Keep MiuiHome `GestureStubView` initialization intact, but keep its side windows
-non-touchable, empty their touch regions, and block `showGestureStub()`. Keep the Xiaomi
-gesture-line progress callback blocked so progress remains on the SystemUI/AOSP path.
+Keep MiuiHome `GestureStubView` initialization, native side-window flags,
+`showGestureStub()`/`hideGestureStub()`, touch regions, and DOWN-time
+`RedirectionHelper.requestRedirect(...)` arbitration intact. Do not attach a duplicate
+SystemUI touchable shield. Neutralize `GesturesBackTouchProcessor.onPointerEvent(...)` only
+at its accepted-input boundary so the old GestureStub/`BackAnimationAdapter`, native arrow,
+injection, and direct OPEN-break path cannot race SystemUI. Keep the Xiaomi gesture-line
+progress callback blocked so a gesture claimed by SystemUI remains on the SystemUI/AOSP path.
 
 Same-activity and input rules:
 
 - For `TYPE_CALLBACK`, call
   `BackNavigationInfo.disableAppProgressGenerationAllowed()` before the original
   `onBackNavigationInfoReceived(...)` body runs.
-- Keep SystemUI native input-monitor ownership, early outward pointer pilfer at `8dp`, the
-  fixed `48dp` trigger threshold, native `BackPanelController` dispatch, and release-time
-  invoke/cancel.
+- Keep the module-created SystemUI `InputMonitor` as a spy while MiuiHome's native
+  `GestureStubView` remains the original DOWN target in its physical-pixel width and vertical
+  touch band. MiuiHome must publish an explicit identity-sharing accepted-DOWN token carrying
+  MotionEvent identity, display, edge, and the current SystemUI arbiter generation. SystemUI
+  may start or pilfer only after the token exactly matches its pending spy-channel DOWN.
+- Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
+  deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
+  `BackPanelController` dispatch, and release-time invoke/cancel.
+- Preserve MiuiHome's native redirect decision for disabled, non-touchable, and application
+  exclusion states: a redirected stream never reaches the processor and therefore never emits
+  an accepted token. When SystemUI does not claim a stream, do not synthesize, replay, or
+  transfer it. An accepted stream with no ready SystemUI arbiter fails closed rather than
+  reviving MiuiHome's deprecated gesture processor.
 - Use display width for callback progress. Do not restore the old fixed `220dp` distance.
 - Do not move trigger ownership to the native panel or intercept
   `setTriggerBack(false)`.
@@ -127,6 +146,9 @@ Recents ownership rules:
   visual only, and leave the input stream unpilfered.
 - Do not add focus polling, retries, delayed commits, synthetic input, launcher binder BACK
   transactions, or direct `RecentsContainer.onBackPressed()` calls.
+- Mirror MiuiHome `LauncherState.ALL_APPS` through the same explicit identity-sharing
+  broadcast. When the drawer is visible, probe Shell once on `ACTION_DOWN`, accept only its
+  standard `TYPE_CALLBACK`, and otherwise leave launcher Home ignored and unpilfered.
 
 Remote-animation rules:
 
@@ -193,11 +215,18 @@ controller snippet is an exact r1 copy.
 The current implementation is AOSP-aligned but is not a completely stock AOSP input
 pipeline:
 
-- A module-created SystemUI `InputMonitor` and driver own input instead of routing the whole
-  stream through stock `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)`.
-- The module starts Shell on `ACTION_DOWN` and pilfers on the first small outward move. When
-  Shell is busy, the current behavior suppresses the new gesture; it does not implement
-  AOSP `mQueuedTracker` semantics.
+- A module-created SystemUI `InputMonitor` and driver own claimed gesture processing instead
+  of routing the whole stream through stock
+  `EdgeBackGestureHandler -> BackAnimationImpl.onMotionEvent(...)`. MiuiHome's native
+  `GestureStubView`, not a module-created SystemUI shield, prevents InputDispatcher from
+  targeting the application with the original DOWN inside the native band.
+- Recents still starts Shell once on `ACTION_DOWN` so a null or stale non-callback target
+  can remain unpilfered. The app drawer follows the same callback-only launcher probe.
+  All paths wait for a matching MiuiHome accepted-DOWN token; ordinary in-app candidates
+  pilfer and start deferred Shell navigation together at `8dp`. Native GestureStub touch
+  regions and redirect state remain authoritative while its legacy processor stays
+  neutralized. When Shell is busy, the current behavior suppresses the new SystemUI gesture;
+  it does not implement AOSP `mQueuedTracker` semantics.
 - Release handling reflectively reproduces the relevant `onGestureFinished()` transaction
   but does not call the complete private AOSP method. Preserve the Shell-executor ownership
   and runner-state rules above unless new evidence justifies changing this boundary.
