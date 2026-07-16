@@ -91,6 +91,12 @@ Hot-reload rules:
 - Preserve `autoHotReload=true`. Treat hook IDs as lifecycle keys: whenever a hook is added,
   renamed, or retired, update its normal installation, old-handle replacement mapping,
   presence tracking, and missing-hook backfill together.
+- When Xiaomi skips `NavigationBar` creation for FSG with the gesture line hidden, attach
+  `EdgeBackGestureHandler` headlessly through an exact module-owned
+  `NavBarHelper.NavbarTaskbarStateUpdater`. Do not create an invisible navigation-bar window,
+  forge Taskbar initialization, or write lifecycle booleans directly. Reconcile ownership after
+  default-display NavigationBar create/remove and navigation-mode changes; a real NavigationBar
+  or Taskbar owns the native listener lifecycle whenever present.
 - In `onHotReloading(...)`, detach module-owned input monitors, unregister receivers, and
   invalidate pending snapshots/attempts before saving only the state that is explicitly
   restored. In `onHotReloaded(...)`, replace or neutralize every old hook and restore state
@@ -150,6 +156,18 @@ Recents ownership rules:
 - Mirror MiuiHome `LauncherState.ALL_APPS` through the same explicit identity-sharing
   broadcast. When the drawer is visible, probe Shell once on `ACTION_DOWN`, accept only its
   standard `TYPE_CALLBACK`, and otherwise leave launcher Home ignored and unpilfered.
+- Classify launcher Home by the exact top component resolved from MiuiHome's `HOME` or
+  `SECONDARY_HOME` entry, not by package name alone. MiuiHome-owned settings and other sibling
+  Activities use the ordinary SystemUI/Shell back path. On resolution failure, fall back to the
+  previous package-level Home classification; only existing authenticated Overview, drawer, or
+  launcher-OPEN state may still claim that stream.
+- Mirror `BaseLauncher.isInEditing()` from MiuiHome's native back-status refresh through the same
+  authenticated state channel. Publish only from the exact active Launcher instance; a callback
+  posted by an old or destroyed Launcher must not overwrite its replacement. While the real
+  Launcher is editing, including its launcher-settings bottom sheet, probe Shell once on
+  `ACTION_DOWN`, accept only `TYPE_CALLBACK`, and otherwise leave the stream unpilfered. A new
+  SystemUI arbiter generation must force MiuiHome to republish the current editing state; idle Home
+  remains ignored.
 
 Remote-animation rules:
 
