@@ -25,9 +25,10 @@ through Shell remains in scope for `TYPE_RETURN_TO_HOME`.
 The current direction is SystemUI-first: keep gesture ownership and progress in SystemUI,
 then restore the AOSP SystemUI/WM Shell back gesture pipeline.
 
-Preserve the usable same-activity `TYPE_CALLBACK` baseline while restoring the remaining
-remote-animation behavior. Restore `TYPE_CROSS_ACTIVITY` and `TYPE_CROSS_TASK` before
-working on `TYPE_RETURN_TO_HOME`.
+Preserve the working `TYPE_CALLBACK`, `TYPE_CROSS_ACTIVITY`, `TYPE_CROSS_TASK`, and
+`TYPE_RETURN_TO_HOME` paths. `TYPE_RETURN_TO_HOME` uses the standard Shell-to-launcher
+callback/runner for predictive preview, then hands post-commit ownership to Xiaomi's
+native CLOSE animation.
 
 Preserve the Xiaomi-native in-app Activity OPEN interruption path alongside the AOSP
 predictive-back path.
@@ -183,17 +184,66 @@ Remote-animation rules:
   animation. `SurfaceControl.Transaction` remains allowed inside an AOSP-aligned launcher
   runner registered through Shell.
 
+Return-to-home rules:
+
+- Treat the launcher callback and remote runner as independent Binder endpoints; do not
+  assume delivery order. Retain only the current generation's latest start/progress and at
+  most one terminal action, consume them exactly once when the runner arrives, and discard
+  them even when its targets are invalid.
+- Follow the platform `removeDepartTargetFromMotion()` split: use the `BackMotionEvent`
+  departing target when the flag is false and the runner closing target when it is true.
+  Show and transform only that closing leash through the platform `BackProgressAnimator`;
+  leave the opening Home target, alpha, and layer order untouched. Drive Xiaomi preview
+  blur from the same smoothed progress rather than a separate or release-time snap.
+- Correct Xiaomi's prepared/commit composition only for the exact single fullscreen
+  standard task-to-Home shape. After stock prepare accepts it, keep Home and wallpaper
+  roles unchanged, reparent the departing task under the existing closing leash, and
+  normalize only its prepared role to `CHANGE`. After an accepted commit merge, reparent
+  only the matching closing change to that leash. Fail closed for every other shape.
+- Pass the original runner targets into Xiaomi's native closing provider and publish only
+  the exact current geometry and corner radius through Xiaomi's own handoff status.
+  Application pixels remain on the real closing task Surface; do not introduce a screenshot
+  replacement, module-owned icon/window crossfade, forced alpha, or layer manipulation.
+- Once the exact Xiaomi CLOSE starts, retain the Shell runner and remote targets until its
+  matching native end or a verified launcher-interruption boundary. Do not restore or
+  release the preview Surface over a captured native animation.
+- Preserve Xiaomi's parallel CLOSE-to-OPEN path when an icon is clicked before CLOSE ends.
+  Finish the old Shell runner only after Xiaomi cancels the old application Surface and
+  accepts its `setToOld` boundary, before the new OPEN starts; do not cancel or wait for the
+  old floating-icon tail. Route a non-reusable same-icon Local CLOSE only through Xiaomi's
+  existing parallel branch under exact identity guards; never fabricate Recents state or a
+  controller, or invoke the real-Recents reversal path.
+- Keep preview blur, shortcut-layer, and wallpaper state on MiuiHome's main Looper under
+  exact generation and object ownership. Commit transfers that state to Xiaomi;
+  cancellation restores only unchanged module-owned state after the application preview is
+  fullscreen. Never overwrite an unrelated or replacement native spring.
+- A prepared cancellation must continue through the launcher runner and Shell's normal
+  restore transition. Clear only a proven stale close-request gate while the exact
+  prepare-open token remains owned; never directly finish or clear the prepared animation.
+
 System-server compatibility rules:
 
-- Resolve window flags from `com.android.window.flags.Flags` first. The legacy
-  `android.window.flags.Flags` lookup may remain only as a compatibility fallback. If
-  `migratePredictiveBackTransition()` cannot be read, default to `false`.
+- Resolve window flags from `com.android.window.flags.Flags` first, Xiaomi's relocated
+  `com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags` second,
+  and `android.window.flags.Flags` only as the legacy fallback. Unreadable migrate/unify
+  flags default to `false`.
 - Gate the `ScheduleAnimationBuilder.prepareTransitionIfNeeded(...)` skip through
   `unifyBackNavigationTransition()`. When that flag resolves to `false`, preserve the
-  original `setLaunchBehind()` path; do not blanket-skip transition preparation.
+  original `setLaunchBehind()` path; do not blanket-skip transition preparation. Never skip
+  the unified `TYPE_RETURN_TO_HOME` prepare path; if `mIsLaunchBehind` or the relevant flag
+  cannot be proven, preserve the original platform method.
 - Navigation-done cleanup may call `clearBackAnimations(false)` only after a committed
   navigation when the handler is still composed and both prepared-open and prepared-close
   transition fields are null. Leave normal transition-owned cleanup untouched.
+- Change a committed return-home window from `USE_OPACITY` to `ALLOW` only when the original
+  mode is `USE_OPACITY`, its standard Activity is no longer visible-requested and cannot
+  receive touch, the last back type is `TYPE_RETURN_TO_HOME`, and ownership is proven by
+  either `shouldPauseTouch(activity)` or the composed matching prepared-close target.
+  Reflection failure preserves the platform result.
+- Do not obtain launcher touch-through by fabricating a Recents input consumer/controller,
+  forwarding or replaying MotionEvents, or using a timer or process-wide token.
+  Cancellation, finish, replacement, and launcher OPEN must invalidate the server-owned
+  predicate naturally.
 
 Do not use direct `android.util.Log` writes for module diagnostics; keep diagnostics in
 LSPosed/module logs.
