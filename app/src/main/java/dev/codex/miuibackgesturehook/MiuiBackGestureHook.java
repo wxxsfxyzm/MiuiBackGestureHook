@@ -2,6 +2,7 @@ package dev.codex.miuibackgesturehook;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.app.BroadcastOptions;
@@ -11,19 +12,25 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Insets;
+import android.graphics.Matrix;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Region;
 import android.hardware.input.InputManager;
-import android.os.Handler;
+import android.os.Binder;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
+import android.os.Parcelable;
 import android.os.Process;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
+import android.view.Choreographer;
 import android.view.InputChannel;
 import android.view.InputEvent;
 import android.view.InputEventReceiver;
@@ -34,13 +41,18 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.WindowMetrics;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.PathInterpolator;
 import android.window.BackMotionEvent;
 import android.window.BackNavigationInfo;
+import android.window.BackProgressAnimator;
 import android.window.BackTouchTracker;
 
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -65,7 +77,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-v115-miuihome-accepted-input";
+            "systemui-aosp-back-0.5.0";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -89,14 +101,44 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.anim.StateManager$windowElementAnimListener$1";
     private static final String MIUI_HOME_STATE_MANAGER =
             "com.miui.home.recents.anim.StateManager";
+    private static final String MIUI_HOME_WINDOW_ELEMENT =
+            "com.miui.home.recents.anim.WindowElement";
+    private static final String MIUI_HOME_SHELL_TRANSITION_CALLBACK =
+            "com.android.systemui.shared.recents.utilities.ShellTransitionCallback";
+    private static final String MIUI_HOME_RECENT_BLUR_PARAMS =
+            "com.miui.home.recents.anim.RecentBlurParams";
     private static final String MIUI_HOME_LAUNCHER_STATE_MANAGER =
             "com.miui.home.launcher.LauncherStateManager";
     private static final String MIUI_HOME_LAUNCHER_STATE =
             "com.miui.home.launcher.LauncherState";
+    private static final String MIUI_HOME_OVERVIEW_PROXY_IMPL =
+            "com.miui.home.recents.OverviewProxyImpl";
+    private static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT =
+            "com.android.systemui.shared.recents.system.RemoteAnimationTargetCompat";
+    private static final String MIUI_HOME_ANIM_STATUS_PARAM =
+            "com.miui.home.recents.anim.windowanim.sfanim.AnimStatusParam";
+    private static final String MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR =
+            "com.miui.home.recents.anim.windowanim.LocalWindowAnimImplementor";
+    private static final String MIUI_HOME_SHORTCUT_MENU_LAYER_ELEMENT =
+            "com.miui.home.recents.anim.ShortcutMenuLayerElement";
+    private static final String MIUI_HOME_SHORTCUT_MENU_LAYER_PARAMS =
+            "com.miui.home.recents.anim.ShortcutMenuLayerParams";
+    private static final String MIUI_HOME_BASE_WALLPAPER_ELEMENT =
+            "com.miui.home.recents.anim.BaseWallpaperElement";
+    private static final String MIUI_HOME_SYSTEM_WALLPAPER_ELEMENT =
+            "com.miui.home.recents.anim.SystemWallpaperElement";
+    private static final String MIUI_HOME_WALLPAPER_PARAMS =
+            "com.miui.home.recents.anim.WallpaperParam";
+    private static final String MIUI_HOME_DEVICE_LEVEL_UTILS =
+            "com.miui.home.common.utils.DeviceLevelUtils";
+    private static final String MIUI_HOME_WINDOW_CORNER_RADIUS_UTIL =
+            "com.miui.home.recents.util.WindowCornerRadiusUtil";
     private static final String NAVIGATION_BAR =
             "com.android.systemui.navigationbar.views.NavigationBar";
     private static final String BACK_ANIMATION_CONTROLLER =
             "com.android.wm.shell.back.BackAnimationController";
+    private static final String BACK_TRANSITION_HANDLER =
+            "com.android.wm.shell.back.BackAnimationController$BackTransitionHandler";
     private static final String DEFAULT_TRANSITION_HANDLER =
             "com.android.wm.shell.transition.DefaultTransitionHandler";
     private static final String DEFAULT_TRANSITION_IMPL =
@@ -109,9 +151,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.android.server.wm.BackNavigationController$AnimationHandler$BackWindowAnimationAdaptor";
     private static final String SCHEDULE_ANIMATION_BUILDER =
             "com.android.server.wm.BackNavigationController$AnimationHandler$ScheduleAnimationBuilder";
+    private static final String WINDOW_STATE = "com.android.server.wm.WindowState";
     private static final String DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
 
     private static final int TRANSACTION_MIUI_ON_GESTURE_LINE_PROGRESS = 4;
+    private static final int TRANSIT_PREDICTIVE_BACK = 13;
+    private static final int TRANSIT_TO_FRONT = 3;
+    private static final int TRANSIT_TO_BACK = 4;
+    private static final int TRANSIT_CHANGE = 6;
+    private static final int FLAG_IS_WALLPAPER = 1 << 1;
+    private static final int FLAG_BACK_GESTURE_ANIMATED = 1 << 17;
     private static final int EDGE_LEFT = 0;
     private static final int EDGE_RIGHT = 1;
     private static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
@@ -143,13 +192,22 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
     private static final int KEY_ACTION_UP = 1;
     private static final int KEY_ACTION_DOWN = 0;
+    private static final int TYPE_RETURN_TO_HOME = 1;
     private static final int TYPE_CROSS_ACTIVITY = 2;
     private static final int TYPE_CROSS_TASK = 3;
     private static final int TYPE_CALLBACK = 4;
+    private static final int ACTIVITY_TYPE_STANDARD = 1;
+    private static final int ACTIVITY_TYPE_HOME = 2;
+    private static final int TOUCH_OCCLUSION_MODE_USE_OPACITY = 1;
+    private static final int TOUCH_OCCLUSION_MODE_ALLOW = 2;
+    private static final int WINDOWING_MODE_FULLSCREEN = 1;
     private static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     private static final float PILFER_THRESHOLD_DP = 8.0f;
     private static final float TRIGGER_THRESHOLD_DP = 48.0f;
     private static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
+    private static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
+    private static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
+    private static final float RETURN_HOME_END_CORNER_RADIUS_DP = 28.0f;
     private static final String MIUI_SIDEBAR_BOUNDS = "sidebar_bounds";
     private static final float MIUI_SIDEBAR_EXCLUSION_PADDING_DP = 8.0f;
     private static final long MIUI_OVERVIEW_DISMISS_TIMEOUT_MS = 2500L;
@@ -158,6 +216,30 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final long DUPLICATE_BACK_PAIR_TIMEOUT_MS = 700L;
     private static final long DUPLICATE_BACK_UP_INTERVAL_MS = 200L;
     private static final long INPUT_ACCEPTED_TOKEN_TIMEOUT_MS = 750L;
+    private static final long RETURN_HOME_CANCEL_DURATION_MS = 200L;
+    private static final long RETURN_HOME_CANCEL_FINISH_GUARD_MS = 350L;
+    private static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
+    private static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
+    private static final String MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON =
+            "Icon click without recent.";
+    private static final String SHELL_BACK_ANIMATION_DESCRIPTOR =
+            "com.android.wm.shell.back.IBackAnimation";
+    private static final String ON_BACK_INVOKED_CALLBACK_DESCRIPTOR =
+            "android.window.IOnBackInvokedCallback";
+    private static final String REMOTE_ANIMATION_RUNNER_DESCRIPTOR =
+            "android.view.IRemoteAnimationRunner";
+    private static final String REMOTE_ANIMATION_FINISHED_DESCRIPTOR =
+            "android.view.IRemoteAnimationFinishedCallback";
+    private static final int SHELL_BACK_SET_LAUNCHER_CALLBACK_TRANSACTION = 1;
+    private static final int SHELL_BACK_CLEAR_LAUNCHER_CALLBACK_TRANSACTION = 2;
+    private static final int RETURN_HOME_TERMINAL_NONE = 0;
+    private static final int RETURN_HOME_TERMINAL_CANCEL = 1;
+    private static final int RETURN_HOME_TERMINAL_INVOKE = 2;
+    private static final int REMOTE_RUNNER_MISSING = 0;
+    private static final int REMOTE_RUNNER_CANCELLED = 1;
+    private static final int REMOTE_RUNNER_WAITING = 2;
+    private static final int REMOTE_RUNNER_READY = 3;
+    private static final int REMOTE_RUNNER_UNKNOWN = 4;
     private static final int BACK_GUARD_IDLE = 0;
     private static final int BACK_GUARD_WAIT_MERGE = 1;
     private static final int BACK_GUARD_EXPECT_DOWN = 2;
@@ -188,7 +270,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicLong miuiHomeOpenBreakCallbackEpoch = new AtomicLong();
     private final AtomicInteger systemUiInputArbiterMonitorCount = new AtomicInteger();
+    private final AtomicLong miuiHomeReturnHomeGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicReference<MiuiHomeAcceptedInputToken> acceptedInputToken =
+            new AtomicReference<>();
+    private final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
             new AtomicReference<>();
     private final long systemUiInputArbiterGeneration =
             Math.max(1L, SystemClock.elapsedRealtimeNanos());
@@ -211,6 +297,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private BroadcastReceiver miuiHomeOpenBreakCommandReceiver;
     private Context miuiHomeInputArbiterReceiverContext;
     private BroadcastReceiver miuiHomeInputArbiterReceiver;
+    private volatile MiuiHomeReturnHomeController miuiHomeReturnHomeController;
+    private volatile IBinder miuiHomeReturnHomeBinder;
     private volatile boolean miuiHomeSystemUiInputArbiterReady;
     private volatile long miuiHomeSystemUiInputArbiterGeneration;
     private String processName;
@@ -299,6 +387,103 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
+    private static final class MiuiHomeLocalHandoffToken {
+        final long generation;
+        final Object session;
+        final Object windowElement;
+        final Object windowAnimContext;
+        final Object status;
+
+        MiuiHomeLocalHandoffToken(long generation, Object session,
+                                  Object windowElement, Object windowAnimContext,
+                                  Object status) {
+            this.generation = generation;
+            this.session = session;
+            this.windowElement = windowElement;
+            this.windowAnimContext = windowAnimContext;
+            this.status = status;
+        }
+    }
+
+    private static final class ReturnHomeComposition {
+        final Object appsIdentity;
+        final Object closingTarget;
+        final Object openingTarget;
+        final SurfaceControl closingLeash;
+        final SurfaceControl openingLeash;
+        final int closingTaskId;
+        final int openingTaskId;
+        final int displayId;
+        final int closingPrefix;
+        final int openingPrefix;
+
+        ReturnHomeComposition(Object appsIdentity, Object closingTarget,
+                              Object openingTarget, SurfaceControl closingLeash,
+                              SurfaceControl openingLeash, int closingTaskId,
+                              int openingTaskId, int displayId, int closingPrefix,
+                              int openingPrefix) {
+            this.appsIdentity = appsIdentity;
+            this.closingTarget = closingTarget;
+            this.openingTarget = openingTarget;
+            this.closingLeash = closingLeash;
+            this.openingLeash = openingLeash;
+            this.closingTaskId = closingTaskId;
+            this.openingTaskId = openingTaskId;
+            this.displayId = displayId;
+            this.closingPrefix = closingPrefix;
+            this.openingPrefix = openingPrefix;
+        }
+    }
+
+    private static final class ReturnHomeCommitComposition {
+        final Object handler;
+        final Object controller;
+        final ReturnHomeComposition composition;
+        final SurfaceControl changeLeash;
+        final Object transitionToken;
+        final Object transitionInfo;
+        final Object startTransaction;
+        final Object finishTransaction;
+        final Object mergeTarget;
+        final Object finishCallback;
+        final Object preparedOpenInfo;
+        final Object previousAnimationFinishCallback;
+        final int transitionType;
+        final int changeMode;
+        final boolean backGestureAnimated;
+
+        ReturnHomeCommitComposition(Object handler, Object controller,
+                                    ReturnHomeComposition composition,
+                                    SurfaceControl changeLeash,
+                                    Object transitionToken,
+                                    Object transitionInfo,
+                                    Object startTransaction,
+                                    Object finishTransaction,
+                                    Object mergeTarget,
+                                    Object finishCallback,
+                                    Object preparedOpenInfo,
+                                    Object previousAnimationFinishCallback,
+                                    int transitionType, int changeMode,
+                                    boolean backGestureAnimated) {
+            this.handler = handler;
+            this.controller = controller;
+            this.composition = composition;
+            this.changeLeash = changeLeash;
+            this.transitionToken = transitionToken;
+            this.transitionInfo = transitionInfo;
+            this.startTransaction = startTransaction;
+            this.finishTransaction = finishTransaction;
+            this.mergeTarget = mergeTarget;
+            this.finishCallback = finishCallback;
+            this.preparedOpenInfo = preparedOpenInfo;
+            this.previousAnimationFinishCallback =
+                    previousAnimationFinishCallback;
+            this.transitionType = transitionType;
+            this.changeMode = changeMode;
+            this.backGestureAnimated = backGestureAnimated;
+        }
+    }
+
     private static final class EdgeWidthSnapshot {
         final int leftSensitivity;
         final int rightSensitivity;
@@ -377,6 +562,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 miuiHomeOpenBreakAnimationActive;
         boolean savedMiuiHomeOpenBreakCommandPending =
                 miuiHomeOpenBreakCommandPending;
+        miuiHomeLocalHandoffToken.set(null);
+        IBinder savedMiuiHomeReturnHomeBinder =
+                detachMiuiHomeReturnHome("hotReload", true);
         acceptingOpenSnapshots = false;
         miuiHomeOpenBreakCallbackEpoch.incrementAndGet();
         openSnapshotGeneration.incrementAndGet();
@@ -409,7 +597,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Boolean.valueOf(savedMiuiHomeOpenBreakGenerationPrepared),
                 Boolean.valueOf(savedMiuiHomeOpenBreakAnimationActive),
                 Boolean.valueOf(savedMiuiHomeOpenBreakCommandPending),
-                Boolean.valueOf(savedMiuiDrawerVisible)
+                Boolean.valueOf(savedMiuiDrawerVisible),
+                savedMiuiHomeReturnHomeBinder
         });
         return true;
     }
@@ -420,6 +609,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         int replaced = 0;
         boolean hadBackWindowStartHook = false;
         boolean hadPrepareTransitionHook = false;
+        boolean hadReturnHomeTouchOcclusionHook = false;
         boolean hadNavigationBarGestureInsetsHook = false;
         boolean hadBackNavigationDoneHook = false;
         boolean hadMiuiHomeGestureStubShowHook = false;
@@ -431,10 +621,20 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
         boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
         boolean hadMiuiHomeReusedCloseOpenHook = false;
+        boolean hadMiuiHomeReturnHomeCancelSurfaceHook = false;
+        boolean hadMiuiHomeReturnHomeSameIconParallelHook = false;
+        boolean hadMiuiHomeReturnHomeCancelDirectHook = false;
+        boolean hadMiuiHomeReturnHomeSetToOldHook = false;
         boolean hadMiuiHomeDrawerStateHook = false;
+        boolean hadMiuiHomeReturnHomeInitializeHook = false;
+        boolean hadMiuiHomeReturnHomeLocalHandoffHook = false;
+        boolean hadMiuiHomeReturnHomeWallpaperSetHook = false;
+        boolean hadMiuiHomeReturnHomeWallpaperAnimHook = false;
         boolean hadDefaultTransitionStartHook = false;
         boolean hadDefaultTransitionMergeHook = false;
         boolean hadBackSendEventHook = false;
+        boolean hadBackPrepareReparentHook = false;
+        boolean hadBackCommitCompositionHook = false;
         boolean hadAnyServerHook = false;
         ClassLoader hotReloadClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
@@ -447,6 +647,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("server_schedule_animation_prepare_transition".equals(
                         oldHandle.getId())) {
                     hadPrepareTransitionHook = true;
+                } else if ("server_return_home_touch_occlusion".equals(
+                        oldHandle.getId())) {
+                    hadReturnHomeTouchOcclusionHook = true;
                 } else if ("systemui_navigation_bar_gesture_insets".equals(
                         oldHandle.getId())) {
                     hadNavigationBarGestureInsetsHook = true;
@@ -474,14 +677,43 @@ public final class MiuiBackGestureHook extends XposedModule {
                     hadMiuiHomeOpenBreakAnimationEndHook = true;
                 } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
                     hadMiuiHomeReusedCloseOpenHook = true;
+                } else if ("miui_home_return_home_cancel_surface".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeCancelSurfaceHook = true;
+                } else if ("miui_home_return_home_same_icon_parallel".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeSameIconParallelHook = true;
+                } else if ("miui_home_return_home_cancel_direct".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeCancelDirectHook = true;
+                } else if ("miui_home_return_home_set_to_old".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeSetToOldHook = true;
                 } else if ("miui_home_drawer_state".equals(oldHandle.getId())) {
                     hadMiuiHomeDrawerStateHook = true;
+                } else if ("miui_home_return_home_initialize".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeInitializeHook = true;
+                } else if ("miui_home_return_home_local_handoff".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeLocalHandoffHook = true;
+                } else if ("miui_home_return_home_wallpaper_set".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeWallpaperSetHook = true;
+                } else if ("miui_home_return_home_wallpaper_anim".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeWallpaperAnimHook = true;
                 } else if ("systemui_default_transition_start".equals(oldHandle.getId())) {
                     hadDefaultTransitionStartHook = true;
                 } else if ("systemui_default_transition_merge".equals(oldHandle.getId())) {
                     hadDefaultTransitionMergeHook = true;
                 } else if ("systemui_back_send_event_guard".equals(oldHandle.getId())) {
                     hadBackSendEventHook = true;
+                } else if ("systemui_back_prepare_reparent".equals(oldHandle.getId())) {
+                    hadBackPrepareReparentHook = true;
+                } else if ("systemui_back_commit_composition".equals(
+                        oldHandle.getId())) {
+                    hadBackCommitCompositionHook = true;
                 }
                 if (hotReloadClassLoader == null
                         && oldHandle.getExecutable() != null
@@ -509,7 +741,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if (shouldInstallServerHooks
                 && (!hadBackWindowStartHook || !hadPrepareTransitionHook
-                || !hadBackNavigationDoneHook)) {
+                || !hadBackNavigationDoneHook
+                || !hadReturnHomeTouchOcclusionHook)) {
             ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
             if (serverClassLoader != null) {
                 if (!hadBackWindowStartHook) {
@@ -520,6 +753,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 if (!hadBackNavigationDoneHook) {
                     hookBackNavigationDoneCleanup(serverClassLoader);
+                }
+                if (!hadReturnHomeTouchOcclusionHook) {
+                    hookReturnHomeTouchOcclusion(serverClassLoader);
                 }
             }
         }
@@ -536,6 +772,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             if (!hadBackSendEventHook) {
                 hookBackAnimationSendBackEvent(hotReloadClassLoader);
+            }
+            if (!hadBackPrepareReparentHook) {
+                hookBackPrepareTransitionReparent(hotReloadClassLoader);
+            }
+            if (!hadBackCommitCompositionHook) {
+                hookBackCommitComposition(hotReloadClassLoader);
             }
         }
         if (MIUI_HOME.equals(processName) && hotReloadClassLoader != null) {
@@ -584,11 +826,38 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!hadMiuiHomeReusedCloseOpenHook) {
                     hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
                 }
+                if (!hadMiuiHomeReturnHomeCancelSurfaceHook
+                        || !hadMiuiHomeReturnHomeSetToOldHook) {
+                    hookMiuiHomeReturnHomeCloseInterruption(
+                            hotReloadClassLoader,
+                            !hadMiuiHomeReturnHomeCancelSurfaceHook,
+                            !hadMiuiHomeReturnHomeSetToOldHook);
+                }
+                if (!hadMiuiHomeReturnHomeSameIconParallelHook) {
+                    hookMiuiHomeReturnHomeSameIconParallel(hotReloadClassLoader);
+                }
+                if (!hadMiuiHomeReturnHomeCancelDirectHook) {
+                    hookMiuiHomeReturnHomeDirectCancel(hotReloadClassLoader);
+                }
                 if (!hadMiuiHomeDrawerStateHook) {
                     hookMiuiHomeDrawerState(hotReloadClassLoader);
                 }
+                if (!hadMiuiHomeReturnHomeInitializeHook) {
+                    hookMiuiHomeReturnHomeInitialize(hotReloadClassLoader);
+                }
+                if (!hadMiuiHomeReturnHomeLocalHandoffHook) {
+                    hookMiuiHomeReturnHomeLocalHandoff(hotReloadClassLoader);
+                }
+                if (!hadMiuiHomeReturnHomeWallpaperSetHook
+                        || !hadMiuiHomeReturnHomeWallpaperAnimHook) {
+                    hookMiuiHomeReturnHomeWallpaperCommands(
+                            hotReloadClassLoader,
+                            !hadMiuiHomeReturnHomeWallpaperSetHook,
+                            !hadMiuiHomeReturnHomeWallpaperAnimHook);
+                }
                 restoreMiuiHomeGestureStubsAfterHotReload(hotReloadClassLoader);
                 restoreMiuiHomeOpenBreakAfterHotReload();
+                restoreMiuiHomeReturnHomeAfterHotReload(hotReloadClassLoader);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Failed to restore MiuiHome hooks",
                         throwable);
@@ -659,8 +928,42 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("miui_home_reused_close_open".equals(hookId)) {
             return this::restoreMiuiHomeReusedCloseOpen;
         }
+        if ("miui_home_return_home_cancel_surface".equals(hookId)) {
+            return this::captureMiuiHomeReturnHomeCloseInterruption;
+        }
+        if ("miui_home_return_home_same_icon_parallel".equals(hookId)) {
+            return this::routeMiuiHomeReturnHomeSameIconParallel;
+        }
+        if ("miui_home_return_home_cancel_direct".equals(hookId)) {
+            return this::wrapMiuiHomeReturnHomeDirectCancel;
+        }
+        if ("miui_home_return_home_set_to_old".equals(hookId)) {
+            return this::finishMiuiHomeReturnHomeCloseInterruption;
+        }
         if ("miui_home_drawer_state".equals(hookId)) {
             return this::mirrorMiuiHomeDrawerState;
+        }
+        if ("miui_home_return_home_initialize".equals(hookId)) {
+            return this::registerMiuiHomeReturnHome;
+        }
+        if ("miui_home_return_home_local_handoff".equals(hookId)) {
+            return this::provideMiuiHomeReturnHomeLocalHandoff;
+        }
+        if ("miui_home_return_home_window_alpha".equals(hookId)) {
+            // The retired alpha override must stay transparent so Xiaomi's stock mapAlpha
+            // curve owns the intended window-to-icon handoff.
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_return_home_native_frame".equals(hookId)) {
+            // Retire the observation-only per-frame probe without retaining its reflection
+            // and logging cost across API 102 hot reload.
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_return_home_wallpaper_set".equals(hookId)) {
+            return this::observeMiuiHomeReturnHomeWallpaperSet;
+        }
+        if ("miui_home_return_home_wallpaper_anim".equals(hookId)) {
+            return this::observeMiuiHomeReturnHomeWallpaperAnim;
         }
         if (hookId.startsWith("miui_home_block_gesture_window_")) {
             // v88 blocked BaseRecentsImpl.addBackStubWindow(), leaving its gesture-stub
@@ -685,6 +988,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("server_back_navigation_done_cleanup".equals(hookId)) {
             return this::cleanupSkippedRemoteAnimationOnNavigationDone;
         }
+        if ("server_return_home_touch_occlusion".equals(hookId)) {
+            return this::allowCommittedReturnHomeTouchThrough;
+        }
         if (hookId.startsWith("server_security_sidebar_transient_bars_")) {
             return this::interceptSecuritySidebarTransientBars;
         }
@@ -696,6 +1002,12 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("systemui_back_send_event_guard".equals(hookId)) {
             return this::guardDuplicateBackEvent;
+        }
+        if ("systemui_back_prepare_reparent".equals(hookId)) {
+            return this::correctPredictiveBackPrepareReparent;
+        }
+        if ("systemui_back_commit_composition".equals(hookId)) {
+            return this::correctPredictiveBackCommitComposition;
         }
         if ("systemui_edge_back_setBackAnimation".equals(hookId)) {
             return this::onEdgeBackSetBackAnimation;
@@ -746,6 +1058,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 if (state.length >= 11) {
                     miuiDrawerVisible = Boolean.TRUE.equals(state[10]);
+                }
+                if (state.length >= 12 && state[11] instanceof IBinder) {
+                    miuiHomeReturnHomeBinder = (IBinder) state[11];
                 }
             }
         }
@@ -828,7 +1143,13 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookMiuiHomeOpenBreakAnimationStart(windowElementAnimListenerClass);
             hookMiuiHomeOpenBreakAnimationEnd(windowElementAnimListenerClass);
             hookMiuiHomeReusedCloseOpen(classLoader);
+            hookMiuiHomeReturnHomeCloseInterruption(classLoader, true, true);
+            hookMiuiHomeReturnHomeSameIconParallel(classLoader);
+            hookMiuiHomeReturnHomeDirectCancel(classLoader);
             hookMiuiHomeDrawerState(classLoader);
+            hookMiuiHomeReturnHomeInitialize(classLoader);
+            hookMiuiHomeReturnHomeLocalHandoff(classLoader);
+            hookMiuiHomeReturnHomeWallpaperCommands(classLoader, true, true);
             log(Log.INFO, TAG, "Enabled MiuiHome native side input arbitration"
                     + ", preservedGestureStubInitialization=true"
                     + ", preservesNativeRedirect=true"
@@ -897,6 +1218,64 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::mirrorMiuiHomeFullscreenState));
     }
 
+    private void hookMiuiHomeReturnHomeInitialize(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> overviewProxyClass = Class.forName(MIUI_HOME_OVERVIEW_PROXY_IMPL, false,
+                classLoader);
+        Method method = overviewProxyClass.getDeclaredMethod(
+                "lambda$onInitialize$0", Bundle.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_return_home_initialize")
+                .intercept(this::registerMiuiHomeReturnHome));
+    }
+
+    private void hookMiuiHomeReturnHomeLocalHandoff(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> implementorClass = Class.forName(
+                MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR, false, classLoader);
+        for (Method method : implementorClass.getDeclaredMethods()) {
+            if ("getLastAnimParam".equals(method.getName())
+                    && method.getParameterCount() == 1) {
+                method.setAccessible(true);
+                recordHookHandle(hook(method)
+                        .setId("miui_home_return_home_local_handoff")
+                        .intercept(this::provideMiuiHomeReturnHomeLocalHandoff));
+                log(Log.INFO, TAG, "Hooked Xiaomi local return-home handoff");
+                return;
+            }
+        }
+        throw new NoSuchMethodException(
+                MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR + ".getLastAnimParam");
+    }
+
+    private void hookMiuiHomeReturnHomeWallpaperCommands(
+            ClassLoader classLoader, boolean hookSet, boolean hookAnim)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> wallpaperElementClass = Class.forName(
+                MIUI_HOME_SYSTEM_WALLPAPER_ELEMENT, false, classLoader);
+        Class<?> wallpaperParamsClass = Class.forName(
+                MIUI_HOME_WALLPAPER_PARAMS, false, classLoader);
+        if (hookSet) {
+            Method setTo = wallpaperElementClass.getDeclaredMethod(
+                    "setTo", wallpaperParamsClass);
+            setTo.setAccessible(true);
+            recordHookHandle(hook(setTo)
+                    .setId("miui_home_return_home_wallpaper_set")
+                    .intercept(this::observeMiuiHomeReturnHomeWallpaperSet));
+        }
+        if (hookAnim) {
+            Method animTo = wallpaperElementClass.getDeclaredMethod(
+                    "animTo", wallpaperParamsClass);
+            animTo.setAccessible(true);
+            recordHookHandle(hook(animTo)
+                    .setId("miui_home_return_home_wallpaper_anim")
+                    .intercept(this::observeMiuiHomeReturnHomeWallpaperAnim));
+        }
+        log(Log.INFO, TAG, "Hooked Xiaomi return-home wallpaper ownership"
+                + ", set=" + hookSet + ", anim=" + hookAnim);
+    }
+
     private void hookMiuiHomeOpenBreakEnable(Class<?> breakControllerClass)
             throws NoSuchMethodException {
         Method method = breakControllerClass.getDeclaredMethod("enableBackBreakOpenAnim");
@@ -935,6 +1314,73 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::restoreMiuiHomeReusedCloseOpen));
     }
 
+    private void hookMiuiHomeReturnHomeCloseInterruption(
+            ClassLoader classLoader, boolean hookCancelSurface, boolean hookSetToOld)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        if (hookCancelSurface) {
+            Class<?> shellTransitionCallbackClass = Class.forName(
+                    MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
+            Method cancelSurface = windowElementClass.getDeclaredMethod(
+                    "cancelSurfaceAnimOnly", String.class, boolean.class,
+                    shellTransitionCallbackClass, Boolean.class, boolean.class,
+                    shellTransitionCallbackClass, shellTransitionCallbackClass);
+            cancelSurface.setAccessible(true);
+            recordHookHandle(hook(cancelSurface)
+                    .setId("miui_home_return_home_cancel_surface")
+                    .intercept(this::captureMiuiHomeReturnHomeCloseInterruption));
+        }
+        if (hookSetToOld) {
+            Class<?> stateManagerClass = Class.forName(
+                    MIUI_HOME_STATE_MANAGER, false, classLoader);
+            Method setToOld = stateManagerClass.getDeclaredMethod(
+                    "setToOld", windowElementClass);
+            setToOld.setAccessible(true);
+            recordHookHandle(hook(setToOld)
+                    .setId("miui_home_return_home_set_to_old")
+                    .intercept(this::finishMiuiHomeReturnHomeCloseInterruption));
+        }
+        log(Log.INFO, TAG, "Hooked Xiaomi interrupted return-home handoff"
+                + ", cancelSurface=" + hookCancelSurface
+                + ", setToOld=" + hookSetToOld);
+    }
+
+    private void hookMiuiHomeReturnHomeDirectCancel(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        Class<?> shellTransitionCallbackClass = Class.forName(
+                MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
+        Method cancelDirect = windowElementClass.getDeclaredMethod(
+                "cancelAnim", String.class, boolean.class,
+                shellTransitionCallbackClass, Boolean.class,
+                shellTransitionCallbackClass);
+        cancelDirect.setAccessible(true);
+        recordHookHandle(hook(cancelDirect)
+                .setId("miui_home_return_home_cancel_direct")
+                .intercept(this::wrapMiuiHomeReturnHomeDirectCancel));
+        log(Log.INFO, TAG,
+                "Hooked Xiaomi direct same-icon return-home cancellation");
+    }
+
+    private void hookMiuiHomeReturnHomeSameIconParallel(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> stateManagerClass = Class.forName(
+                MIUI_HOME_STATE_MANAGER, false, classLoader);
+        Class<?> shellTransitionCallbackClass = Class.forName(
+                MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
+        Method cancelAnim = stateManagerClass.getDeclaredMethod(
+                "cancelAnim", String.class, boolean.class, boolean.class,
+                shellTransitionCallbackClass);
+        cancelAnim.setAccessible(true);
+        recordHookHandle(hook(cancelAnim)
+                .setId("miui_home_return_home_same_icon_parallel")
+                .intercept(this::routeMiuiHomeReturnHomeSameIconParallel));
+        log(Log.INFO, TAG,
+                "Hooked Xiaomi same-icon predictive CLOSE parallel routing");
+    }
+
     private void hookMiuiHomeDrawerState(ClassLoader classLoader)
             throws ClassNotFoundException, NoSuchMethodException {
         Class<?> managerClass = Class.forName(MIUI_HOME_LAUNCHER_STATE_MANAGER, false,
@@ -964,6 +1410,12 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object mirrorMiuiHomeOpenBreakAnimationStart(XposedInterface.Chain chain)
             throws Throwable {
         Object result = chain.proceed();
+        MiuiHomeReturnHomeController returnHomeController =
+                miuiHomeReturnHomeController;
+        if (returnHomeController != null) {
+            returnHomeController.onNativeAnimationStart(
+                    chain.getThisObject(), chain.getArg(0));
+        }
         if (!miuiHomeOpenBreakGenerationPrepared
                 || miuiHomeOpenBreakGeneration == 0L) {
             miuiHomeOpenBreakGeneration = nextMiuiHomeOpenBreakGeneration();
@@ -994,6 +1446,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             throws Throwable {
         Object result = chain.proceed();
         Object endedAnimationIdentity = chain.getArg(0);
+        MiuiHomeReturnHomeController returnHomeController =
+                miuiHomeReturnHomeController;
+        if (returnHomeController != null) {
+            returnHomeController.onNativeAnimationEnd(
+                    chain.getThisObject(), endedAnimationIdentity);
+        }
         long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
         // Xiaomi's listener posts its actual StateManager cleanup to the main executor.
         // Queue behind it so isOpenAnimRunning() observes the final state. If another OPEN
@@ -1010,6 +1468,105 @@ public final class MiuiBackGestureHook extends XposedModule {
                     miuiHomeOpenBreakController, "animationEnd");
         });
         return result;
+    }
+
+    private Object captureMiuiHomeReturnHomeCloseInterruption(
+            XposedInterface.Chain chain) throws Throwable {
+        Object windowElement = chain.getThisObject();
+        Object reasonObject = chain.getArg(0);
+        Object result = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            try {
+                controller.onNativeCloseCancelSurface(
+                        windowElement,
+                        reasonObject instanceof String ? (String) reasonObject : null);
+            } catch (Throwable throwable) {
+                // Xiaomi has already queued its native cancellation. Module bookkeeping must
+                // never turn an icon click into a launcher exception.
+                log(Log.WARN, TAG,
+                        "Failed to capture interrupted Xiaomi return-home CLOSE", throwable);
+            }
+        }
+        return result;
+    }
+
+    private Object finishMiuiHomeReturnHomeCloseInterruption(
+            XposedInterface.Chain chain) throws Throwable {
+        Object stateManager = chain.getThisObject();
+        Object windowElement = chain.getArg(0);
+        Object result = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            try {
+                controller.onNativeCloseSetToOld(stateManager, windowElement);
+            } catch (Throwable throwable) {
+                // Preserve Xiaomi's completed callback chain. The old native animation-end
+                // listener and watchdog remain valid fallbacks when verification fails.
+                log(Log.WARN, TAG,
+                        "Failed to finish interrupted Xiaomi return-home CLOSE", throwable);
+            }
+        }
+        return result;
+    }
+
+    private Object routeMiuiHomeReturnHomeSameIconParallel(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller == null) {
+            return chain.proceed();
+        }
+        Object[] originalArgs = chain.getArgs().toArray();
+        boolean routeThroughNativeParallel;
+        try {
+            routeThroughNativeParallel = controller.shouldRouteSameIconThroughNativeParallel(
+                    chain.getThisObject(), originalArgs);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to inspect Xiaomi same-icon parallel routing",
+                    throwable);
+            return chain.proceed();
+        }
+        if (!routeThroughNativeParallel) {
+            return chain.proceed();
+        }
+        Object[] routedArgs = originalArgs.clone();
+        // StateManager's second argument is the same-element/direct-cancel selector. Xiaomi's
+        // false branch already keeps the old WindowElement in its native cancellation lifecycle,
+        // moves it to the old list, and starts FastLaunch OPEN from the native callback.
+        routedArgs[1] = Boolean.FALSE;
+        return chain.proceed(routedArgs);
+    }
+
+    private Object wrapMiuiHomeReturnHomeDirectCancel(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller == null) {
+            return chain.proceed();
+        }
+        Object[] originalArgs = chain.getArgs().toArray();
+        MiuiHomeReturnHomeController.ReturnHomeDirectCancelToken token;
+        try {
+            token = controller.prepareNativeDirectCancel(
+                    chain.getThisObject(), originalArgs);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to prepare direct Xiaomi return-home cancellation",
+                    throwable);
+            return chain.proceed();
+        }
+        if (token == null) {
+            return chain.proceed();
+        }
+        Object[] wrappedArgs = originalArgs.clone();
+        wrappedArgs[2] = token.wrappedCallback;
+        try {
+            return chain.proceed(wrappedArgs);
+        } catch (Throwable throwable) {
+            controller.invalidateNativeDirectCancel(
+                    token, "cancelAnimThrew", false);
+            throw throwable;
+        }
     }
 
     private Object restoreMiuiHomeReusedCloseOpen(XposedInterface.Chain chain)
@@ -1489,6 +2046,173 @@ public final class MiuiBackGestureHook extends XposedModule {
         return chain.proceed();
     }
 
+    private Object registerMiuiHomeReturnHome(XposedInterface.Chain chain)
+            throws Throwable {
+        Object overviewProxy = chain.getThisObject();
+        Object result = chain.proceed();
+        Object bundleObject = chain.getArg(0);
+        if (!(bundleObject instanceof Bundle)) {
+            log(Log.WARN, TAG, "Cannot register launcher back animation: bundle="
+                    + shortObject(bundleObject));
+            return result;
+        }
+        IBinder shellBackAnimation =
+                ((Bundle) bundleObject).getBinder(SHELL_BACK_ANIMATION_DESCRIPTOR);
+        if (shellBackAnimation == null) {
+            log(Log.WARN, TAG, "Launcher initialization omitted Shell IBackAnimation"
+                    + ", keys=" + ((Bundle) bundleObject).keySet());
+            return result;
+        }
+        Context context = resolveMiuiHomeReturnHomeContext(overviewProxy,
+                overviewProxy.getClass().getClassLoader());
+        attachMiuiHomeReturnHome(shellBackAnimation,
+                overviewProxy.getClass().getClassLoader(), context, "initialize");
+        return result;
+    }
+
+    private Object provideMiuiHomeReturnHomeLocalHandoff(
+            XposedInterface.Chain chain) throws Throwable {
+        Object nativeStatus = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (nativeStatus != null) {
+            if (controller != null) {
+                controller.discardLocalHandoffStatus(
+                        chain.getThisObject(), chain.getArg(0),
+                        "nativeStatus");
+            }
+            return nativeStatus;
+        }
+        if (controller != null) {
+            Object status = controller.takeLocalHandoffStatus(
+                    chain.getThisObject(), chain.getArg(0));
+            if (status != null) {
+                return status;
+            }
+        }
+        return null;
+    }
+
+    private Object observeMiuiHomeReturnHomeWallpaperSet(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            controller.onWallpaperCommand(chain.getThisObject(),
+                    chain.getArg(0), false);
+        }
+        return result;
+    }
+
+    private Object observeMiuiHomeReturnHomeWallpaperAnim(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            controller.onWallpaperCommand(chain.getThisObject(),
+                    chain.getArg(0), true);
+        }
+        return result;
+    }
+
+    private synchronized void attachMiuiHomeReturnHome(
+            IBinder shellBackAnimation, ClassLoader classLoader, Context context,
+            String reason) {
+        if (shellBackAnimation == null || classLoader == null) {
+            log(Log.WARN, TAG, "Cannot attach MiuiHome return-to-home runner"
+                    + ", reason=" + reason
+                    + ", binder=" + shortObject(shellBackAnimation)
+                    + ", classLoader=" + classLoader);
+            return;
+        }
+        MiuiHomeReturnHomeController existing = miuiHomeReturnHomeController;
+        if (existing != null && existing.isAttachedTo(shellBackAnimation)) {
+            existing.updateContext(context);
+            miuiHomeReturnHomeBinder = shellBackAnimation;
+            log(Log.INFO, TAG, "Kept existing MiuiHome return-to-home runner"
+                    + ", reason=" + reason
+                    + ", binder=" + shortObject(shellBackAnimation));
+            return;
+        }
+        if (existing != null) {
+            existing.detach(true, "replace:" + reason);
+        }
+        MiuiHomeReturnHomeController replacement =
+                new MiuiHomeReturnHomeController(
+                        shellBackAnimation, classLoader, context);
+        if (!replacement.attach()) {
+            // The synchronous registration may have succeeded before linkToDeath failed.
+            // Clear best-effort so Shell never retains a callback from a rejected controller.
+            replacement.detach(true, "attachFailed:" + reason);
+            miuiHomeReturnHomeController = null;
+            miuiHomeReturnHomeBinder = shellBackAnimation;
+            return;
+        }
+        miuiHomeReturnHomeController = replacement;
+        miuiHomeReturnHomeBinder = shellBackAnimation;
+        log(Log.INFO, TAG, "Registered standard Shell return-to-home callback/runner"
+                + ", reason=" + reason
+                + ", type=" + TYPE_RETURN_TO_HOME
+                + ", binder=" + shortObject(shellBackAnimation)
+                + ", nativePostCommit=Xiaomi-CLOSE_TO_HOME");
+    }
+
+    private synchronized IBinder detachMiuiHomeReturnHome(String reason,
+                                                           boolean clearShell) {
+        IBinder binder = miuiHomeReturnHomeBinder;
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        miuiHomeReturnHomeController = null;
+        miuiHomeReturnHomeBinder = null;
+        if (controller != null) {
+            binder = controller.shellBackAnimation;
+            controller.detach(clearShell, reason);
+        }
+        return binder;
+    }
+
+    private void restoreMiuiHomeReturnHomeAfterHotReload(ClassLoader classLoader) {
+        IBinder binder = miuiHomeReturnHomeBinder;
+        if (binder == null) {
+            log(Log.INFO, TAG, "No saved Shell IBackAnimation after hot reload; "
+                    + "waiting for launcher reinitialization");
+            return;
+        }
+        Context context = resolveMiuiHomeReturnHomeContext(null, classLoader);
+        attachMiuiHomeReturnHome(binder, classLoader, context, "hotReload");
+    }
+
+    private Context resolveMiuiHomeReturnHomeContext(Object overviewProxy,
+                                                      ClassLoader classLoader) {
+        if (overviewProxy != null) {
+            try {
+                Object service = readField(overviewProxy, "mService");
+                if (service instanceof Context) {
+                    return ((Context) service).getApplicationContext();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        Context known = miuiHomeOpenBreakContext;
+        if (known != null) {
+            return known.getApplicationContext();
+        }
+        if (classLoader != null) {
+            try {
+                Class<?> applicationClass = Class.forName(
+                        "com.miui.home.launcher.Application", false, classLoader);
+                Method getInstance = applicationClass.getDeclaredMethod("getInstance");
+                getInstance.setAccessible(true);
+                Object application = getInstance.invoke(null);
+                if (application instanceof Context) {
+                    return ((Context) application).getApplicationContext();
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to resolve MiuiHome context for return-to-home",
+                        throwable);
+            }
+        }
+        return null;
+    }
+
     private void sendAuthenticatedMiuiHomeState(Context context, Intent intent) {
         Context appContext = context.getApplicationContext();
         Intent explicitIntent = new Intent(intent);
@@ -1908,6 +2632,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookBackWindowStartAnimation(serverClassLoader);
             hookScheduleAnimationPrepareTransition(serverClassLoader);
+            hookReturnHomeTouchOcclusion(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
@@ -2184,6 +2909,102 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
+    private void hookReturnHomeTouchOcclusion(ClassLoader classLoader) {
+        try {
+            Class<?> windowStateClass = Class.forName(
+                    WINDOW_STATE, false, classLoader);
+            Method method = windowStateClass.getDeclaredMethod(
+                    "getTouchOcclusionMode");
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("server_return_home_touch_occlusion")
+                    .intercept(this::allowCommittedReturnHomeTouchThrough));
+            log(Log.INFO, TAG,
+                    "Hooked committed return-home touch occlusion ownership");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook committed return-home touch occlusion",
+                    throwable);
+        }
+    }
+
+    private Object allowCommittedReturnHomeTouchThrough(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        if (!(result instanceof Number)
+                || ((Number) result).intValue()
+                != TOUCH_OCCLUSION_MODE_USE_OPACITY) {
+            return result;
+        }
+        Object window = chain.getThisObject();
+        try {
+            Object activity = readField(window, "mActivityRecord");
+            if (activity == null
+                    || Boolean.TRUE.equals(invokeAnyMethod(activity,
+                    "isVisibleRequested", new Object[0]))) {
+                return result;
+            }
+            if (!Boolean.FALSE.equals(invokeAnyMethod(window,
+                    "canReceiveTouchInput", new Object[0]))) {
+                return result;
+            }
+            Object task = invokeAnyMethod(activity, "getTask", new Object[0]);
+            Object activityType = task == null ? null : invokeAnyMethod(
+                    task, "getActivityType", new Object[0]);
+            if (!(activityType instanceof Number)
+                    || ((Number) activityType).intValue()
+                    != ACTIVITY_TYPE_STANDARD) {
+                return result;
+            }
+            Object windowManagerService = readField(window, "mWmService");
+            Object activityTaskManager = readField(
+                    windowManagerService, "mAtmService");
+            Object controller = readField(
+                    activityTaskManager, "mBackNavigationController");
+            if (controller == null
+                    || readIntFieldOrDefault(controller,
+                    "mLastBackType", -1) != TYPE_RETURN_TO_HOME) {
+                return result;
+            }
+            boolean pausedByController = Boolean.TRUE.equals(invokeAnyMethod(
+                    controller, "shouldPauseTouch", new Object[]{activity}));
+            Object animationHandler = readField(controller, "mAnimationHandler");
+            Object preparedCloseTransition = readField(
+                    animationHandler, "mPrepareCloseTransition");
+            boolean preparedCloseTarget = preparedCloseTransition != null
+                    && Boolean.TRUE.equals(readField(
+                    animationHandler, "mComposed"))
+                    && Boolean.TRUE.equals(invokeAnyMethod(animationHandler,
+                    "isTarget", new Object[]{activity, Boolean.FALSE}));
+            if (!pausedByController && !preparedCloseTarget) {
+                return result;
+            }
+            // Before onTransactionReady(), shouldPauseTouch() owns the exact composed target.
+            // Once the matching close transition is prepared, AOSP deliberately makes that
+            // method false because mPrepareCloseTransition is non-null; the handler's immutable
+            // prepared-transition/target relationship then owns the same close until finish.
+            // The Surface remains visible for the launcher animation in both phases, so
+            // USE_OPACITY would make this already non-touchable surface block Launcher input.
+            log(Log.INFO, TAG,
+                    "Allowed Launcher touch through committed predictive CLOSE"
+                            + ", window=" + shortObject(window)
+                            + ", activity=" + shortObject(activity)
+                            + ", task=" + shortObject(task)
+                            + ", phase=" + (pausedByController
+                            ? "controllerPaused" : "preparedClose")
+                            + ", preparedClose="
+                            + shortObject(preparedCloseTransition)
+                            + ", backType=" + TYPE_RETURN_TO_HOME);
+            return Integer.valueOf(TOUCH_OCCLUSION_MODE_ALLOW);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to verify committed return-home touch ownership"
+                            + ", window=" + shortObject(window),
+                    throwable);
+            return result;
+        }
+    }
+
     private Object prepareOpeningTaskFragment(XposedInterface.Chain chain) throws Throwable {
         Object adaptor = chain.getThisObject();
         try {
@@ -2239,17 +3060,35 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object interceptScheduleAnimationPrepareTransition(XposedInterface.Chain chain)
             throws Throwable {
         ClassLoader loader = chain.getExecutable().getDeclaringClass().getClassLoader();
-        boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, true);
-        if (unify) {
+        Object builder = chain.getThisObject();
+        Object launchBehind = readFieldOrNull(builder, "mIsLaunchBehind");
+        boolean launchBehindKnown = launchBehind instanceof Boolean;
+        boolean returnToHome = Boolean.TRUE.equals(launchBehind);
+        boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, false);
+        if (unify && launchBehindKnown && !returnToHome) {
             log(Log.INFO, TAG, "Skipped ScheduleAnimationBuilder.prepareTransitionIfNeeded"
                     + " to avoid Xiaomi unified-transition leash reparenting"
                     + ", unifyBackNavigationTransition=true"
-                    + ", builder=" + shortObject(chain.getThisObject()));
+                    + ", returnToHome=false"
+                    + ", launchBehind=" + launchBehind
+                    + ", builder=" + shortObject(builder));
             return null;
         }
+        if (!launchBehindKnown) {
+            log(Log.WARN, TAG, "Unable to identify ScheduleAnimationBuilder back type;"
+                    + " preserving the platform transition"
+                    + ", launchBehind=" + launchBehind
+                    + ", builder=" + shortObject(builder));
+        }
         log(Log.INFO, TAG, "Allowing ScheduleAnimationBuilder.prepareTransitionIfNeeded"
-                + ", unifyBackNavigationTransition=false"
-                + ", path=Xiaomi/AOSP setLaunchBehind");
+                + ", unifyBackNavigationTransition=" + unify
+                + ", returnToHome=" + (launchBehindKnown
+                    ? Boolean.toString(returnToHome)
+                    : "unknown")
+                + ", launchBehind=" + launchBehind
+                + ", path=" + (unify
+                    ? "unified-prepared-transition"
+                    : "Xiaomi/AOSP-setLaunchBehind"));
         return chain.proceed();
     }
 
@@ -2273,6 +3112,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                    boolean defaultValue) {
         String[] classNames = new String[]{
                 "com.android.window.flags.Flags",
+                "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
                 "android.window.flags.Flags"
         };
         for (String className : classNames) {
@@ -2941,10 +3781,547 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookShellAnimationFinished(controllerClass, "finishBackAnimation",
                     "shell_back_finishBackAnimation", true);
             hookBackNavigationInfoReceived(controllerClass);
+            hookBackPrepareTransitionReparent(classLoader);
+            hookBackCommitComposition(classLoader);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
         }
+    }
+
+    private void hookBackPrepareTransitionReparent(ClassLoader classLoader) {
+        try {
+            Class<?> handlerClass = Class.forName(
+                    BACK_TRANSITION_HANDLER, false, classLoader);
+            for (Method method : handlerClass.getDeclaredMethods()) {
+                if ("handlePrepareTransition".equals(method.getName())
+                        && method.getParameterCount() == 5) {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId("systemui_back_prepare_reparent")
+                            .intercept(this::correctPredictiveBackPrepareReparent));
+                    log(Log.INFO, TAG,
+                            "Hooked Shell predictive return-home prepare role correction");
+                    return;
+                }
+            }
+            log(Log.WARN, TAG,
+                    "BackTransitionHandler.handlePrepareTransition not found");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook Shell predictive-back prepare reparent",
+                    throwable);
+        }
+    }
+
+    private void hookBackCommitComposition(ClassLoader classLoader) {
+        try {
+            Class<?> handlerClass = Class.forName(
+                    BACK_TRANSITION_HANDLER, false, classLoader);
+            for (Method method : handlerClass.getDeclaredMethods()) {
+                Class<?>[] parameterTypes = method.getParameterTypes();
+                if ("mergeAnimation".equals(method.getName())
+                        && parameterTypes.length == 6
+                        && parameterTypes[0] == IBinder.class
+                        && "android.window.TransitionInfo".equals(
+                        parameterTypes[1].getName())
+                        && parameterTypes[2] == SurfaceControl.Transaction.class
+                        && parameterTypes[3] == SurfaceControl.Transaction.class
+                        && parameterTypes[4] == IBinder.class
+                        && "com.android.wm.shell.transition.Transitions$TransitionFinishCallback"
+                        .equals(parameterTypes[5].getName())) {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId("systemui_back_commit_composition")
+                            .intercept(this::correctPredictiveBackCommitComposition));
+                    log(Log.INFO, TAG,
+                            "Hooked Shell predictive return-home commit composition");
+                    return;
+                }
+            }
+            log(Log.WARN, TAG,
+                    "BackTransitionHandler.mergeAnimation not found");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook Shell predictive return-home commit composition",
+                    throwable);
+        }
+    }
+
+    private Object correctPredictiveBackPrepareReparent(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        if (!Boolean.TRUE.equals(result)) {
+            return result;
+        }
+        try {
+            Object handler = chain.getThisObject();
+            Object info = chain.getArg(1);
+            Object type = invokeAnyMethod(info, "getType", new Object[0]);
+            if (!(type instanceof Number)
+                    || ((Number) type).intValue() != TRANSIT_PREDICTIVE_BACK) {
+                return result;
+            }
+            if (readField(handler, "mPrepareOpenTransition") != chain.getArg(0)
+                    || readField(handler, "mOpenTransitionInfo") != info) {
+                return result;
+            }
+            Object controller = readField(handler, "this$0");
+            Object navigationInfo = readField(controller, "mBackNavigationInfo");
+            Object navigationType = navigationInfo == null ? null
+                    : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+            if (!(navigationType instanceof Number)
+                    || ((Number) navigationType).intValue()
+                    != TYPE_RETURN_TO_HOME) {
+                return result;
+            }
+            Object apps = readField(controller, "mApps");
+            ReturnHomeComposition composition =
+                    resolveReturnHomeComposition(apps);
+            if (composition == null) {
+                return result;
+            }
+            Object closingTarget = composition.closingTarget;
+            Object openingTarget = composition.openingTarget;
+            int closingTaskId = composition.closingTaskId;
+            int openingTaskId = composition.openingTaskId;
+            Object changesObject = invokeAnyMethod(info, "getChanges", new Object[0]);
+            if (!(changesObject instanceof List<?>)
+                    || ((List<?>) changesObject).size() != 3) {
+                return result;
+            }
+            Object matchingChange = null;
+            int matchingMode = -1;
+            int closingMatchCount = 0;
+            int homeMatchCount = 0;
+            int wallpaperMatchCount = 0;
+            boolean unexpectedChange = false;
+            for (Object change : (List<?>) changesObject) {
+                Object taskInfo = invokeAnyMethod(
+                        change, "getTaskInfo", new Object[0]);
+                int taskId = readIntFieldOrDefault(taskInfo, "taskId", -1);
+                Object modeObject = invokeAnyMethod(
+                        change, "getMode", new Object[0]);
+                int mode = modeObject instanceof Number
+                        ? ((Number) modeObject).intValue() : -1;
+                boolean hasBackFlag = Boolean.TRUE.equals(invokeAnyMethod(
+                        change, "hasFlags", new Object[]{Integer.valueOf(
+                                FLAG_BACK_GESTURE_ANIMATED)}));
+                boolean wallpaper = Boolean.TRUE.equals(invokeAnyMethod(
+                        change, "hasFlags",
+                        new Object[]{Integer.valueOf(FLAG_IS_WALLPAPER)}));
+                if (taskId == closingTaskId) {
+                    closingMatchCount++;
+                    matchingMode = mode;
+                    if (mode == TRANSIT_TO_FRONT && hasBackFlag
+                            && !wallpaper) {
+                        matchingChange = change;
+                    } else {
+                        unexpectedChange = true;
+                    }
+                    continue;
+                }
+                if (taskId == openingTaskId) {
+                    homeMatchCount++;
+                    if (mode != TRANSIT_TO_FRONT || !hasBackFlag
+                            || wallpaper) {
+                        unexpectedChange = true;
+                    }
+                    continue;
+                }
+                if (taskId < 0 && mode == TRANSIT_TO_FRONT
+                        && wallpaper && !hasBackFlag) {
+                    wallpaperMatchCount++;
+                } else {
+                    unexpectedChange = true;
+                }
+            }
+            if (matchingChange == null || closingMatchCount != 1
+                    || homeMatchCount != 1 || wallpaperMatchCount != 1
+                    || unexpectedChange) {
+                log(Log.INFO, TAG,
+                        "Predictive return-home prepare role needs no correction"
+                                + ", taskId=" + closingTaskId
+                                + ", mode=" + matchingMode
+                                + ", closingMatches=" + closingMatchCount
+                                + ", homeMatches=" + homeMatchCount
+                                + ", wallpaperMatches="
+                                + wallpaperMatchCount
+                                + ", unexpectedChange=" + unexpectedChange);
+                return result;
+            }
+            Object changeLeashObject = invokeAnyMethod(
+                    matchingChange, "getLeash", new Object[0]);
+            Object startTransaction = chain.getArg(2);
+            if (!(changeLeashObject instanceof SurfaceControl)
+                    || !((SurfaceControl) changeLeashObject).isValid()
+                    || surfacesAreSame((SurfaceControl) changeLeashObject,
+                    composition.closingLeash)
+                    || !(startTransaction instanceof SurfaceControl.Transaction)) {
+                return result;
+            }
+            SurfaceControl changeLeash = (SurfaceControl) changeLeashObject;
+            // The stock body already accepted and retained this prepare info, but Xiaomi's
+            // TO_FRONT role made it treat the departing task as another opening surface. Repair
+            // the physical parent first, then normalize only the retained semantic role to the
+            // AOSP CHANGE shape used by handlePrepareTransition and mergePendingTransitions.
+            invokeAnyMethod(startTransaction, "reparent",
+                    new Object[]{changeLeash, composition.closingLeash});
+            ((SurfaceControl.Transaction) startTransaction).apply();
+            if (readField(handler, "mOpenTransitionInfo") != info
+                    || readField(handler, "mPrepareOpenTransition")
+                    != chain.getArg(0)) {
+                throw new IllegalStateException(
+                        "prepared return-home ownership changed after reparent");
+            }
+            invokeAnyMethod(matchingChange, "setMode",
+                    new Object[]{Integer.valueOf(TRANSIT_CHANGE)});
+            Object normalizedModeObject = invokeAnyMethod(
+                    matchingChange, "getMode", new Object[0]);
+            int normalizedMode = normalizedModeObject instanceof Number
+                    ? ((Number) normalizedModeObject).intValue() : -1;
+            if (normalizedMode != TRANSIT_CHANGE) {
+                throw new IllegalStateException(
+                        "prepared return-home role normalization was not retained"
+                                + ", mode=" + normalizedMode);
+            }
+            log(Log.INFO, TAG,
+                    "Corrected Xiaomi predictive return-home prepare role"
+                            + ", taskId=" + closingTaskId
+                            + ", mode=" + matchingMode + "->" + normalizedMode
+                            + ", changeLeash=" + changeLeash
+                            + ", closingLeash=" + composition.closingLeash
+                            + ", closingPrefix=" + readIntFieldOrDefault(
+                            closingTarget, "prefixOrderIndex", -1)
+                            + ", openingTaskId=" + openingTaskId
+                            + ", openingPrefix=" + readIntFieldOrDefault(
+                            openingTarget, "prefixOrderIndex", -1)
+                            + ", openingLeash=" + shortObject(
+                            readFieldOrNull(openingTarget, "leash")));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed Xiaomi predictive return-home prepare role correction",
+                    throwable);
+        }
+        return result;
+    }
+
+    private Object correctPredictiveBackCommitComposition(
+            XposedInterface.Chain chain) throws Throwable {
+        ReturnHomeCommitComposition candidate = null;
+        try {
+            candidate = captureReturnHomeCommitComposition(chain);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to inspect predictive return-home commit composition",
+                    throwable);
+        }
+
+        Object result = chain.proceed();
+        if (candidate == null) {
+            return result;
+        }
+        try {
+            ReturnHomeComposition composition = candidate.composition;
+            Object currentApps = readField(candidate.controller, "mApps");
+            Object navigationInfo = readField(candidate.controller,
+                    "mBackNavigationInfo");
+            Object navigationType = navigationInfo == null ? null
+                    : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+            Object animationFinishCallback = readField(candidate.handler,
+                    "mOnAnimationFinishCallback");
+            Object currentPrepareOpen = readField(candidate.handler,
+                    "mPrepareOpenTransition");
+            Object currentOpenInfo = readField(candidate.handler,
+                    "mOpenTransitionInfo");
+            Object currentCloseRequested = readField(candidate.handler,
+                    "mCloseTransitionRequested");
+            boolean appsSame = currentApps == composition.appsIdentity;
+            boolean callIdentitySame = chain.getArg(0) == candidate.transitionToken
+                    && chain.getArg(1) == candidate.transitionInfo
+                    && chain.getArg(2) == candidate.startTransaction
+                    && chain.getArg(3) == candidate.finishTransaction
+                    && chain.getArg(4) == candidate.mergeTarget
+                    && chain.getArg(5) == candidate.finishCallback;
+            boolean returnHomeStillCurrent = navigationType instanceof Number
+                    && ((Number) navigationType).intValue() == TYPE_RETURN_TO_HOME;
+            boolean closeStillRequested = Boolean.TRUE.equals(
+                    currentCloseRequested);
+            boolean prepareOpenSame = currentPrepareOpen == candidate.mergeTarget;
+            boolean preparedInfoConsumed = currentOpenInfo == null;
+            boolean freshFinishCallback = animationFinishCallback != null
+                    && animationFinishCallback
+                    != candidate.previousAnimationFinishCallback;
+            boolean changeLeashValid = candidate.changeLeash.isValid();
+            boolean closingLeashValid = composition.closingLeash.isValid();
+            boolean openingLeashValid = composition.openingLeash.isValid();
+            if (!appsSame || !callIdentitySame || !returnHomeStillCurrent
+                    || !closeStillRequested || !prepareOpenSame
+                    || !preparedInfoConsumed || !freshFinishCallback
+                    || !changeLeashValid || !closingLeashValid
+                    || !openingLeashValid) {
+                log(Log.INFO, TAG,
+                        "Skipped stale predictive return-home commit composition"
+                                + ", taskId=" + composition.closingTaskId
+                                + ", transitionType=" + candidate.transitionType
+                                + ", changeMode=" + candidate.changeMode
+                                + ", appsSame=" + appsSame
+                                + ", callIdentitySame=" + callIdentitySame
+                                + ", navigationType=" + navigationType
+                                + ", closeRequested=" + currentCloseRequested
+                                + ", prepareOpenSame=" + prepareOpenSame
+                                + ", prepareOpen=" + shortObject(
+                                currentPrepareOpen)
+                                + ", preparedInfoConsumed="
+                                + preparedInfoConsumed
+                                + ", openInfo=" + shortObject(currentOpenInfo)
+                                + ", freshFinishCallback="
+                                + freshFinishCallback
+                                + ", finishCallback=" + shortObject(
+                                animationFinishCallback)
+                                + ", leashValid=" + changeLeashValid + "/"
+                                + closingLeashValid + "/" + openingLeashValid);
+                return result;
+            }
+
+            try (SurfaceControl.Transaction transaction =
+                         new SurfaceControl.Transaction()) {
+                // Xiaomi's prepared transition reports the departing task as opening and the
+                // commit transaction can consequently restore it outside the predictive
+                // closing wrapper. Reassert the exact AOSP handleCloseTransition parent after
+                // the accepted merge. The existing animation leashes retain WM's layer order;
+                // changing it without a SurfaceFlinger trace would be a separate intervention.
+                transaction.reparent(candidate.changeLeash,
+                        composition.closingLeash);
+                transaction.apply();
+            }
+            log(Log.INFO, TAG,
+                    "Corrected predictive return-home commit composition"
+                            + ", taskId=" + composition.closingTaskId
+                            + ", homeTaskId=" + composition.openingTaskId
+                            + ", displayId=" + composition.displayId
+                            + ", transitionType=" + candidate.transitionType
+                            + ", changeMode=" + candidate.changeMode
+                            + ", backGestureAnimated="
+                            + candidate.backGestureAnimated
+                            + ", changeLeash=" + candidate.changeLeash
+                            + ", closingLeash=" + composition.closingLeash
+                            + ", openingLeash=" + composition.openingLeash
+                            + ", prefixes=" + composition.closingPrefix
+                            + "/" + composition.openingPrefix);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed predictive return-home commit composition correction",
+                    throwable);
+        }
+        return result;
+    }
+
+    private ReturnHomeCommitComposition captureReturnHomeCommitComposition(
+            XposedInterface.Chain chain) throws Exception {
+        Object handler = chain.getThisObject();
+        if (!Boolean.TRUE.equals(readField(handler, "mCloseTransitionRequested"))) {
+            return null;
+        }
+        Object controller = readField(handler, "this$0");
+        Object navigationInfo = readField(controller, "mBackNavigationInfo");
+        if (navigationInfo == null) {
+            return null;
+        }
+        Object navigationType = invokeAnyMethod(
+                navigationInfo, "getType", new Object[0]);
+        if (!(navigationType instanceof Number)
+                || ((Number) navigationType).intValue() != TYPE_RETURN_TO_HOME) {
+            return null;
+        }
+        Object transitionToken = chain.getArg(0);
+        Object info = chain.getArg(1);
+        Object startTransaction = chain.getArg(2);
+        Object finishTransaction = chain.getArg(3);
+        Object mergeTarget = chain.getArg(4);
+        Object finishCallback = chain.getArg(5);
+        Object preparedOpenInfo = readField(handler, "mOpenTransitionInfo");
+        Object previousAnimationFinishCallback = readField(
+                handler, "mOnAnimationFinishCallback");
+        Object preparedOpenToken = readField(handler, "mPrepareOpenTransition");
+        if (transitionToken == null || info == null
+                || !(startTransaction instanceof SurfaceControl.Transaction)
+                || !(finishTransaction instanceof SurfaceControl.Transaction)
+                || mergeTarget == null || finishCallback == null
+                || transitionToken == mergeTarget
+                || preparedOpenToken != mergeTarget
+                || preparedOpenInfo == null
+                || previousAnimationFinishCallback != null) {
+            return null;
+        }
+        Object preparedTypeObject = invokeAnyMethod(
+                preparedOpenInfo, "getType", new Object[0]);
+        if (!(preparedTypeObject instanceof Number)
+                || ((Number) preparedTypeObject).intValue()
+                != TRANSIT_PREDICTIVE_BACK) {
+            return null;
+        }
+        ReturnHomeComposition composition = resolveReturnHomeComposition(
+                readField(controller, "mApps"));
+        if (composition == null) {
+            log(Log.INFO, TAG,
+                    "Skipped predictive return-home commit composition: "
+                            + "non-standard targets");
+            return null;
+        }
+        Object transitionTypeObject = invokeAnyMethod(
+                info, "getType", new Object[0]);
+        int transitionType = transitionTypeObject instanceof Number
+                ? ((Number) transitionTypeObject).intValue() : -1;
+        if (transitionType != TRANSIT_TO_BACK) {
+            log(Log.INFO, TAG,
+                    "Skipped predictive return-home commit composition: "
+                            + "unexpected transition type=" + transitionType);
+            return null;
+        }
+        Object changesObject = invokeAnyMethod(info, "getChanges", new Object[0]);
+        if (!(changesObject instanceof List<?>)) {
+            return null;
+        }
+        Object matchingChange = null;
+        int matchingMode = -1;
+        boolean backGestureAnimated = false;
+        int matchCount = 0;
+        for (Object change : (List<?>) changesObject) {
+            Object taskInfo = invokeAnyMethod(change, "getTaskInfo", new Object[0]);
+            if (readIntFieldOrDefault(taskInfo, "taskId", -1)
+                    != composition.closingTaskId) {
+                continue;
+            }
+            matchCount++;
+            matchingChange = change;
+            Object modeObject = invokeAnyMethod(change, "getMode", new Object[0]);
+            matchingMode = modeObject instanceof Number
+                    ? ((Number) modeObject).intValue() : -1;
+            backGestureAnimated = Boolean.TRUE.equals(invokeAnyMethod(
+                    change, "hasFlags",
+                    new Object[]{Integer.valueOf(FLAG_BACK_GESTURE_ANIMATED)}));
+        }
+        if (matchCount != 1 || matchingChange == null
+                || matchingMode != TRANSIT_TO_BACK
+                || !backGestureAnimated) {
+            log(Log.INFO, TAG,
+                    "Skipped predictive return-home commit composition: "
+                            + "closing change mismatch"
+                            + ", taskId=" + composition.closingTaskId
+                            + ", transitionType=" + transitionType
+                            + ", matches=" + matchCount
+                            + ", mode=" + matchingMode
+                            + ", backGestureAnimated=" + backGestureAnimated);
+            return null;
+        }
+        Object changeLeashObject = invokeAnyMethod(
+                matchingChange, "getLeash", new Object[0]);
+        if (!(changeLeashObject instanceof SurfaceControl)
+                || !((SurfaceControl) changeLeashObject).isValid()
+                || surfacesAreSame((SurfaceControl) changeLeashObject,
+                composition.closingLeash)
+                || surfacesAreSame((SurfaceControl) changeLeashObject,
+                composition.openingLeash)) {
+            log(Log.INFO, TAG,
+                    "Skipped predictive return-home commit composition: "
+                            + "invalid or aliased change leash"
+                            + ", taskId=" + composition.closingTaskId
+                            + ", transitionType=" + transitionType
+                            + ", mode=" + matchingMode
+                            + ", changeLeash=" + shortObject(changeLeashObject));
+            return null;
+        }
+        return new ReturnHomeCommitComposition(handler, controller, composition,
+                (SurfaceControl) changeLeashObject, transitionToken, info,
+                startTransaction, finishTransaction, mergeTarget,
+                finishCallback, preparedOpenInfo,
+                previousAnimationFinishCallback, transitionType,
+                matchingMode, backGestureAnimated);
+    }
+
+    private ReturnHomeComposition resolveReturnHomeComposition(Object apps)
+            throws Exception {
+        if (apps == null || !apps.getClass().isArray()
+                || Array.getLength(apps) != 2) {
+            return null;
+        }
+        Object closingTarget = null;
+        Object openingTarget = null;
+        for (int i = 0; i < 2; i++) {
+            Object target = Array.get(apps, i);
+            int mode = readIntFieldOrDefault(target, "mode", -1);
+            if (mode == 1 && closingTarget == null) {
+                closingTarget = target;
+            } else if (mode == 0 && openingTarget == null) {
+                openingTarget = target;
+            } else {
+                return null;
+            }
+        }
+        if (closingTarget == null || openingTarget == null
+                || Boolean.TRUE.equals(readField(closingTarget, "isElement"))
+                || Boolean.TRUE.equals(readField(openingTarget, "isElement"))
+                || resolveRemoteTargetActivityType(closingTarget)
+                != ACTIVITY_TYPE_STANDARD
+                || resolveRemoteTargetActivityType(openingTarget)
+                != ACTIVITY_TYPE_HOME
+                || resolveRemoteTargetWindowingMode(closingTarget)
+                != WINDOWING_MODE_FULLSCREEN
+                || resolveRemoteTargetWindowingMode(openingTarget)
+                != WINDOWING_MODE_FULLSCREEN) {
+            return null;
+        }
+        int closingTaskId = readIntFieldOrDefault(
+                closingTarget, "taskId", -1);
+        int openingTaskId = readIntFieldOrDefault(
+                openingTarget, "taskId", -1);
+        Object closingTaskInfo = readField(closingTarget, "taskInfo");
+        Object openingTaskInfo = readField(openingTarget, "taskInfo");
+        int closingDisplayId = readIntFieldOrDefault(
+                closingTaskInfo, "displayId", -1);
+        int openingDisplayId = readIntFieldOrDefault(
+                openingTaskInfo, "displayId", -1);
+        Object closingLeashObject = readField(closingTarget, "leash");
+        Object openingLeashObject = readField(openingTarget, "leash");
+        if (closingTaskId < 0 || openingTaskId < 0
+                || closingTaskId == openingTaskId
+                || closingDisplayId < 0 || closingDisplayId != openingDisplayId
+                || readIntFieldOrDefault(closingTaskInfo, "taskId", -1)
+                != closingTaskId
+                || readIntFieldOrDefault(openingTaskInfo, "taskId", -1)
+                != openingTaskId
+                || !(closingLeashObject instanceof SurfaceControl)
+                || !(openingLeashObject instanceof SurfaceControl)) {
+            return null;
+        }
+        SurfaceControl closingLeash = (SurfaceControl) closingLeashObject;
+        SurfaceControl openingLeash = (SurfaceControl) openingLeashObject;
+        if (!closingLeash.isValid() || !openingLeash.isValid()
+                || surfacesAreSame(closingLeash, openingLeash)) {
+            return null;
+        }
+        return new ReturnHomeComposition(apps, closingTarget, openingTarget,
+                closingLeash, openingLeash, closingTaskId, openingTaskId,
+                closingDisplayId,
+                readIntFieldOrDefault(closingTarget, "prefixOrderIndex", -1),
+                readIntFieldOrDefault(openingTarget, "prefixOrderIndex", -1));
+    }
+
+    private int resolveRemoteTargetActivityType(Object target) throws Exception {
+        Object windowConfiguration = readField(target, "windowConfiguration");
+        Object activityType = invokeAnyMethod(
+                windowConfiguration, "getActivityType", new Object[0]);
+        return activityType instanceof Number
+                ? ((Number) activityType).intValue() : -1;
+    }
+
+    private int resolveRemoteTargetWindowingMode(Object target) throws Exception {
+        Object windowConfiguration = readField(target, "windowConfiguration");
+        Object windowingMode = invokeAnyMethod(
+                windowConfiguration, "getWindowingMode", new Object[0]);
+        return windowingMode instanceof Number
+                ? ((Number) windowingMode).intValue() : -1;
     }
 
     private void hookShellAnimationFinished(Class<?> controllerClass, String methodName,
@@ -2991,6 +4368,34 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Object onShellAnimationFinished(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
+        if ("finishBackAnimation".equals(chain.getExecutable().getName())) {
+            try {
+                Object controller = chain.getThisObject();
+                Object transitionHandler = readField(controller,
+                        "mBackTransitionHandler");
+                log(Log.INFO, TAG, "Completed stock Shell back-animation cleanup"
+                        + ", postCommit=" + readField(controller,
+                        "mPostCommitAnimationInProgress")
+                        + ", navigation=" + shortObject(readField(controller,
+                        "mBackNavigationInfo"))
+                        + ", finishedCallback=" + shortObject(readField(controller,
+                        "mBackAnimationFinishedCallback"))
+                        + ", currentTracker=" + shortObject(readField(controller,
+                        "mCurrentTracker"))
+                        + ", queuedTracker=" + shortObject(readField(controller,
+                        "mQueuedTracker"))
+                        + ", closeRequested=" + readField(
+                        transitionHandler, "mCloseTransitionRequested")
+                        + ", prepareOpen=" + shortObject(readField(
+                        transitionHandler, "mPrepareOpenTransition"))
+                        + ", prepareClose=" + shortObject(readField(
+                        transitionHandler, "mClosePrepareTransition")));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect completed Shell back-animation cleanup",
+                        throwable);
+            }
+        }
         notifyShellAnimationFinished(chain.getThisObject(),
                 chain.getExecutable().getName());
         return result;
@@ -3546,6 +4951,23 @@ public final class MiuiBackGestureHook extends XposedModule {
         return defaultValue;
     }
 
+    private boolean surfacesAreSame(SurfaceControl first, SurfaceControl second)
+            throws Exception {
+        if (first == second) {
+            return true;
+        }
+        if (first == null || second == null) {
+            return false;
+        }
+        Object same = invokeAnyMethod(
+                first, "isSameSurface", new Object[]{second});
+        if (!(same instanceof Boolean)) {
+            throw new IllegalStateException("isSameSurface returned "
+                    + shortObject(same));
+        }
+        return ((Boolean) same).booleanValue();
+    }
+
     private EdgeWidthSnapshot readEdgeWidthSnapshot(Object edgeBackGestureHandler,
                                                     float density) {
         int fallbackWidth = Math.max(1, Math.round(EDGE_TOUCH_WIDTH_DP * density));
@@ -3638,6 +5060,3603 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to force SystemUI callback progress", throwable);
+        }
+    }
+
+    private final class MiuiHomeReturnHomeController {
+        private final IBinder shellBackAnimation;
+        private final ClassLoader classLoader;
+        private final Handler handler = new Handler(Looper.getMainLooper());
+        private final IBinder.DeathRecipient shellDeathRecipient = () ->
+                handler.post(() -> {
+                    if (miuiHomeReturnHomeController ==
+                            MiuiHomeReturnHomeController.this) {
+                        detachMiuiHomeReturnHome("shellBinderDied", false);
+                    }
+                });
+        private final PathInterpolator backGestureInterpolator =
+                new PathInterpolator(0.1f, 0.1f, 0.0f, 1.0f);
+        private final boolean removeDepartTargetFromMotion;
+        private final ReturnHomeBackCallback backCallback = new ReturnHomeBackCallback();
+        private final ReturnHomeAnimationRunner animationRunner =
+                new ReturnHomeAnimationRunner();
+        private final AtomicReference<ReturnHomeCloseInterruptionToken>
+                pendingCloseInterruption = new AtomicReference<>();
+        private final AtomicReference<ReturnHomeDirectCancelToken>
+                pendingDirectCancel = new AtomicReference<>();
+        private volatile Context context;
+        private volatile boolean attached;
+        private volatile boolean deathLinked;
+        private volatile ReturnHomeSession currentSession;
+        private BackMotionEvent pendingStartEvent;
+        private BackMotionEvent pendingProgressEvent;
+        private int pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+
+        MiuiHomeReturnHomeController(IBinder shellBackAnimation,
+                                    ClassLoader classLoader, Context context) {
+            this.shellBackAnimation = shellBackAnimation;
+            this.classLoader = classLoader;
+            this.context = context;
+            this.removeDepartTargetFromMotion = readWindowFlag(
+                    "removeDepartTargetFromMotion", classLoader, false);
+        }
+
+        boolean attach() {
+            Parcel data = Parcel.obtain();
+            Parcel reply = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(SHELL_BACK_ANIMATION_DESCRIPTOR);
+                data.writeStrongBinder(backCallback);
+                data.writeStrongBinder(animationRunner);
+                if (!shellBackAnimation.transact(
+                        SHELL_BACK_SET_LAUNCHER_CALLBACK_TRANSACTION,
+                        data, reply, 0)) {
+                    log(Log.WARN, TAG, "Shell rejected setBackToLauncherCallback transact");
+                    return false;
+                }
+                reply.readException();
+                shellBackAnimation.linkToDeath(shellDeathRecipient, 0);
+                deathLinked = true;
+                attached = true;
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to register Shell return-to-home runner",
+                        throwable);
+                return false;
+            } finally {
+                reply.recycle();
+                data.recycle();
+            }
+        }
+
+        boolean isAttachedTo(IBinder binder) {
+            return attached && shellBackAnimation == binder;
+        }
+
+        void updateContext(Context newContext) {
+            if (newContext != null) {
+                context = newContext.getApplicationContext();
+            }
+        }
+
+        void detach(boolean clearShell, String reason) {
+            attached = false;
+            invalidatePendingCloseInterruption(null, "detach:" + reason);
+            invalidatePendingDirectCancel(null, "detach:" + reason, true);
+            if (deathLinked) {
+                deathLinked = false;
+                try {
+                    shellBackAnimation.unlinkToDeath(shellDeathRecipient, 0);
+                } catch (Throwable throwable) {
+                    log(Log.INFO, TAG, "Shell back-animation death link already gone"
+                            + ", reason=" + reason);
+                }
+            }
+            ReturnHomeSession session = currentSession;
+            if (session != null) {
+                finishSession(session, "detach:" + reason,
+                        shouldRestorePreview(session));
+            }
+            discardPendingStartEvent();
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            if (clearShell && shellBackAnimation.isBinderAlive()) {
+                Parcel data = Parcel.obtain();
+                Parcel reply = Parcel.obtain();
+                try {
+                    data.writeInterfaceToken(SHELL_BACK_ANIMATION_DESCRIPTOR);
+                    shellBackAnimation.transact(
+                            SHELL_BACK_CLEAR_LAUNCHER_CALLBACK_TRANSACTION,
+                            data, reply, 0);
+                    reply.readException();
+                    log(Log.INFO, TAG, "Cleared standard Shell return-to-home callback"
+                            + ", reason=" + reason);
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "Failed to clear Shell return-to-home callback"
+                            + ", reason=" + reason, throwable);
+                } finally {
+                    reply.recycle();
+                    data.recycle();
+                }
+            }
+        }
+
+        void onBackStarted(BackMotionEvent event) {
+            if (!attached || event == null) {
+                return;
+            }
+            // A callback start is the generation boundary even if the preceding runner never
+            // arrived. Do not let its last progress sample bleed into this gesture.
+            discardPendingStartEvent();
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                pendingStartEvent = event;
+                return;
+            }
+            startPreview(session, event);
+        }
+
+        void onBackProgressed(BackMotionEvent event) {
+            if (!attached || event == null) {
+                return;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                pendingProgressEvent = event;
+                return;
+            }
+            if (!session.previewInitialized) {
+                BackMotionEvent startEvent = pendingStartEvent;
+                if (startEvent != null) {
+                    pendingStartEvent = null;
+                    startPreview(session, startEvent);
+                }
+            }
+            dispatchPreviewProgress(session, event);
+        }
+
+        void onBackCancelled() {
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                pendingTerminalAction = RETURN_HOME_TERMINAL_CANCEL;
+                return;
+            }
+            discardPendingStartEvent();
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            animateCancel(session, "callbackCancelled");
+        }
+
+        void onBackInvoked() {
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                pendingTerminalAction = RETURN_HOME_TERMINAL_INVOKE;
+                log(Log.INFO, TAG, "Return-to-home invoke waiting for remote targets");
+                return;
+            }
+            discardPendingStartEvent();
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            startNativeClose(session);
+        }
+
+        void onRemoteAnimationStart(int transit, Object[] apps, Object[] wallpapers,
+                                    Object[] nonApps, IBinder finishedCallback) {
+            if (!attached) {
+                notifyRemoteAnimationFinished(finishedCallback, "detachedStart");
+                return;
+            }
+            ReturnHomeSession previous = currentSession;
+            if (previous != null) {
+                invalidatePendingDirectCancel(
+                        previous, "superseded", true);
+                finishSession(previous, "superseded",
+                        shouldRestorePreview(previous));
+            }
+            // Callback and runner are separate Binder objects. Consume the pending callback
+            // state exactly once for this runner arrival, including when its targets prove
+            // invalid, so a stale terminal action can never leak into the next animation.
+            BackMotionEvent startEvent = pendingStartEvent;
+            BackMotionEvent progressEvent = pendingProgressEvent;
+            int terminalAction = pendingTerminalAction;
+            pendingStartEvent = null;
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            ReturnHomeSession session = new ReturnHomeSession(
+                    miuiHomeReturnHomeGenerationIds.incrementAndGet(), transit,
+                    apps, wallpapers, nonApps, finishedCallback);
+            currentSession = session;
+            if (!session.resolveTargets()) {
+                log(Log.WARN, TAG, "Invalid return-to-home animation targets"
+                        + ", generation=" + session.generation
+                        + ", apps=" + (apps == null ? -1 : apps.length));
+                releaseBackMotionEventTarget(startEvent);
+                finishSession(session, "invalidTargets", false);
+                return;
+            }
+            if (startEvent != null) {
+                startPreview(session, startEvent);
+            }
+            if (progressEvent != null) {
+                if (terminalAction == RETURN_HOME_TERMINAL_NONE) {
+                    dispatchPreviewProgress(session, progressEvent);
+                } else {
+                    // A release can beat the runner because callback and runner use separate
+                    // Binder objects. There is no animation frame left in which the spring can
+                    // catch up, so establish the exact latest gesture geometry once before the
+                    // terminal path freezes/reset the animator.
+                    session.lastInputProgress = clamp01(progressEvent.getProgress());
+                    updatePreviewFrame(session, progressEvent.getProgress(),
+                            progressEvent.getTouchY(), false);
+                    log(Log.INFO, TAG,
+                            "Applied terminal return-home progress catch-up"
+                                    + ", generation=" + session.generation
+                                    + ", terminalAction=" + terminalAction
+                                    + ", progress=" + session.lastInputProgress);
+                }
+            } else if (terminalAction != RETURN_HOME_TERMINAL_NONE
+                    && startEvent != null && session.previewInitialized) {
+                session.lastInputProgress = clamp01(startEvent.getProgress());
+                updatePreviewFrame(session, startEvent.getProgress(),
+                        startEvent.getTouchY(), false);
+            }
+            if (terminalAction == RETURN_HOME_TERMINAL_CANCEL) {
+                animateCancel(session, "pendingCallbackCancelled");
+            } else if (terminalAction == RETURN_HOME_TERMINAL_INVOKE) {
+                startNativeClose(session);
+            }
+            log(Log.INFO, TAG, "MiuiHome return-to-home remote animation started"
+                    + ", generation=" + session.generation
+                    + ", transit=" + transit
+                    + ", apps=" + apps.length
+                    + ", closing=" + shortObject(session.closingTarget)
+                    + ", opening=" + shortObject(session.openingTarget));
+        }
+
+        void onRemoteAnimationCancelled() {
+            discardPendingStartEvent();
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            ReturnHomeSession session = currentSession;
+            if (session != null) {
+                animateCancel(session, "runnerCancelled");
+            }
+        }
+
+        private void startPreview(ReturnHomeSession session, BackMotionEvent event) {
+            if (session.finished.get() != 0 || currentSession != session) {
+                return;
+            }
+            session.initialTouchY = event.getTouchY();
+            session.swipeEdge = event.getSwipeEdge();
+            if (!session.previewInitialized) {
+                if (!resolvePreviewTarget(session, event)) {
+                    return;
+                }
+                Rect startBounds = resolveRemoteAnimationBounds(session.previewTarget);
+                if (startBounds == null || startBounds.isEmpty()) {
+                    log(Log.WARN, TAG, "Cannot resolve return-to-home preview bounds"
+                            + ", generation=" + session.generation
+                            + ", target=" + shortObject(session.previewTarget)
+                            + ", source=" + session.previewTargetSource);
+                    return;
+                }
+                session.startRect.set(startBounds);
+                session.currentRect.set(startBounds);
+                session.startCornerRadius = resolveMiuiWindowCornerRadius(
+                        session.previewTarget);
+                session.endCornerRadius =
+                        dp(RETURN_HOME_END_CORNER_RADIUS_DP);
+                session.currentCornerRadius = session.startCornerRadius;
+                Context currentContext = context;
+                session.previewProgressDistancePx = currentContext == null
+                        ? Math.max(1.0f, session.startRect.width())
+                        : Math.max(1.0f, currentContext.getResources()
+                        .getDisplayMetrics().widthPixels);
+                session.previewInitialized = true;
+                preparePreviewLeash(session);
+                prepareNativePreviewBackdrop(session);
+                prepareNativePreviewBlur(session);
+                applyPreviewTransform(session, session.currentRect,
+                        session.startCornerRadius, false);
+                log(Log.INFO, TAG, "Initialized return-to-home preview"
+                        + ", generation=" + session.generation
+                        + ", startRect=" + session.startRect
+                        + ", startRadius=" + session.startCornerRadius
+                        + ", leashShown=" + session.previewLeashPrepared
+                        + ", targetSource=" + session.previewTargetSource
+                        + ", previewTarget=" + shortObject(session.previewTarget)
+                        + ", previewLeash=" + String.valueOf(session.previewLeash)
+                        + ", runnerClosingLeash="
+                        + String.valueOf(session.closingLeash)
+                        + ", sameSurfaceAsRunner="
+                        + describeSameSurface(session.previewLeash,
+                                session.closingLeash));
+            }
+            startPreviewProgressAnimator(session, event);
+        }
+
+        private boolean resolvePreviewTarget(ReturnHomeSession session,
+                                             BackMotionEvent event) {
+            Object target = session.closingTarget;
+            String source = "runnerClosing";
+            if (!removeDepartTargetFromMotion) {
+                try {
+                    target = event.getDepartingAnimationTarget();
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "Failed to read departing predictive-back target"
+                            + ", generation=" + session.generation, throwable);
+                    return false;
+                }
+                source = "backMotionEvent";
+                if (target == null) {
+                    log(Log.WARN, TAG, "Missing departing predictive-back target"
+                            + ", generation=" + session.generation
+                            + ", removeDepartTargetFromMotion=false");
+                    return false;
+                }
+                int mode = readIntFieldOrDefault(target, "mode", -1);
+                if (mode != 1) {
+                    log(Log.WARN, TAG, "Rejected non-closing departing back target"
+                            + ", generation=" + session.generation
+                            + ", mode=" + mode
+                            + ", target=" + shortObject(target));
+                    releaseBackMotionEventTarget(event);
+                    return false;
+                }
+            }
+            try {
+                Object leash = readField(target, "leash");
+                if (!(leash instanceof SurfaceControl)
+                        || !((SurfaceControl) leash).isValid()) {
+                    log(Log.WARN, TAG, "Invalid return-to-home preview leash"
+                            + ", generation=" + session.generation
+                            + ", source=" + source
+                            + ", target=" + shortObject(target)
+                            + ", leash=" + shortObject(leash));
+                    if (!removeDepartTargetFromMotion) {
+                        releaseBackMotionEventTarget(event);
+                    }
+                    return false;
+                }
+                session.previewTarget = target;
+                session.previewLeash = (SurfaceControl) leash;
+                session.previewTargetSource = source;
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to resolve return-to-home preview target"
+                        + ", generation=" + session.generation
+                        + ", source=" + source
+                        + ", target=" + shortObject(target), throwable);
+                if (!removeDepartTargetFromMotion) {
+                    releaseBackMotionEventTarget(event);
+                }
+                return false;
+            }
+        }
+
+        private String describeSameSurface(SurfaceControl first,
+                                           SurfaceControl second) {
+            if (first == null || second == null) {
+                return "unavailable";
+            }
+            if (first == second) {
+                return "sameObject";
+            }
+            try {
+                Object result = invokeAnyMethod(first, "isSameSurface",
+                        new Object[]{second});
+                return result instanceof Boolean
+                        ? result.toString() : "unknown";
+            } catch (Throwable ignored) {
+                return "unknown";
+            }
+        }
+
+        private void discardPendingStartEvent() {
+            BackMotionEvent event = pendingStartEvent;
+            pendingStartEvent = null;
+            releaseBackMotionEventTarget(event);
+        }
+
+        private void releaseBackMotionEventTarget(BackMotionEvent event) {
+            if (event == null) {
+                return;
+            }
+            try {
+                Object target = event.getDepartingAnimationTarget();
+                if (target == null) {
+                    return;
+                }
+                Object leash = readField(target, "leash");
+                if (leash instanceof SurfaceControl) {
+                    ((SurfaceControl) leash).release();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private void startPreviewProgressAnimator(
+                ReturnHomeSession session, BackMotionEvent event) {
+            if (event == null || session.progressFrozen
+                    || session.finished.get() != 0 || currentSession != session
+                    || !session.previewInitialized || session.nativeHandoffStarted) {
+                return;
+            }
+            session.lastInputProgress = clamp01(event.getProgress());
+            if (session.progressAnimatorStarted) {
+                dispatchPreviewProgress(session, event);
+                return;
+            }
+            if (session.progressAnimator == null || session.progressAnimatorFailed) {
+                session.progressAnimatorFailed = true;
+                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                return;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                session.progressAnimatorFailed = true;
+                log(Log.WARN, TAG,
+                        "Refused return-home BackProgressAnimator outside main Looper"
+                                + ", generation=" + session.generation);
+                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                return;
+            }
+            session.progressAnimatorStarted = true;
+            session.progressInitialCallbackDelivered = false;
+            try {
+                session.progressAnimator.onBackStarted(event, smoothedEvent -> {
+                    if (session.progressFrozen || session.progressAnimatorFailed
+                            || session.finished.get() != 0
+                            || currentSession != session || !session.previewInitialized
+                            || session.nativeHandoffStarted) {
+                        return;
+                    }
+                    boolean animationFrame = session.progressInitialCallbackDelivered;
+                    session.progressInitialCallbackDelivered = true;
+                    updatePreviewFrame(session, smoothedEvent.getProgress(),
+                            smoothedEvent.getTouchY(), animationFrame);
+                });
+                log(Log.INFO, TAG,
+                        "Started AOSP return-home progress smoothing"
+                                + ", generation=" + session.generation
+                                + ", inputProgress=" + session.lastInputProgress);
+            } catch (Throwable throwable) {
+                session.progressAnimatorFailed = true;
+                try {
+                    session.progressAnimator.reset();
+                } catch (Throwable ignored) {
+                }
+                log(Log.WARN, TAG,
+                        "Failed to start AOSP return-home progress smoothing"
+                                + ", generation=" + session.generation,
+                        throwable);
+                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+            }
+        }
+
+        private void dispatchPreviewProgress(
+                ReturnHomeSession session, BackMotionEvent event) {
+            if (event == null || session.progressFrozen
+                    || session.finished.get() != 0 || currentSession != session
+                    || !session.previewInitialized || session.nativeHandoffStarted) {
+                return;
+            }
+            session.lastInputProgress = clamp01(event.getProgress());
+            if (session.progressAnimator == null || session.progressAnimatorFailed
+                    || !session.progressAnimatorStarted) {
+                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                return;
+            }
+            try {
+                session.progressAnimator.onBackProgressed(event);
+            } catch (Throwable throwable) {
+                session.progressAnimatorFailed = true;
+                try {
+                    session.progressAnimator.reset();
+                } catch (Throwable ignored) {
+                }
+                log(Log.WARN, TAG,
+                        "Failed to update AOSP return-home progress smoothing"
+                                + ", generation=" + session.generation,
+                        throwable);
+                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+            }
+        }
+
+        private void updatePreviewFrame(ReturnHomeSession session,
+                                        float smoothedProgress, float touchY,
+                                        boolean animationFrame) {
+            if (session.finished.get() != 0 || currentSession != session
+                    || !session.previewInitialized || session.nativeHandoffStarted
+                    || session.progressFrozen) {
+                return;
+            }
+            float rawProgress = clamp01(smoothedProgress);
+            session.lastSmoothedProgress = rawProgress;
+            float progress = backGestureInterpolator.getInterpolation(rawProgress);
+            session.progress = progress;
+            float startWidth = session.startRect.width();
+            float startHeight = session.startRect.height();
+            float width = startWidth * (1.0f
+                    - ((1.0f - RETURN_HOME_MIN_WINDOW_SCALE) * progress));
+            float height = startWidth <= 0.0f
+                    ? startHeight : startHeight * (width / startWidth);
+            float rawYDelta = touchY - session.initialTouchY;
+            float halfHeight = Math.max(1.0f, startHeight / 2.0f);
+            float yRatio = Math.min(1.0f, Math.abs(rawYDelta) / halfHeight);
+            float interpolatedY = 1.0f - ((1.0f - yRatio) * (1.0f - yRatio));
+            float maxYShift = Math.max(0.0f,
+                    ((startHeight - height) / 2.0f)
+                            - dp(RETURN_HOME_WINDOW_MARGIN_DP));
+            float yShift = Math.signum(rawYDelta) * interpolatedY * maxYShift;
+            float top = session.startRect.top
+                    + ((startHeight - height) / 2.0f) + yShift;
+            float margin = dp(RETURN_HOME_WINDOW_MARGIN_DP) * progress;
+            float left = session.swipeEdge == EDGE_RIGHT
+                    ? session.startRect.left + margin
+                    : session.startRect.right - margin - width;
+            session.currentRect.set(left, top, left + width, top + height);
+            session.currentCornerRadius = lerp(session.startCornerRadius,
+                    session.endCornerRadius, progress);
+            updateNativePreviewBlur(session, rawProgress);
+            applyPreviewTransform(session, session.currentRect,
+                    session.currentCornerRadius, animationFrame);
+            if (session.lastLoggedPreviewProgress < 0.0f
+                    || rawProgress >= session.lastLoggedPreviewProgress + 0.2f
+                    || rawProgress < session.lastLoggedPreviewProgress - 0.2f) {
+                session.lastLoggedPreviewProgress = rawProgress;
+                log(Log.INFO, TAG, "Applied return-to-home preview progress"
+                        + ", generation=" + session.generation
+                        + ", inputProgress=" + session.lastInputProgress
+                        + ", smoothedProgress=" + rawProgress
+                        + ", interpolatedProgress=" + progress
+                        + ", rect=" + session.currentRect
+                        + ", radius=" + session.currentCornerRadius
+                        + ", targetSource=" + session.previewTargetSource
+                        + ", leashValid="
+                        + (session.previewLeash != null
+                        && session.previewLeash.isValid()));
+            }
+        }
+
+        private void freezePreviewProgress(ReturnHomeSession session, String reason) {
+            if (session == null) {
+                return;
+            }
+            session.progressFrozen = true;
+            Runnable reset = () -> {
+                if (!session.progressReset.compareAndSet(0, 1)
+                        || session.progressAnimator == null
+                        || !session.progressAnimatorStarted) {
+                    return;
+                }
+                try {
+                    // Freeze first: BackProgressAnimator.reset() can synchronously emit zero.
+                    // The identity/frozen guard above updatePreviewFrame keeps that reset frame
+                    // from overwriting the handoff or the verified cancel start rectangle.
+                    session.progressAnimator.reset();
+                    log(Log.INFO, TAG,
+                            "Stopped AOSP return-home progress smoothing"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason
+                                    + ", inputProgress=" + session.lastInputProgress
+                                    + ", smoothedProgress="
+                                    + session.lastSmoothedProgress);
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Failed to stop AOSP return-home progress smoothing"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason,
+                            throwable);
+                }
+            };
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                reset.run();
+            } else {
+                handler.post(reset);
+            }
+        }
+
+        private void animateCancel(ReturnHomeSession session, String reason) {
+            if (session.finished.get() != 0 || currentSession != session) {
+                return;
+            }
+            freezePreviewProgress(session, "cancel:" + reason);
+            if (!session.previewInitialized) {
+                finishSession(session, reason, false);
+                return;
+            }
+            if (session.nativeHandoffStarted) {
+                finishSession(session, reason, shouldRestorePreview(session));
+                return;
+            }
+            if (session.cancelAnimator != null && session.cancelAnimator.isRunning()) {
+                return;
+            }
+            RectF from = new RectF(session.currentRect);
+            float fromRadius = session.currentCornerRadius;
+            int fromBlur = session.previewBlurPublishedRadius;
+            float fromDimming = session.previewBlurPublishedDimming;
+            ValueAnimator animator = ValueAnimator.ofFloat(0.0f, 1.0f);
+            session.cancelAnimator = animator;
+            Runnable finishGuard = () -> {
+                if (currentSession == session && session.finished.get() == 0) {
+                    log(Log.WARN, TAG,
+                            "Forced delayed return-to-home cancel completion"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason);
+                    finishSession(session, reason + "Guard", true);
+                }
+            };
+            session.cancelFinishGuard = finishGuard;
+            handler.postDelayed(finishGuard, RETURN_HOME_CANCEL_FINISH_GUARD_MS);
+            animator.setDuration(RETURN_HOME_CANCEL_DURATION_MS);
+            animator.setInterpolator(new DecelerateInterpolator());
+            animator.addUpdateListener(valueAnimator -> {
+                if (session.finished.get() != 0 || currentSession != session) {
+                    return;
+                }
+                float value = ((Float) valueAnimator.getAnimatedValue()).floatValue();
+                session.currentRect.set(
+                        lerp(from.left, session.startRect.left, value),
+                        lerp(from.top, session.startRect.top, value),
+                        lerp(from.right, session.startRect.right, value),
+                        lerp(from.bottom, session.startRect.bottom, value));
+                session.currentCornerRadius = lerp(fromRadius,
+                        session.startCornerRadius, value);
+                applyPreviewTransform(session, session.currentRect,
+                        session.currentCornerRadius, false);
+                if (session.previewBlurOwned) {
+                    publishNativePreviewBlur(session,
+                            Math.round(lerp(fromBlur,
+                                    session.previewBlurInitialRadius, value)),
+                            lerp(fromDimming,
+                                    session.previewBlurInitialDimming, value),
+                            "cancel");
+                }
+            });
+            animator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    finishSession(session, reason, true);
+                }
+            });
+            log(Log.INFO, TAG, "Started return-to-home cancel recovery"
+                    + ", generation=" + session.generation
+                    + ", reason=" + reason
+                    + ", from=" + from);
+            animator.start();
+        }
+
+        private void preparePreviewLeash(ReturnHomeSession session) {
+            if (session.previewLeashPrepared) {
+                return;
+            }
+            try {
+                // Stock Launcher3 explicitly shows the prepared departing target before
+                // applying progress transforms. Without this, the matrices update a hidden
+                // predict_back leash while the untransformed app remains on screen.
+                invokeAnyMethod(session.transaction, "show",
+                        new Object[]{session.previewLeash});
+                invokeAnyMethod(session.transaction, "setAnimationTransaction",
+                        new Object[0]);
+                session.previewLeashPrepared = true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to prepare return-to-home preview leash"
+                        + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        private void prepareNativePreviewBackdrop(ReturnHomeSession session) {
+            if (session.finished.get() != 0 || currentSession != session
+                    || session.nativeHandoffStarted
+                    || !isStandardSingleTaskReturnHome(session)) {
+                return;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.WARN, TAG,
+                        "Refused Xiaomi preview backdrop outside MiuiHome main Looper"
+                                + ", generation=" + session.generation);
+                return;
+            }
+            try {
+                Class<?> stateManagerClass = Class.forName(
+                        MIUI_HOME_STATE_MANAGER, false, classLoader);
+                Object companion = readStaticField(stateManagerClass, "Companion");
+                Object stateManager = invokeAnyMethod(companion,
+                        "getInstance", new Object[0]);
+                if (Boolean.TRUE.equals(invokeAnyMethod(stateManager,
+                        "isWindowElementRunning", new Object[0]))) {
+                    log(Log.INFO, TAG,
+                            "Preserved running Xiaomi animation instead of preparing backdrop"
+                                    + ", generation=" + session.generation);
+                    return;
+                }
+                session.previewBackdropStateManager = stateManager;
+                prepareNativePreviewShortcutLayer(session);
+                prepareNativePreviewWallpaper(session);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to resolve Xiaomi predictive backdrop owner"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        private void prepareNativePreviewShortcutLayer(ReturnHomeSession session) {
+            try {
+                Class<?> deviceLevelClass = Class.forName(
+                        MIUI_HOME_DEVICE_LEVEL_UTILS, false, classLoader);
+                Method simpleAnimMethod = deviceLevelClass.getDeclaredMethod(
+                        "isUseSimpleAnim");
+                simpleAnimMethod.setAccessible(true);
+                if (Boolean.TRUE.equals(simpleAnimMethod.invoke(null))) {
+                    return;
+                }
+                Class<?> elementClass = Class.forName(
+                        MIUI_HOME_SHORTCUT_MENU_LAYER_ELEMENT,
+                        false, classLoader);
+                Object elementCompanion = readStaticField(elementClass,
+                        "Companion");
+                Object element = invokeAnyMethod(elementCompanion,
+                        "getInstance", new Object[0]);
+                Object layerObject = invokeAnyMethod(element,
+                        "getLayer", new Object[0]);
+                if (!(layerObject instanceof View)) {
+                    throw new IllegalStateException(
+                            "Xiaomi ShortcutMenuLayer is not a View");
+                }
+                View layer = (View) layerObject;
+                Object spring = readField(element, "mSpringAnimation");
+                boolean springRunning = spring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(spring, "isRunning", new Object[0]));
+                Class<?> paramsClass = Class.forName(
+                        MIUI_HOME_SHORTCUT_MENU_LAYER_PARAMS,
+                        false, classLoader);
+                Object paramsCompanion = readStaticField(paramsClass,
+                        "Companion");
+                Object appParams = invokeAnyMethod(paramsCompanion,
+                        "getAppStateParams", new Object[]{Boolean.FALSE});
+                Object homeParams = invokeAnyMethod(paramsCompanion,
+                        "getHomeStateParams", new Object[]{Boolean.FALSE});
+                float homeAlpha = ((Number) invokeAnyMethod(homeParams,
+                        "getAlpha", new Object[0])).floatValue();
+                float homeScaleX = ((Number) invokeAnyMethod(homeParams,
+                        "getScaleX", new Object[0])).floatValue();
+                float homeScaleY = ((Number) invokeAnyMethod(homeParams,
+                        "getScaleY", new Object[0])).floatValue();
+                float appAlpha = ((Number) invokeAnyMethod(appParams,
+                        "getAlpha", new Object[0])).floatValue();
+                float appScaleX = ((Number) invokeAnyMethod(appParams,
+                        "getScaleX", new Object[0])).floatValue();
+                float appScaleY = ((Number) invokeAnyMethod(appParams,
+                        "getScaleY", new Object[0])).floatValue();
+                if (springRunning
+                        || Float.compare(layer.getAlpha(), homeAlpha) != 0
+                        || Float.compare(layer.getScaleX(), homeScaleX) != 0
+                        || Float.compare(layer.getScaleY(), homeScaleY) != 0
+                        || appScaleX >= homeScaleX
+                        || appScaleY >= homeScaleY) {
+                    log(Log.INFO, TAG,
+                            "Preserved active Xiaomi launcher layer during predictive preview"
+                                    + ", generation=" + session.generation
+                                    + ", current=" + layer.getAlpha() + "/"
+                                    + layer.getScaleX() + "/" + layer.getScaleY()
+                                    + ", home=" + homeAlpha + "/"
+                                    + homeScaleX + "/" + homeScaleY
+                                    + ", app=" + appAlpha + "/"
+                                    + appScaleX + "/" + appScaleY
+                                    + ", springRunning=" + springRunning);
+                    return;
+                }
+                session.previewShortcutElement = element;
+                session.previewShortcutView = layer;
+                session.previewShortcutAppParams = appParams;
+                session.previewShortcutHomeParams = homeParams;
+                session.previewShortcutOwnedParams = appParams;
+                session.previewShortcutAppAlpha = appAlpha;
+                session.previewShortcutAppScaleX = appScaleX;
+                session.previewShortcutAppScaleY = appScaleY;
+                session.previewShortcutOwned = true;
+                invokeAnyMethod(element, "setTo", new Object[]{appParams});
+                Object appliedParams = readField(element, "params");
+                if (readField(element, "shortcutMenuLayer") != layer
+                        || appliedParams != appParams
+                        || Float.compare(layer.getAlpha(), appAlpha) != 0
+                        || Float.compare(layer.getScaleX(), appScaleX) != 0
+                        || Float.compare(layer.getScaleY(), appScaleY) != 0) {
+                    throw new IllegalStateException(
+                            "Xiaomi launcher backdrop did not reach App state");
+                }
+                log(Log.INFO, TAG,
+                        "Prepared Xiaomi predictive launcher backdrop"
+                                + ", generation=" + session.generation
+                                + ", home=" + homeAlpha + "/"
+                                + homeScaleX + "/" + homeScaleY
+                                + ", app=" + appAlpha + "/"
+                                + appScaleX + "/" + appScaleY
+                                + ", element=" + shortObject(element)
+                                + ", view=" + shortObject(layer));
+            } catch (Throwable throwable) {
+                recoverNativePreviewShortcutLayer(session,
+                        "prepareFailure", throwable);
+            }
+        }
+
+        private void prepareNativePreviewWallpaper(ReturnHomeSession session) {
+            try {
+                Class<?> elementClass = Class.forName(
+                        MIUI_HOME_BASE_WALLPAPER_ELEMENT, false, classLoader);
+                Object elementCompanion = readStaticField(elementClass,
+                        "Companion");
+                Object element = invokeAnyMethod(elementCompanion,
+                        "getInstance", new Object[0]);
+                if (element == null || !MIUI_HOME_SYSTEM_WALLPAPER_ELEMENT.equals(
+                        element.getClass().getName())) {
+                    log(Log.INFO, TAG,
+                            "Preserved unsupported Xiaomi wallpaper backend"
+                                    + ", generation=" + session.generation
+                                    + ", element=" + shortObject(element));
+                    return;
+                }
+                Object workspace = invokeAnyMethod(element,
+                        "getMWorkspace", new Object[0]);
+                if (!(workspace instanceof View)
+                        || ((View) workspace).getWindowToken() == null) {
+                    throw new IllegalStateException(
+                            "Xiaomi wallpaper workspace is not attached");
+                }
+                Class<?> paramsClass = Class.forName(
+                        MIUI_HOME_WALLPAPER_PARAMS, false, classLoader);
+                Object paramsCompanion = readStaticField(paramsClass,
+                        "Companion");
+                Object appParams = invokeAnyMethod(paramsCompanion,
+                        "getAppStateParams", new Object[0]);
+                Object homeParams = invokeAnyMethod(paramsCompanion,
+                        "getHomeStateParams", new Object[0]);
+                float appZoom = ((Number) invokeAnyMethod(appParams,
+                        "getZoomOut", new Object[0])).floatValue();
+                float homeZoom = ((Number) invokeAnyMethod(homeParams,
+                        "getZoomOut", new Object[0])).floatValue();
+                if (appZoom <= homeZoom) {
+                    throw new IllegalStateException(
+                            "unexpected Xiaomi wallpaper App/Home scale"
+                                    + ", app=" + appZoom
+                                    + ", home=" + homeZoom);
+                }
+                session.previewWallpaperElement = element;
+                session.previewWallpaperWorkspace = workspace;
+                session.previewWallpaperAppParams = appParams;
+                session.previewWallpaperHomeParams = homeParams;
+                session.previewWallpaperAppZoom = appZoom;
+                session.previewWallpaperHomeZoom = homeZoom;
+                session.previewWallpaperOwned = true;
+                invokePreviewWallpaperSetTo(session, appParams);
+                log(Log.INFO, TAG,
+                        "Prepared Xiaomi predictive wallpaper backdrop"
+                                + ", generation=" + session.generation
+                                + ", home=" + homeZoom
+                                + ", app=" + appZoom
+                                + ", element=" + shortObject(element)
+                                + ", workspace=" + shortObject(workspace));
+            } catch (Throwable throwable) {
+                recoverNativePreviewWallpaper(session,
+                        "prepareFailure", throwable);
+            }
+        }
+
+        private void prepareNativePreviewBlur(ReturnHomeSession session) {
+            if (session.previewBlurOwned || session.nativeHandoffStarted
+                    || session.finished.get() != 0 || currentSession != session
+                    || !session.previewInitialized || session.progressFrozen) {
+                return;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.WARN, TAG,
+                        "Refused Xiaomi preview blur outside MiuiHome main Looper"
+                                + ", generation=" + session.generation);
+                return;
+            }
+            try {
+                Class<?> stateManagerClass = Class.forName(
+                        MIUI_HOME_STATE_MANAGER, false, classLoader);
+                Object stateManagerCompanion = readStaticField(
+                        stateManagerClass, "Companion");
+                Object stateManager = invokeAnyMethod(stateManagerCompanion,
+                        "getInstance", new Object[0]);
+                if (Boolean.TRUE.equals(invokeAnyMethod(stateManager,
+                        "isWindowElementRunning", new Object[0]))) {
+                    log(Log.INFO, TAG,
+                            "Preserved running Xiaomi animation instead of preparing blur"
+                                    + ", generation=" + session.generation);
+                    return;
+                }
+                Class<?> blurElementClass = Class.forName(
+                        "com.miui.home.recents.anim.RecentBlurViewElement",
+                        false, classLoader);
+                Object blurElementCompanion = readStaticField(
+                        blurElementClass, "Companion");
+                Object blurElement = invokeAnyMethod(blurElementCompanion,
+                        "getInstance", new Object[0]);
+                Object blurView = readField(blurElement, "blurView");
+                Object blurSpring = readField(blurElement, "mSpringAnimation");
+                Object currentParams = readField(blurElement, "params");
+                if (blurView == null || blurSpring == null) {
+                    throw new IllegalStateException("Xiaomi preview blur is not bound"
+                            + ", element=" + shortObject(blurElement)
+                            + ", view=" + shortObject(blurView));
+                }
+                boolean springRunning = Boolean.TRUE.equals(invokeAnyMethod(
+                        blurSpring, "isRunning", new Object[0]));
+                int currentBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float currentDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+
+                Class<?> blurParamsClass = Class.forName(
+                        MIUI_HOME_RECENT_BLUR_PARAMS, false, classLoader);
+                Object blurParamsCompanion = readStaticField(
+                        blurParamsClass, "Companion");
+                Object appParams = invokeAnyMethod(blurParamsCompanion,
+                        "getAppStateParams", new Object[0]);
+                Object homeParams = invokeAnyMethod(blurParamsCompanion,
+                        "getHomeStateParams", new Object[0]);
+                int homeBlur = Math.round(((Number) invokeAnyMethod(homeParams,
+                        "getBlurRadius", new Object[0])).floatValue());
+                float homeDimming = ((Number) invokeAnyMethod(homeParams,
+                        "getDimming", new Object[0])).floatValue();
+                float homeDamping = ((Number) invokeAnyMethod(homeParams,
+                        "getDampingRatio", new Object[0])).floatValue();
+                float homeResponse = ((Number) invokeAnyMethod(homeParams,
+                        "getResponse", new Object[0])).floatValue();
+                int appBlur = Math.round(((Number) invokeAnyMethod(appParams,
+                        "getBlurRadius", new Object[0])).floatValue());
+                float appDimming = ((Number) invokeAnyMethod(appParams,
+                        "getDimming", new Object[0])).floatValue();
+                float currentTargetBlur = currentParams == null ? Float.NaN
+                        : ((Number) invokeAnyMethod(currentParams,
+                        "getBlurRadius", new Object[0])).floatValue();
+                float currentTargetDimming = currentParams == null ? Float.NaN
+                        : ((Number) invokeAnyMethod(currentParams,
+                        "getDimming", new Object[0])).floatValue();
+                float currentTargetDamping = currentParams == null ? Float.NaN
+                        : ((Number) invokeAnyMethod(currentParams,
+                        "getDampingRatio", new Object[0])).floatValue();
+                float currentTargetResponse = currentParams == null ? Float.NaN
+                        : ((Number) invokeAnyMethod(currentParams,
+                        "getResponse", new Object[0])).floatValue();
+                boolean returningHomeSpring = springRunning
+                        && currentParams != null
+                        && Math.round(currentTargetBlur) == homeBlur
+                        && Float.compare(currentTargetDimming, homeDimming) == 0
+                        && Float.compare(currentTargetDamping, homeDamping) == 0
+                        && Float.compare(currentTargetResponse, homeResponse) == 0
+                        && currentBlur >= Math.min(homeBlur, appBlur)
+                        && currentBlur <= Math.max(homeBlur, appBlur)
+                        && currentDimming >= Math.min(homeDimming, appDimming)
+                        && currentDimming <= Math.max(homeDimming, appDimming);
+                if ((springRunning && !returningHomeSpring)
+                        || (!springRunning && (currentBlur != homeBlur
+                        || Float.compare(currentDimming, homeDimming) != 0))
+                        || appBlur <= homeBlur) {
+                    log(Log.INFO, TAG,
+                            "Preserved active Xiaomi blur instead of taking preview ownership"
+                                    + ", generation=" + session.generation
+                                    + ", current=" + currentBlur + "/" + currentDimming
+                                    + ", home=" + homeBlur + "/" + homeDimming
+                                    + ", target=" + appBlur + "/" + appDimming
+                                    + ", springRunning=" + springRunning
+                                    + ", springTarget=" + currentTargetBlur
+                                    + "/" + currentTargetDimming
+                                    + "/" + currentTargetDamping
+                                    + "/" + currentTargetResponse
+                                    + ", returningHomeSpring="
+                                    + returningHomeSpring);
+                    return;
+                }
+
+                Object ownedParams = homeParams;
+                if (returningHomeSpring) {
+                    // A task launched from Recents leaves its launcher blur spring running
+                    // toward Home after the task is already interactive. Preserving that
+                    // spring lets it erase the first predictive preview. Stop only an exact
+                    // Home-directed spring, keep its current visible value, and continue the
+                    // gesture from there. Other native blur directions remain untouched.
+                    invokeAnyMethod(blurSpring, "cancel", new Object[0]);
+                    boolean stillRunning = Boolean.TRUE.equals(invokeAnyMethod(
+                            blurSpring, "isRunning", new Object[0]));
+                    int stoppedBlur = ((Number) invokeAnyMethod(blurView,
+                            "getCurrentBlur", new Object[0])).intValue();
+                    float stoppedDimming = ((Number) invokeAnyMethod(blurView,
+                            "getCurrentDimming", new Object[0])).floatValue();
+                    Object stoppedParams = readField(blurElement, "params");
+                    Object stoppedView = readField(blurElement, "blurView");
+                    Object stoppedSpring = readField(
+                            blurElement, "mSpringAnimation");
+                    boolean windowElementStarted = Boolean.TRUE.equals(
+                            invokeAnyMethod(stateManager,
+                                    "isWindowElementRunning", new Object[0]));
+                    if (stillRunning || stoppedParams != currentParams
+                            || stoppedView != blurView
+                            || stoppedSpring != blurSpring
+                            || windowElementStarted
+                            || stoppedBlur != currentBlur
+                            || Float.compare(stoppedDimming, currentDimming) != 0) {
+                        if (!stillRunning && stoppedParams == currentParams
+                                && stoppedView == blurView
+                                && stoppedSpring == blurSpring
+                                && !windowElementStarted) {
+                            // Cancellation was the only mutation and ownership cannot be
+                            // published safely. Resume the exact observed native Home target
+                            // before failing closed.
+                            invokeAnyMethod(blurElement, "animTo",
+                                    new Object[]{currentParams});
+                        }
+                        throw new IllegalStateException(
+                                "Xiaomi Home blur spring did not stop cleanly"
+                                        + ", running=" + stillRunning
+                                        + ", paramsMatch="
+                                        + (stoppedParams == currentParams)
+                                        + ", viewMatch="
+                                        + (stoppedView == blurView)
+                                        + ", springMatch="
+                                        + (stoppedSpring == blurSpring)
+                                        + ", windowElementStarted="
+                                        + windowElementStarted
+                                        + ", value=" + stoppedBlur + "/"
+                                        + stoppedDimming
+                                        + ", expected=" + currentBlur + "/"
+                                        + currentDimming);
+                    }
+                    currentBlur = stoppedBlur;
+                    currentDimming = stoppedDimming;
+                    ownedParams = currentParams;
+                    session.previewBlurInterruptedHomeSpring = true;
+                }
+
+                session.previewBlurElement = blurElement;
+                session.previewBlurView = blurView;
+                session.previewBlurAppParams = appParams;
+                session.previewBlurHomeParams = returningHomeSpring
+                        ? currentParams : homeParams;
+                session.previewBlurOwnedParams = ownedParams;
+                session.previewBlurInitialRadius = currentBlur;
+                session.previewBlurInitialDimming = currentDimming;
+                session.previewBlurTargetRadius = appBlur;
+                session.previewBlurTargetDimming = appDimming;
+                session.previewBlurPublishedRadius = currentBlur;
+                session.previewBlurPublishedDimming = currentDimming;
+                session.previewBlurOwned = true;
+                // Establish a generation-owned params identity without changing the visible
+                // Home values. Gesture progress below writes only the two BlurView values;
+                // setTo() is never used on the hot path because it cancels Xiaomi's spring.
+                if (!returningHomeSpring) {
+                    invokeAnyMethod(blurElement, "setTo", new Object[]{homeParams});
+                }
+                int appliedBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float appliedDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+                Object appliedParams = readField(blurElement, "params");
+                if (appliedParams != ownedParams
+                        || appliedBlur != currentBlur
+                        || Float.compare(appliedDimming, currentDimming) != 0) {
+                    throw new IllegalStateException(
+                            "Xiaomi preview blur ownership did not preserve Home state"
+                                    + ", applied=" + appliedBlur + "/" + appliedDimming
+                                    + ", expected=" + currentBlur + "/"
+                                    + currentDimming
+                                    + ", paramsMatch="
+                                    + (appliedParams == ownedParams));
+                }
+                log(Log.INFO, TAG,
+                        "Prepared progressive Xiaomi predictive return-home blur"
+                        + ", generation=" + session.generation
+                        + ", initial=" + currentBlur + "/" + currentDimming
+                        + ", commit=" + appBlur + "/" + appDimming
+                        + ", interruptedHomeSpring="
+                        + session.previewBlurInterruptedHomeSpring
+                        + ", element=" + shortObject(blurElement)
+                        + ", view=" + shortObject(blurView));
+            } catch (Throwable throwable) {
+                recoverNativePreviewBlurWriteFailure(session,
+                        "prepareFailure", throwable);
+            }
+        }
+
+        private void updateNativePreviewBlur(ReturnHomeSession session,
+                                             float smoothedProgress) {
+            if (!session.previewBlurOwned || session.nativeHandoffStarted
+                    || session.finished.get() != 0 || currentSession != session) {
+                return;
+            }
+            float displayWidth = Math.max(1.0f,
+                    session.previewProgressDistancePx);
+            float triggerProgress = clamp01(dp(TRIGGER_THRESHOLD_DP) / displayWidth);
+            float normalized = triggerProgress <= 0.0f
+                    ? 1.0f : clamp01(smoothedProgress / triggerProgress);
+            float blurFraction = normalized * normalized
+                    * (3.0f - (2.0f * normalized));
+            int radius = Math.round(lerp(session.previewBlurInitialRadius,
+                    session.previewBlurTargetRadius, blurFraction));
+            float dimming = lerp(session.previewBlurInitialDimming,
+                    session.previewBlurTargetDimming, blurFraction);
+            publishNativePreviewBlur(session, radius, dimming, "gesture");
+            if (session.previewBlurOwned) {
+                int stage = normalized >= 1.0f ? 2
+                        : (normalized >= 0.5f ? 1 : 0);
+                if (stage > session.previewBlurDiagnosticStage) {
+                    session.previewBlurDiagnosticStage = stage;
+                    log(Log.INFO, TAG,
+                            "Applied progressive Xiaomi predictive blur"
+                                    + ", generation=" + session.generation
+                                    + ", stage=" + stage
+                                    + ", inputProgress=" + session.lastInputProgress
+                                    + ", smoothedProgress=" + smoothedProgress
+                                    + ", triggerProgress=" + triggerProgress
+                                    + ", fraction=" + blurFraction
+                                    + ", value="
+                                    + session.previewBlurPublishedRadius + "/"
+                                    + session.previewBlurPublishedDimming);
+                }
+            }
+        }
+
+        private void publishNativePreviewBlur(ReturnHomeSession session,
+                                              int radius, float dimming,
+                                              String reason) {
+            if (!session.previewBlurOwned || session.finished.get() != 0
+                    || currentSession != session) {
+                return;
+            }
+            try {
+                Object blurElement = session.previewBlurElement;
+                Object blurView = session.previewBlurView;
+                Object ownedParams = session.previewBlurOwnedParams;
+                if (blurElement == null || blurView == null
+                        || ownedParams == null) {
+                    throw new IllegalStateException(
+                            "incomplete progressive blur snapshot");
+                }
+                Object currentView = readField(blurElement, "blurView");
+                Object currentParams = readField(blurElement, "params");
+                Object blurSpring = readField(blurElement, "mSpringAnimation");
+                boolean springRunning = blurSpring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(blurSpring, "isRunning", new Object[0]));
+                int currentBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float currentDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+                boolean stillOwned = currentView == blurView
+                        && currentParams == ownedParams
+                        && !springRunning
+                        && currentBlur == session.previewBlurPublishedRadius
+                        && Float.compare(currentDimming,
+                                session.previewBlurPublishedDimming) == 0;
+                if (!stillOwned) {
+                    session.previewBlurOwned = false;
+                    log(Log.INFO, TAG,
+                            "Preserved replacement Xiaomi blur during predictive progress"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason
+                                    + ", viewMatch=" + (currentView == blurView)
+                                    + ", paramsMatch="
+                                    + (currentParams == ownedParams)
+                                    + ", springRunning=" + springRunning
+                                    + ", current=" + currentBlur + "/"
+                                    + currentDimming
+                                    + ", expected="
+                                    + session.previewBlurPublishedRadius + "/"
+                                    + session.previewBlurPublishedDimming);
+                    clearNativePreviewBlurReferences(session);
+                    return;
+                }
+                if (currentBlur == radius
+                        && Float.compare(currentDimming, dimming) == 0) {
+                    return;
+                }
+                // Xiaomi's private helper only forwards to BlurView.setBlurRadius() and
+                // setDimming(); it does not replace params or touch the native spring.
+                invokeAnyMethod(blurElement, "updateTargetParams",
+                        new Object[]{Float.valueOf(radius), Float.valueOf(dimming)});
+                int appliedBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float appliedDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+                Object appliedView = readField(blurElement, "blurView");
+                Object appliedParams = readField(blurElement, "params");
+                if (appliedView != blurView || appliedParams != ownedParams
+                        || appliedBlur != radius
+                        || Float.compare(appliedDimming, dimming) != 0) {
+                    throw new IllegalStateException(
+                            "Xiaomi progressive blur write was not retained"
+                                    + ", applied=" + appliedBlur + "/"
+                                    + appliedDimming
+                                    + ", target=" + radius + "/" + dimming
+                                    + ", viewMatch=" + (appliedView == blurView)
+                                    + ", paramsMatch="
+                                    + (appliedParams == ownedParams));
+                }
+                session.previewBlurPublishedRadius = appliedBlur;
+                session.previewBlurPublishedDimming = appliedDimming;
+            } catch (Throwable throwable) {
+                recoverNativePreviewBlurWriteFailure(session,
+                        "progressFailure:" + reason, throwable);
+            }
+        }
+
+        private void recoverNativePreviewBlurWriteFailure(
+                ReturnHomeSession session, String reason, Throwable cause) {
+            if (!session.previewBlurOwned) {
+                log(Log.WARN, TAG,
+                        "Failed to prepare Xiaomi native predictive return-home blur"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        cause);
+                return;
+            }
+            Object blurElement = session.previewBlurElement;
+            Object blurView = session.previewBlurView;
+            Object ownedParams = session.previewBlurOwnedParams;
+            Object homeParams = session.previewBlurHomeParams;
+            session.previewBlurOwned = false;
+            try {
+                if (blurElement == null || blurView == null
+                        || ownedParams == null || homeParams == null) {
+                    throw new IllegalStateException(
+                            "incomplete progressive blur recovery snapshot",
+                            cause);
+                }
+                Object currentView = readField(blurElement, "blurView");
+                Object currentParams = readField(blurElement, "params");
+                Object blurSpring = readField(blurElement, "mSpringAnimation");
+                boolean springRunning = blurSpring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(blurSpring, "isRunning", new Object[0]));
+                if (currentView == blurView && currentParams == ownedParams
+                        && !springRunning) {
+                    // A module write can fail between radius and dimming. Exact identity is
+                    // enough to repair that module-created partial value; provider-abort's
+                    // relaxed params rule is deliberately not used here.
+                    restorePreviewBlurToHome(
+                            session, blurElement, homeParams);
+                    log(Log.WARN, TAG,
+                            "Recovered Xiaomi blur after predictive write failure"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason,
+                            cause);
+                } else {
+                    log(Log.WARN, TAG,
+                            "Preserved replacement Xiaomi blur after write failure"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason
+                                    + ", viewMatch="
+                                    + (currentView == blurView)
+                                    + ", paramsMatch="
+                                    + (currentParams == ownedParams)
+                                    + ", springRunning=" + springRunning,
+                            cause);
+                }
+            } catch (Throwable recoveryFailure) {
+                log(Log.WARN, TAG,
+                        "Failed to recover Xiaomi predictive return-home blur"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        recoveryFailure);
+            } finally {
+                clearNativePreviewBlurReferences(session);
+            }
+        }
+
+        private void transferNativePreviewBlur(ReturnHomeSession session,
+                                               String reason) {
+            if (!session.previewBlurOwned) {
+                clearNativePreviewBlurReferences(session);
+                return;
+            }
+            session.previewBlurOwned = false;
+            log(Log.INFO, TAG, "Transferred predictive blur ownership to Xiaomi"
+                    + ", generation=" + session.generation
+                    + ", reason=" + reason
+                    + ", nativeIdentity="
+                    + shortObject(session.nativeAnimationIdentity));
+            clearNativePreviewBlurReferences(session);
+        }
+
+        private void completeNativePreviewBlurHandoff(ReturnHomeSession session) {
+            if (!session.previewBlurOwned) {
+                return;
+            }
+            try {
+                Object blurElement = session.previewBlurElement;
+                Object blurView = session.previewBlurView;
+                Object appParams = session.previewBlurAppParams;
+                if (blurElement == null || blurView == null || appParams == null) {
+                    throw new IllegalStateException(
+                            "incomplete Xiaomi preview blur handoff snapshot");
+                }
+                Object currentView = readField(blurElement, "blurView");
+                Object currentParams = readField(blurElement, "params");
+                Object blurSpring = readField(blurElement, "mSpringAnimation");
+                boolean springRunning = blurSpring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(blurSpring, "isRunning", new Object[0]));
+                int currentBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float currentDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+                boolean remainsAtPreviewAppState = currentBlur
+                        == session.previewBlurTargetRadius
+                        && Float.compare(currentDimming,
+                                session.previewBlurTargetDimming) == 0;
+                boolean nativeAcquired = currentView != blurView
+                        || springRunning || !remainsAtPreviewAppState;
+                if (nativeAcquired) {
+                    transferNativePreviewBlur(session,
+                            "nativeCloseReturned"
+                                    + ":viewMatch=" + (currentView == blurView)
+                                    + ":paramsReplaced="
+                                    + (currentParams != appParams)
+                                    + ":springRunning=" + springRunning
+                                    + ":current=" + currentBlur + "/"
+                                    + currentDimming);
+                    return;
+                }
+                log(Log.WARN, TAG,
+                        "Xiaomi CLOSE returned without taking preview blur ownership"
+                                + ", generation=" + session.generation
+                                + ", paramsReplaced="
+                                + (currentParams != appParams)
+                                + ", current=" + currentBlur + "/"
+                                + currentDimming);
+                // A successful provider may have repeated setTo(AppState) without starting
+                // the final Home spring. Adopt that exact static params identity so later
+                // native-end cleanup can restore it without weakening ordinary cancel gates.
+                session.previewBlurOwnedParams = currentParams;
+            } catch (Throwable throwable) {
+                // Retain module ownership when takeover cannot be proven. Native end/reject
+                // cleanup can then restore Home only if the exact App-state snapshot is intact.
+                log(Log.WARN, TAG,
+                        "Could not verify Xiaomi predictive blur handoff"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        private void restoreNativePreviewBlur(ReturnHomeSession session,
+                                              String reason) {
+            if (!session.previewBlurOwned) {
+                return;
+            }
+            Object blurElement = session.previewBlurElement;
+            Object blurView = session.previewBlurView;
+            Object appParams = session.previewBlurAppParams;
+            Object ownedParams = session.previewBlurOwnedParams;
+            Object homeParams = session.previewBlurHomeParams;
+            session.previewBlurOwned = false;
+            try {
+                if (blurElement == null || blurView == null
+                        || appParams == null || homeParams == null) {
+                    throw new IllegalStateException(
+                            "incomplete Xiaomi preview blur ownership snapshot");
+                }
+                Object currentView = readField(blurElement, "blurView");
+                Object currentParams = readField(blurElement, "params");
+                Object blurSpring = readField(blurElement, "mSpringAnimation");
+                boolean springRunning = blurSpring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(blurSpring, "isRunning", new Object[0]));
+                int currentBlur = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentBlur", new Object[0])).intValue();
+                float currentDimming = ((Number) invokeAnyMethod(blurView,
+                        "getCurrentDimming", new Object[0])).floatValue();
+                boolean synchronousProviderAbort = session.nativeHandoffStarted
+                        && !session.previewBlurProviderReturned;
+                boolean stillOwned = currentView == blurView
+                        && !springRunning
+                        && (currentParams == ownedParams
+                        || synchronousProviderAbort)
+                        && currentBlur == session.previewBlurPublishedRadius
+                        && Float.compare(currentDimming,
+                                session.previewBlurPublishedDimming) == 0;
+                if (!stillOwned) {
+                    log(Log.INFO, TAG,
+                            "Preserved replacement Xiaomi blur state"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason
+                                    + ", viewMatch=" + (currentView == blurView)
+                                    + ", paramsMatch="
+                                    + (currentParams == ownedParams)
+                                    + ", initialParamsMatch="
+                                    + (currentParams == appParams)
+                                    + ", synchronousProviderAbort="
+                                    + synchronousProviderAbort
+                                    + ", providerReturned="
+                                    + session.previewBlurProviderReturned
+                                    + ", springRunning=" + springRunning
+                                    + ", current=" + currentBlur + "/"
+                                    + currentDimming
+                                    + ", expected="
+                                    + session.previewBlurPublishedRadius + "/"
+                                    + session.previewBlurPublishedDimming);
+                    return;
+                }
+                restorePreviewBlurToHome(
+                        session, blurElement, homeParams);
+                log(Log.INFO, TAG, "Restored Xiaomi blur after predictive return"
+                        + ", generation=" + session.generation
+                        + ", reason=" + reason
+                        + ", restored=" + session.previewBlurInitialRadius
+                        + "/" + session.previewBlurInitialDimming);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to restore Xiaomi predictive return-home blur"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        throwable);
+            } finally {
+                clearNativePreviewBlurReferences(session);
+            }
+        }
+
+        private void restorePreviewBlurToHome(
+                ReturnHomeSession session, Object blurElement,
+                Object homeParams) throws Throwable {
+            invokeAnyMethod(blurElement,
+                    session.previewBlurInterruptedHomeSpring
+                            ? "animTo" : "setTo",
+                    new Object[]{homeParams});
+        }
+
+        private void clearNativePreviewBlurReferences(ReturnHomeSession session) {
+            session.previewBlurElement = null;
+            session.previewBlurView = null;
+            session.previewBlurAppParams = null;
+            session.previewBlurOwnedParams = null;
+            session.previewBlurHomeParams = null;
+            session.previewBlurInterruptedHomeSpring = false;
+        }
+
+        private void prepareNativePreviewBackdropForCommit(
+                ReturnHomeSession session) {
+            if (session.previewShortcutOwned) {
+                try {
+                    Object element = session.previewShortcutElement;
+                    View view = session.previewShortcutView;
+                    Object appParams = session.previewShortcutAppParams;
+                    Object spring = readField(element, "mSpringAnimation");
+                    boolean springRunning = spring != null && Boolean.TRUE.equals(
+                            invokeAnyMethod(spring, "isRunning", new Object[0]));
+                    boolean stillOwned = readField(element,
+                            "shortcutMenuLayer") == view
+                            && readField(element, "params")
+                            == session.previewShortcutOwnedParams
+                            && !springRunning
+                            && Float.compare(view.getAlpha(),
+                            session.previewShortcutAppAlpha) == 0
+                            && Float.compare(view.getScaleX(),
+                            session.previewShortcutAppScaleX) == 0
+                            && Float.compare(view.getScaleY(),
+                            session.previewShortcutAppScaleY) == 0;
+                    if (!stillOwned) {
+                        transferNativePreviewShortcutLayer(session,
+                                "commitOwnershipLost");
+                    } else {
+                        invokeAnyMethod(element, "setTo",
+                                new Object[]{appParams});
+                    }
+                } catch (Throwable throwable) {
+                    recoverNativePreviewShortcutLayer(session,
+                            "commitFailure", throwable);
+                }
+            }
+            if (session.previewWallpaperOwned) {
+                try {
+                    if (session.previewWallpaperElement == null
+                            || session.previewWallpaperWorkspace == null
+                            || session.previewWallpaperAppParams == null
+                            || readBackdropWindowToken(
+                            session.previewWallpaperWorkspace) == null) {
+                        throw new IllegalStateException(
+                                "incomplete wallpaper commit snapshot");
+                    }
+                    invokePreviewWallpaperSetTo(session,
+                            session.previewWallpaperAppParams);
+                } catch (Throwable throwable) {
+                    recoverNativePreviewWallpaper(session,
+                            "commitFailure", throwable);
+                }
+            }
+        }
+
+        private void completeNativePreviewBackdropHandoff(
+                ReturnHomeSession session) {
+            session.previewBackdropProviderReturned = true;
+            if (session.previewShortcutOwned) {
+                try {
+                    Object element = session.previewShortcutElement;
+                    View view = session.previewShortcutView;
+                    Object spring = readField(element, "mSpringAnimation");
+                    boolean springRunning = spring != null && Boolean.TRUE.equals(
+                            invokeAnyMethod(spring, "isRunning", new Object[0]));
+                    Object currentParams = readField(element, "params");
+                    boolean remainsAtPreparedAppState = view != null
+                            && Float.compare(view.getAlpha(),
+                            session.previewShortcutAppAlpha) == 0
+                            && Float.compare(view.getScaleX(),
+                            session.previewShortcutAppScaleX) == 0
+                            && Float.compare(view.getScaleY(),
+                            session.previewShortcutAppScaleY) == 0;
+                    boolean nativeAcquired = readField(element,
+                            "shortcutMenuLayer") != view
+                            || currentParams
+                            != session.previewShortcutOwnedParams
+                            || springRunning
+                            || !remainsAtPreparedAppState;
+                    if (nativeAcquired) {
+                        transferNativePreviewShortcutLayer(session,
+                                "nativeCloseReturned"
+                                        + ":paramsReplaced="
+                                        + (currentParams
+                                        != session.previewShortcutOwnedParams)
+                                        + ":springRunning=" + springRunning);
+                    } else {
+                        log(Log.WARN, TAG,
+                                "Xiaomi CLOSE returned without taking launcher backdrop"
+                                        + ", generation=" + session.generation);
+                    }
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Could not verify Xiaomi launcher backdrop handoff"
+                                    + ", generation=" + session.generation,
+                            throwable);
+                }
+            }
+            if (session.previewWallpaperOwned
+                    && session.previewWallpaperNativeAppSetObserved
+                    && session.previewWallpaperNativeHomeAnimObserved) {
+                transferNativePreviewWallpaper(session,
+                        "nativeCommandsObserved");
+            }
+        }
+
+        private void restoreNativePreviewBackdrop(ReturnHomeSession session,
+                                                  String reason) {
+            restoreNativePreviewShortcutLayer(session, reason);
+            restoreNativePreviewWallpaper(session, reason);
+            session.previewBackdropStateManager = null;
+        }
+
+        private void restoreNativePreviewShortcutLayer(
+                ReturnHomeSession session, String reason) {
+            if (!session.previewShortcutOwned) {
+                clearNativePreviewShortcutReferences(session);
+                return;
+            }
+            Object element = session.previewShortcutElement;
+            View view = session.previewShortcutView;
+            Object ownedParams = session.previewShortcutOwnedParams;
+            Object homeParams = session.previewShortcutHomeParams;
+            session.previewShortcutOwned = false;
+            try {
+                Object spring = readField(element, "mSpringAnimation");
+                boolean springRunning = spring != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(spring, "isRunning", new Object[0]));
+                boolean stillOwned = readField(element,
+                        "shortcutMenuLayer") == view
+                        && readField(element, "params") == ownedParams
+                        && !springRunning
+                        && Float.compare(view.getAlpha(),
+                        session.previewShortcutAppAlpha) == 0
+                        && Float.compare(view.getScaleX(),
+                        session.previewShortcutAppScaleX) == 0
+                        && Float.compare(view.getScaleY(),
+                        session.previewShortcutAppScaleY) == 0;
+                if (!stillOwned) {
+                    log(Log.INFO, TAG,
+                            "Preserved replacement Xiaomi launcher backdrop"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason);
+                    return;
+                }
+                invokeAnyMethod(element, "setTo", new Object[]{homeParams});
+                log(Log.INFO, TAG,
+                        "Restored Xiaomi launcher backdrop after predictive return"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to restore Xiaomi predictive launcher backdrop"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        throwable);
+            } finally {
+                clearNativePreviewShortcutReferences(session);
+            }
+        }
+
+        private void recoverNativePreviewShortcutLayer(
+                ReturnHomeSession session, String reason, Throwable cause) {
+            if (!session.previewShortcutOwned) {
+                log(Log.WARN, TAG,
+                        "Failed to prepare Xiaomi predictive launcher backdrop"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        cause);
+                clearNativePreviewShortcutReferences(session);
+                return;
+            }
+            restoreNativePreviewShortcutLayer(session,
+                    "recovery:" + reason);
+        }
+
+        private void transferNativePreviewShortcutLayer(
+                ReturnHomeSession session, String reason) {
+            if (session.previewShortcutOwned) {
+                log(Log.INFO, TAG,
+                        "Transferred predictive launcher backdrop to Xiaomi"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason);
+            }
+            session.previewShortcutOwned = false;
+            clearNativePreviewShortcutReferences(session);
+        }
+
+        private void clearNativePreviewShortcutReferences(
+                ReturnHomeSession session) {
+            session.previewShortcutElement = null;
+            session.previewShortcutView = null;
+            session.previewShortcutAppParams = null;
+            session.previewShortcutHomeParams = null;
+            session.previewShortcutOwnedParams = null;
+        }
+
+        private void invokePreviewWallpaperSetTo(
+                ReturnHomeSession session, Object params) throws Throwable {
+            session.previewWallpaperModuleCommandDepth++;
+            try {
+                invokeAnyMethod(session.previewWallpaperElement,
+                        "setTo", new Object[]{params});
+            } finally {
+                session.previewWallpaperModuleCommandDepth--;
+            }
+        }
+
+        void onWallpaperCommand(Object element, Object params, boolean animated) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.previewWallpaperOwned
+                    || session.previewWallpaperElement != element
+                    || session.previewWallpaperModuleCommandDepth > 0) {
+                return;
+            }
+            try {
+                float zoom = ((Number) invokeAnyMethod(params,
+                        "getZoomOut", new Object[0])).floatValue();
+                if (session.nativeHandoffStarted
+                        && !session.previewBackdropProviderReturned) {
+                    if (!animated && Float.compare(zoom,
+                            session.previewWallpaperAppZoom) == 0) {
+                        session.previewWallpaperNativeAppSetObserved = true;
+                        log(Log.INFO, TAG,
+                                "Observed Xiaomi native wallpaper App handoff"
+                                        + ", generation=" + session.generation
+                                        + ", zoom=" + zoom);
+                        return;
+                    }
+                    if (animated
+                            && session.previewWallpaperNativeAppSetObserved
+                            && Float.compare(zoom,
+                            session.previewWallpaperHomeZoom) == 0) {
+                        session.previewWallpaperNativeHomeAnimObserved = true;
+                        log(Log.INFO, TAG,
+                                "Observed Xiaomi native wallpaper Home continuation"
+                                        + ", generation=" + session.generation
+                                        + ", zoom=" + zoom);
+                        return;
+                    }
+                }
+                transferNativePreviewWallpaper(session,
+                        "externalCommand:animated=" + animated
+                                + ":zoom=" + zoom);
+            } catch (Throwable throwable) {
+                transferNativePreviewWallpaper(session,
+                        "unreadableExternalCommand");
+                log(Log.WARN, TAG,
+                        "Could not classify Xiaomi wallpaper replacement"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        private void restoreNativePreviewWallpaper(
+                ReturnHomeSession session, String reason) {
+            if (!session.previewWallpaperOwned) {
+                clearNativePreviewWallpaperReferences(session);
+                return;
+            }
+            Object stateManager = session.previewBackdropStateManager;
+            Object element = session.previewWallpaperElement;
+            Object workspace = session.previewWallpaperWorkspace;
+            Object homeParams = session.previewWallpaperHomeParams;
+            session.previewWallpaperOwned = false;
+            try {
+                boolean running = stateManager != null && Boolean.TRUE.equals(
+                        invokeAnyMethod(stateManager,
+                                "isWindowElementRunning", new Object[0]));
+                Object currentWorkspace = invokeAnyMethod(element,
+                        "getMWorkspace", new Object[0]);
+                if (running || currentWorkspace != workspace
+                        || readBackdropWindowToken(workspace) == null) {
+                    log(Log.INFO, TAG,
+                            "Preserved replacement Xiaomi wallpaper state"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason
+                                    + ", running=" + running
+                                    + ", workspaceMatch="
+                                    + (currentWorkspace == workspace));
+                    return;
+                }
+                session.previewWallpaperOwned = true;
+                invokePreviewWallpaperSetTo(session, homeParams);
+                session.previewWallpaperOwned = false;
+                log(Log.INFO, TAG,
+                        "Restored Xiaomi wallpaper after predictive return"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", zoom="
+                                + session.previewWallpaperHomeZoom);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to restore Xiaomi predictive wallpaper"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        throwable);
+            } finally {
+                session.previewWallpaperOwned = false;
+                clearNativePreviewWallpaperReferences(session);
+            }
+        }
+
+        private void recoverNativePreviewWallpaper(
+                ReturnHomeSession session, String reason, Throwable cause) {
+            if (!session.previewWallpaperOwned) {
+                log(Log.WARN, TAG,
+                        "Failed to prepare Xiaomi predictive wallpaper"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason,
+                        cause);
+                clearNativePreviewWallpaperReferences(session);
+                return;
+            }
+            log(Log.WARN, TAG,
+                    "Recovering Xiaomi predictive wallpaper"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason,
+                    cause);
+            restoreNativePreviewWallpaper(session,
+                    "recovery:" + reason);
+        }
+
+        private void transferNativePreviewWallpaper(
+                ReturnHomeSession session, String reason) {
+            if (session.previewWallpaperOwned) {
+                log(Log.INFO, TAG,
+                        "Transferred predictive wallpaper to Xiaomi"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason);
+            }
+            session.previewWallpaperOwned = false;
+            clearNativePreviewWallpaperReferences(session);
+        }
+
+        private void clearNativePreviewWallpaperReferences(
+                ReturnHomeSession session) {
+            session.previewWallpaperElement = null;
+            session.previewWallpaperWorkspace = null;
+            session.previewWallpaperAppParams = null;
+            session.previewWallpaperHomeParams = null;
+            session.previewWallpaperModuleCommandDepth = 0;
+        }
+
+        private IBinder readBackdropWindowToken(Object workspace) {
+            return workspace instanceof View
+                    ? ((View) workspace).getWindowToken() : null;
+        }
+
+        private void applyPreviewTransform(ReturnHomeSession session, RectF targetRect,
+                                           float cornerRadius,
+                                           boolean tagFrameTimeline) {
+            SurfaceControl leash = session.previewLeash;
+            if (leash == null || !leash.isValid()
+                    || session.startRect.isEmpty() || targetRect.isEmpty()) {
+                return;
+            }
+            try {
+                float scaleX = targetRect.width() / session.startRect.width();
+                float scaleY = targetRect.height() / session.startRect.height();
+                session.matrix.reset();
+                session.matrix.setScale(scaleX, scaleY);
+                session.matrix.postTranslate(
+                        targetRect.left - (session.startRect.left * scaleX),
+                        targetRect.top - (session.startRect.top * scaleY));
+                invokeAnyMethod(session.transaction, "setMatrix",
+                        new Object[]{leash, session.matrix, session.matrixValues});
+                invokeAnyMethod(session.transaction, "setWindowCrop",
+                        new Object[]{leash, session.startRect});
+                invokeAnyMethod(session.transaction, "setCornerRadius",
+                        new Object[]{leash, Float.valueOf(
+                                Math.max(0.0f, cornerRadius))});
+                if (tagFrameTimeline) {
+                    try {
+                        Object vsyncValue = invokeAnyMethod(
+                                Choreographer.getInstance(), "getVsyncId", new Object[0]);
+                        if (vsyncValue instanceof Number
+                                && ((Number) vsyncValue).longValue() > 0L) {
+                            invokeAnyMethod(session.transaction,
+                                    "setFrameTimelineVsync",
+                                    new Object[]{Long.valueOf(
+                                            ((Number) vsyncValue).longValue())});
+                        }
+                    } catch (Throwable throwable) {
+                        if (!session.frameTimelineTagFailed) {
+                            session.frameTimelineTagFailed = true;
+                            log(Log.WARN, TAG,
+                                    "Failed to tag return-home animation frame"
+                                            + ", generation=" + session.generation,
+                                    throwable);
+                        }
+                    }
+                }
+                session.transaction.apply();
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to apply return-to-home preview transform"
+                        + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        Object takeLocalHandoffStatus(Object implementor, Object params) {
+            try {
+                MiuiHomeLocalHandoffToken token = matchLocalHandoffToken(
+                        implementor, params);
+                if (token == null
+                        || !miuiHomeLocalHandoffToken.compareAndSet(token, null)) {
+                    return null;
+                }
+                ReturnHomeSession session = (ReturnHomeSession) token.session;
+                if (currentSession != session || session.finished.get() != 0) {
+                    return null;
+                }
+                Object currentStatus = invokeAnyMethod(token.windowAnimContext,
+                        "getLocalAnimLastStatus", new Object[0]);
+                if (currentStatus != token.status) {
+                    return null;
+                }
+                invokeAnyMethod(token.windowAnimContext, "setLocalAnimLastStatus",
+                        new Object[]{null});
+                log(Log.INFO, TAG, "Supplied predictive handoff to Xiaomi local animator"
+                        + ", generation=" + token.generation
+                        + ", rect=" + session.currentRect
+                        + ", radius=" + session.currentCornerRadius);
+                return token.status;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to supply Xiaomi local predictive handoff"
+                        + ", token=" + shortObject(miuiHomeLocalHandoffToken.get()),
+                        throwable);
+                return null;
+            }
+        }
+
+        void discardLocalHandoffStatus(Object implementor, Object params,
+                                       String reason) {
+            try {
+                MiuiHomeLocalHandoffToken token = matchLocalHandoffToken(
+                        implementor, params);
+                if (token == null
+                        || !miuiHomeLocalHandoffToken.compareAndSet(token, null)) {
+                    return;
+                }
+                ReturnHomeSession session = (ReturnHomeSession) token.session;
+                if (currentSession != session || session.finished.get() != 0) {
+                    return;
+                }
+                Object currentStatus = invokeAnyMethod(token.windowAnimContext,
+                        "getLocalAnimLastStatus", new Object[0]);
+                if (currentStatus != token.status) {
+                    return;
+                }
+                invokeAnyMethod(token.windowAnimContext, "setLocalAnimLastStatus",
+                        new Object[]{null});
+                log(Log.INFO, TAG, "Preserved Xiaomi native local handoff"
+                        + ", generation=" + token.generation
+                        + ", reason=" + reason);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to discard module local handoff"
+                        + ", reason=" + reason, throwable);
+            }
+        }
+
+        private MiuiHomeLocalHandoffToken matchLocalHandoffToken(
+                Object implementor, Object params) throws Exception {
+            MiuiHomeLocalHandoffToken token = miuiHomeLocalHandoffToken.get();
+            if (token == null || !(token.session instanceof ReturnHomeSession)) {
+                return null;
+            }
+            ReturnHomeSession session = (ReturnHomeSession) token.session;
+            if (currentSession != session || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeStatusPublished
+                    || session.localHandoffToken != token
+                    || token.status != session.nativePublishedStatus) {
+                return null;
+            }
+            Object windowElement = readField(implementor, "windowElement");
+            Object windowAnimContext = readField(implementor, "windowAnimContext");
+            Object animType = invokeAnyMethod(params, "getAnimType", new Object[0]);
+            String typeName = animType instanceof Enum<?>
+                    ? ((Enum<?>) animType).name() : String.valueOf(animType);
+            if (windowElement != token.windowElement
+                    || windowAnimContext != token.windowAnimContext
+                    || !isReturnHomeNativeCloseType(typeName)) {
+                return null;
+            }
+            Object currentStatus = invokeAnyMethod(windowAnimContext,
+                    "getLocalAnimLastStatus", new Object[0]);
+            return currentStatus == token.status ? token : null;
+        }
+
+        private boolean isStandardSingleTaskReturnHome(ReturnHomeSession session) {
+            if (session.apps == null || session.apps.length != 2
+                    || session.closingTarget == null
+                    || session.openingTarget == null) {
+                return false;
+            }
+            int closingCount = 0;
+            int openingCount = 0;
+            for (Object target : session.apps) {
+                int mode = readIntFieldOrDefault(target, "mode", -1);
+                if (mode == 1) {
+                    closingCount++;
+                    if (target != session.closingTarget) {
+                        return false;
+                    }
+                } else if (mode == 0) {
+                    openingCount++;
+                    if (target != session.openingTarget) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            return closingCount == 1 && openingCount == 1;
+        }
+
+        private void startNativeClose(ReturnHomeSession session) {
+            if (session.finished.get() != 0 || currentSession != session
+                    || session.nativeHandoffStarted) {
+                return;
+            }
+            freezePreviewProgress(session, "commit");
+            if (session.previewBlurOwned) {
+                // Revalidate exact ownership at the commit boundary and close any rounding
+                // gap before provider code is allowed to replace params. This makes the
+                // synchronous-abort identity relaxation cover only provider-owned changes.
+                publishNativePreviewBlur(session,
+                        session.previewBlurTargetRadius,
+                        session.previewBlurTargetDimming, "commit");
+            }
+            prepareNativePreviewBackdropForCommit(session);
+            session.nativeHandoffStarted = true;
+            try {
+                Class<?> stateManagerClass = Class.forName(
+                        MIUI_HOME_STATE_MANAGER, false, classLoader);
+                Object companion = readStaticField(stateManagerClass, "Companion");
+                Object stateManager = invokeAnyMethod(companion,
+                        "getInstance", new Object[0]);
+                if (Boolean.TRUE.equals(invokeAnyMethod(stateManager,
+                        "isWindowElementRunning", new Object[0]))) {
+                    throw new IllegalStateException(
+                            "Xiaomi WindowElement already has a running animation");
+                }
+                invokeAnyMethod(stateManager, "initWindowElement", new Object[0]);
+                Object windowElement = invokeAnyMethod(stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                if (windowElement == null) {
+                    throw new IllegalStateException("Xiaomi WindowElement is null");
+                }
+                session.stateManager = stateManager;
+                session.nativeWindowElement = windowElement;
+                Object windowAnimContext = invokeAnyMethod(windowElement,
+                        "getWindowAnimContext", new Object[0]);
+                session.nativeWindowAnimContext = windowAnimContext;
+                Class<?> animStatusClass = Class.forName(
+                        MIUI_HOME_ANIM_STATUS_PARAM, false, classLoader);
+                Object animStatusCompanion = readStaticField(
+                        animStatusClass, "Companion");
+                RectF handoffRect = session.previewInitialized
+                        ? new RectF(session.currentRect)
+                        : new RectF(session.startRect);
+                if (handoffRect.isEmpty()) {
+                    throw new IllegalStateException("predictive handoff rect is empty");
+                }
+                Object localAnimStatus = invokeAnyMethod(animStatusCompanion,
+                        "getAnimParamFromRect",
+                        new Object[]{handoffRect,
+                                Float.valueOf(session.currentCornerRadius),
+                                Float.valueOf(1.0f)});
+                invokeAnyMethod(windowAnimContext, "setLocalAnimLastStatus",
+                        new Object[]{localAnimStatus});
+                session.nativePublishedStatus = localAnimStatus;
+                session.nativeStatusPublished = true;
+                MiuiHomeLocalHandoffToken handoffToken =
+                        new MiuiHomeLocalHandoffToken(
+                                session.generation, session, windowElement,
+                                windowAnimContext, localAnimStatus);
+                session.localHandoffToken = handoffToken;
+                MiuiHomeLocalHandoffToken replacedToken =
+                        miuiHomeLocalHandoffToken.getAndSet(handoffToken);
+                if (replacedToken != null) {
+                    log(Log.WARN, TAG, "Replaced stale Xiaomi local handoff token"
+                            + ", oldGeneration=" + replacedToken.generation
+                            + ", newGeneration=" + session.generation);
+                }
+                Class<?> compatClass = Class.forName(
+                        MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT, false, classLoader);
+                Method wrap = compatClass.getDeclaredMethod("wrap",
+                        session.apps.getClass());
+                wrap.setAccessible(true);
+                Object compatApps = wrap.invoke(null, new Object[]{session.apps});
+                Object[] sourceNonApps = session.nonApps;
+                Object compatNonApps;
+                if (sourceNonApps == null || sourceNonApps.length == 0) {
+                    compatNonApps = Array.newInstance(compatClass, 0);
+                } else {
+                    Method wrapNonApps = compatClass.getDeclaredMethod("wrap",
+                            sourceNonApps.getClass());
+                    wrapNonApps.setAccessible(true);
+                    compatNonApps = wrapNonApps.invoke(null,
+                            new Object[]{sourceNonApps});
+                }
+                invokeAnyMethod(windowElement,
+                        "onClosingWindowTransitionExecute",
+                        new Object[]{compatApps, compatNonApps, null, Boolean.FALSE});
+                session.previewBlurProviderReturned = true;
+                session.previewBackdropProviderReturned = true;
+                // StateManager starts WindowElement before its final RecentBlur animTo(Home).
+                // The whole provider has returned now, so spring/value state can distinguish a
+                // real native takeover from a static repeated setTo(AppState).
+                completeNativePreviewBackdropHandoff(session);
+                completeNativePreviewBlurHandoff(session);
+                Object remainingStatus = invokeAnyMethod(windowAnimContext,
+                        "getLocalAnimLastStatus", new Object[0]);
+                if (remainingStatus != localAnimStatus) {
+                    miuiHomeLocalHandoffToken.compareAndSet(handoffToken, null);
+                } else {
+                    log(Log.WARN, TAG, "Xiaomi animator did not consume predictive handoff"
+                            + ", generation=" + session.generation
+                            + ", windowElement=" + shortObject(windowElement));
+                }
+                if (session.nativeAnimationIdentity == null) {
+                    // Xiaomi's MainThreadExecutor and StateManager both execute inline when
+                    // entered from this owner Looper. A missing listener identity here means
+                    // the native provider rejected the CLOSE instead of starting later.
+                    throw new IllegalStateException(
+                            "Xiaomi CLOSE returned without an animation identity");
+                }
+                Runnable timeout = () -> {
+                    if (currentSession == session && session.finished.get() == 0) {
+                        log(Log.WARN, TAG, "Xiaomi return-to-home animation timed out"
+                                + ", generation=" + session.generation
+                                + ", statusPublished="
+                                + session.nativeStatusPublished
+                                + ", animationStarted="
+                                + session.nativeAnimationStarted);
+                        finishSession(session, "nativeTimeout",
+                                shouldRestorePreview(session));
+                    }
+                };
+                session.nativeTimeout = timeout;
+                handler.postDelayed(timeout, RETURN_HOME_NATIVE_TIMEOUT_MS);
+                log(Log.INFO, TAG, "Handed predictive-back post-commit to Xiaomi"
+                        + ", generation=" + session.generation
+                        + ", windowElement=" + shortObject(windowElement)
+                        + ", previewRect=" + session.currentRect
+                        + ", previewRadius=" + session.currentCornerRadius
+                        + ", statusConsumed="
+                        + (miuiHomeLocalHandoffToken.get() != handoffToken));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Xiaomi native return-to-home handoff rejected"
+                        + ", generation=" + session.generation, throwable);
+                finishSession(session, "nativeHandoffRejected",
+                        shouldRestorePreview(session));
+            }
+        }
+
+        private boolean shouldRestorePreview(ReturnHomeSession session) {
+            // The synchronous listener capture proves Xiaomi has begun using this exact
+            // WindowElement even before the next-loop state verification marks it running.
+            // Never fight that native animation by restoring our preview transform.
+            return !session.nativeAnimationStarted
+                    && session.nativeAnimationIdentity == null;
+        }
+
+        void onNativeAnimationStart(Object listener, Object animationIdentity) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeStatusPublished
+                    || session.nativeAnimationIdentity != null) {
+                return;
+            }
+            try {
+                Object stateManager = readField(listener, "this$0");
+                Object windowElement = invokeAnyMethod(stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                if (windowElement != session.nativeWindowElement) {
+                    return;
+                }
+                session.nativeAnimationIdentity = animationIdentity;
+                verifyNativeContinuationStart(session, animationIdentity);
+                handler.post(() -> verifyNativeAnimationStarted(session,
+                        stateManager, windowElement, animationIdentity));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to capture Xiaomi CLOSE animation identity"
+                        + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        private void verifyNativeContinuationStart(
+                ReturnHomeSession session, Object animationIdentity) {
+            try {
+                Object nativeStartObject = invokeAnyMethod(
+                        animationIdentity, "getStartRect", new Object[0]);
+                Object nativeTargetObject = readField(animationIdentity, "mTargetRect");
+                Object progressTypeObject = readField(
+                        animationIdentity, "mProgressCalculateType");
+                Object currentWidthObject = readField(animationIdentity, "mCurrentWidth");
+                Object currentHeightObject = readField(animationIdentity, "mCurrentHeight");
+                if (!(nativeStartObject instanceof RectF)
+                        || !(nativeTargetObject instanceof RectF)
+                        || !(progressTypeObject instanceof Number)
+                        || ((Number) progressTypeObject).intValue() != 1001
+                        || !(currentWidthObject instanceof Number)
+                        || !(currentHeightObject instanceof Number)) {
+                    throw new IllegalStateException(
+                            "unexpected RectFSpringAnim continuation state");
+                }
+                RectF nativeStart = (RectF) nativeStartObject;
+                RectF nativeTarget = (RectF) nativeTargetObject;
+                RectF handoff = new RectF(session.currentRect);
+                RectF fullStart = new RectF(session.startRect);
+                float tolerance = Math.max(2.0f, dp(2.0f));
+                float currentWidth = ((Number) currentWidthObject).floatValue();
+                float currentHeight = ((Number) currentHeightObject).floatValue();
+                if (handoff.isEmpty() || fullStart.isEmpty() || nativeTarget.isEmpty()
+                        || Math.abs(nativeStart.width() - handoff.width()) > tolerance
+                        || Math.abs(nativeStart.height() - handoff.height()) > tolerance
+                        || Math.abs(currentWidth - handoff.width()) > tolerance
+                        || Math.abs(currentHeight - handoff.height()) > tolerance
+                        || nativeTarget.width() >= handoff.width()
+                        || handoff.width() > fullStart.width() + tolerance) {
+                    throw new IllegalStateException(
+                            "native continuation does not match predictive handoff"
+                                    + ", nativeStart=" + nativeStart
+                                    + ", current=" + currentWidth + "x" + currentHeight
+                                    + ", handoff=" + handoff
+                                    + ", fullStart=" + fullStart
+                                    + ", target=" + nativeTarget);
+                }
+                // AOSP LauncherBackAnimationController deliberately creates the post-commit
+                // RectFSpringAnim from the handed-off current Rect. Its normalized phase starts
+                // at zero; continuity comes from identical geometry, not from carrying the
+                // gesture percentage into the new spring. Xiaomi has already copied this exact
+                // Rect into the live values and SpringBundles, so verify it and leave its start,
+                // current state, velocity, target, and progress origin untouched.
+                session.nativeContinuationVerified = true;
+                log(Log.INFO, TAG,
+                        "Verified Xiaomi predictive return continuation start"
+                                + ", generation=" + session.generation
+                                + ", handoff=" + handoff
+                                + ", fullStart=" + fullStart
+                                + ", target=" + nativeTarget
+                                + ", postCommitProgress=0.0");
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to verify Xiaomi predictive return continuation start"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        boolean shouldRouteSameIconThroughNativeParallel(
+                Object stateManager, Object[] args) throws Throwable {
+            if (args == null || args.length != 4
+                    || !MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(args[0])
+                    || !Boolean.TRUE.equals(args[1])
+                    || !Boolean.TRUE.equals(args[2])
+                    || args[3] == null) {
+                return false;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.WARN, TAG,
+                        "Rejected Xiaomi same-icon native parallel routing off main Looper");
+                return false;
+            }
+            Class<?> callbackClass = Class.forName(
+                    MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
+            if (!callbackClass.isInstance(args[3])) {
+                return false;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                return false;
+            }
+            if (!attached || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || !session.nativeContinuationVerified
+                    || session.stateManager != stateManager
+                    || session.nativeWindowElement == null
+                    || session.nativeAnimationIdentity == null
+                    || !"CLOSE_TO_HOME".equals(session.nativeAnimationType)) {
+                log(Log.WARN, TAG,
+                        "Rejected inactive Xiaomi same-icon native parallel routing"
+                                + ", generation=" + session.generation
+                                + ", attached=" + attached
+                                + ", finished=" + session.finished.get()
+                                + ", cleaned=" + session.cleaned.get()
+                                + ", nativeHandoff=" + session.nativeHandoffStarted
+                                + ", nativeStarted=" + session.nativeAnimationStarted
+                                + ", continuationVerified="
+                                + session.nativeContinuationVerified
+                                + ", sameStateManager="
+                                + (session.stateManager == stateManager)
+                                + ", hasWindowElement="
+                                + (session.nativeWindowElement != null)
+                                + ", hasAnimationIdentity="
+                                + (session.nativeAnimationIdentity != null)
+                                + ", type=" + session.nativeAnimationType);
+                return false;
+            }
+
+            Object windowElement = session.nativeWindowElement;
+            Object currentElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object pendingReference = invokeAnyMethod(
+                    stateManager, "getPendingIconViewWeakRef", new Object[0]);
+            Object pendingIcon = pendingReference instanceof WeakReference<?>
+                    ? ((WeakReference<?>) pendingReference).get() : null;
+            boolean samePendingIcon = pendingIcon instanceof View
+                    && Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isSameElement", new Object[]{pendingIcon}));
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            boolean reusable = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isReusefulAnimRunning", new Object[0]));
+            boolean usingSf = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isUsingSfAnim", new Object[0]));
+            boolean mainAnimNoFinishClear = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "mainAnimNoFinishClear", new Object[0]));
+            boolean validSurface = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "hasValidSurface", new Object[0]));
+            Object multiFlyHelper = invokeAnyMethod(
+                    windowElement, "getMultiFlyHelper", new Object[0]);
+            boolean currentMultiFly = multiFlyHelper != null
+                    && Boolean.TRUE.equals(invokeAnyMethod(
+                    multiFlyHelper, "isCurrentMultiFly", new Object[0]));
+            boolean nativeWouldCancelSurfaceAndView = Boolean.TRUE.equals(invokeAnyMethod(
+                    stateManager, "shouldCancelSurfaceAndView",
+                    new Object[]{Boolean.TRUE}));
+            boolean nativeWouldCancelElement = Boolean.TRUE.equals(invokeAnyMethod(
+                    stateManager, "shouldCancelElementAnim", new Object[0]));
+            boolean canceled = Boolean.TRUE.equals(
+                    readField(windowElement, "mCanceled"));
+            boolean surfaceCanceled = Boolean.TRUE.equals(
+                    readField(windowElement, "mSurfaceCanceled"));
+            boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                    readField(windowElement, "mSurfaceCanceledExecute"));
+            boolean listenerDisabled = Boolean.TRUE.equals(
+                    readField(windowElement, "mDisableStateManagerListener"));
+            boolean finishSurface = Boolean.TRUE.equals(
+                    readField(windowElement, "mFinishSurface"));
+            boolean finishComplete = Boolean.TRUE.equals(
+                    readField(windowElement, "mFinishComplete"));
+            boolean duringMerge = Boolean.TRUE.equals(
+                    readField(windowElement, "mDuringMerge"));
+            boolean endWaitingMerge = Boolean.TRUE.equals(
+                    readField(windowElement, "mEndWaitingMerge"));
+            boolean cancelSurfaceTaskClear =
+                    readField(windowElement, "mCancelSurfaceTask") == null;
+            boolean useShellListener = Boolean.TRUE.equals(
+                    readField(windowElement, "mUseShellAnimListener"));
+            boolean couldExecuteShellEnd = Boolean.TRUE.equals(
+                    readField(windowElement, "couldExecuteShellAnimEnd"));
+            boolean callbackClear =
+                    readField(windowElement, "mShellTransitionCallback") == null;
+            boolean noPendingHandoff = pendingCloseInterruption.get() == null
+                    && pendingDirectCancel.get() == null;
+            boolean valid = currentSession == session
+                    && session.generation > 0L
+                    && currentElement == windowElement
+                    && currentIdentity == session.nativeAnimationIdentity
+                    && session.nativeAnimationType.equals(currentType)
+                    && samePendingIcon && running && !reusable && !usingSf
+                    && !mainAnimNoFinishClear
+                    && validSurface && multiFlyHelper != null && !currentMultiFly
+                    && !nativeWouldCancelSurfaceAndView
+                    && !nativeWouldCancelElement
+                    && !canceled && !surfaceCanceled && !surfaceCancelExecuted
+                    && !listenerDisabled && !finishSurface && !finishComplete
+                    && !duringMerge && !endWaitingMerge && cancelSurfaceTaskClear
+                    && useShellListener && couldExecuteShellEnd && callbackClear
+                    && noPendingHandoff;
+            if (!valid) {
+                log(Log.WARN, TAG,
+                        "Rejected Xiaomi same-icon native parallel routing"
+                                + ", generation=" + session.generation
+                                + ", currentSession=" + (currentSession == session)
+                                + ", sameElement=" + (currentElement == windowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity == session.nativeAnimationIdentity)
+                                + ", type=" + currentType
+                                + ", expectedType=" + session.nativeAnimationType
+                                + ", samePendingIcon=" + samePendingIcon
+                                + ", running=" + running
+                                + ", reusable=" + reusable
+                                + ", usingSf=" + usingSf
+                                + ", mainAnimNoFinishClear="
+                                + mainAnimNoFinishClear
+                                + ", validSurface=" + validSurface
+                                + ", hasMultiFly=" + (multiFlyHelper != null)
+                                + ", currentMultiFly=" + currentMultiFly
+                                + ", nativeCancelSurfaceAndView="
+                                + nativeWouldCancelSurfaceAndView
+                                + ", nativeCancelElement=" + nativeWouldCancelElement
+                                + ", canceled=" + canceled
+                                + ", surfaceCanceled=" + surfaceCanceled
+                                + ", surfaceCancelExecuted="
+                                + surfaceCancelExecuted
+                                + ", listenerDisabled=" + listenerDisabled
+                                + ", finishSurface=" + finishSurface
+                                + ", finishComplete=" + finishComplete
+                                + ", duringMerge=" + duringMerge
+                                + ", endWaitingMerge=" + endWaitingMerge
+                                + ", cancelSurfaceTaskClear="
+                                + cancelSurfaceTaskClear
+                                + ", useShellListener=" + useShellListener
+                                + ", couldExecuteShellEnd=" + couldExecuteShellEnd
+                                + ", callbackClear=" + callbackClear
+                                + ", noPendingHandoff=" + noPendingHandoff);
+                return false;
+            }
+            log(Log.INFO, TAG,
+                    "Routed same-icon predictive CLOSE through Xiaomi parallel launcher path"
+                            + ", generation=" + session.generation
+                            + ", type=" + currentType
+                            + ", animationIdentity="
+                            + shortObject(session.nativeAnimationIdentity)
+                            + ", windowElement=" + shortObject(windowElement)
+                            + ", pendingIcon=" + shortObject(pendingIcon));
+            return true;
+        }
+
+        void onNativeCloseCancelSurface(Object windowElement, String reason) {
+            if (!MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(reason)) {
+                return;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeAnimationStarted
+                    || session.stateManager == null
+                    || session.nativeWindowElement != windowElement
+                    || session.nativeAnimationIdentity == null
+                    || !isReturnHomeNativeCloseType(session.nativeAnimationType)) {
+                return;
+            }
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        windowElement, "getAnimSymbol", new Object[0]);
+                boolean surfaceCanceled = Boolean.TRUE.equals(
+                        readField(windowElement, "mSurfaceCanceled"));
+                boolean listenerDisabled = Boolean.TRUE.equals(
+                        readField(windowElement, "mDisableStateManagerListener"));
+                if (currentElement != windowElement
+                        || currentIdentity != session.nativeAnimationIdentity
+                        || !surfaceCanceled || !listenerDisabled) {
+                    log(Log.WARN, TAG,
+                            "Rejected mismatched interrupted Xiaomi return-home CLOSE"
+                                    + ", generation=" + session.generation
+                                    + ", sameElement=" + (currentElement == windowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity == session.nativeAnimationIdentity)
+                                    + ", surfaceCanceled=" + surfaceCanceled
+                                    + ", listenerDisabled=" + listenerDisabled
+                                    + ", type=" + session.nativeAnimationType);
+                    return;
+                }
+                ReturnHomeCloseInterruptionToken token =
+                        new ReturnHomeCloseInterruptionToken(
+                                session, session.stateManager, windowElement,
+                                session.nativeAnimationIdentity);
+                ReturnHomeCloseInterruptionToken replaced =
+                        pendingCloseInterruption.getAndSet(token);
+                if (replaced != null && replaced.session != session) {
+                    log(Log.WARN, TAG,
+                            "Replaced stale interrupted return-home token"
+                                    + ", oldGeneration=" + replaced.generation
+                                    + ", newGeneration=" + session.generation);
+                }
+                log(Log.INFO, TAG,
+                        "Captured interrupted Xiaomi return-home CLOSE"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", type=" + session.nativeAnimationType
+                                + ", animationIdentity="
+                                + shortObject(session.nativeAnimationIdentity)
+                                + ", windowElement=" + shortObject(windowElement));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to verify interrupted Xiaomi return-home CLOSE"
+                                + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        void onNativeCloseSetToOld(Object stateManager, Object windowElement) {
+            ReturnHomeCloseInterruptionToken token = pendingCloseInterruption.get();
+            if (token == null || token.stateManager != stateManager
+                    || token.windowElement != windowElement) {
+                return;
+            }
+            ReturnHomeSession session = token.session;
+            try {
+                Object currentElement = invokeAnyMethod(
+                        stateManager, "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        windowElement, "getAnimSymbol", new Object[0]);
+                boolean surfaceCanceled = Boolean.TRUE.equals(
+                        readField(windowElement, "mSurfaceCanceled"));
+                boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                        readField(windowElement, "mSurfaceCanceledExecute"));
+                boolean canceled = Boolean.TRUE.equals(
+                        readField(windowElement, "mCanceled"));
+                boolean listenerDisabled = Boolean.TRUE.equals(
+                        readField(windowElement, "mDisableStateManagerListener"));
+                boolean nativeCallbackConsumed =
+                        readField(windowElement, "mShellTransitionCallback") == null;
+                boolean valid = currentSession == session
+                        && session.finished.get() == 0
+                        && session.generation == token.generation
+                        && session.stateManager == stateManager
+                        && session.nativeWindowElement == windowElement
+                        && session.nativeAnimationStarted
+                        && session.nativeAnimationIdentity == token.animationIdentity
+                        && currentElement == windowElement
+                        && currentIdentity == token.animationIdentity
+                        && isReturnHomeNativeCloseType(session.nativeAnimationType)
+                        && surfaceCanceled && surfaceCancelExecuted && canceled
+                        && listenerDisabled && nativeCallbackConsumed;
+                if (!valid) {
+                    pendingCloseInterruption.compareAndSet(token, null);
+                    log(Log.WARN, TAG,
+                            "Rejected interrupted return-home completion boundary"
+                                    + ", generation=" + session.generation
+                                    + ", currentSession=" + (currentSession == session)
+                                    + ", finished=" + session.finished.get()
+                                    + ", sameElement=" + (currentElement == windowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity == token.animationIdentity)
+                                    + ", surfaceCanceled=" + surfaceCanceled
+                                    + ", surfaceCancelExecuted="
+                                    + surfaceCancelExecuted
+                                    + ", canceled=" + canceled
+                                    + ", listenerDisabled=" + listenerDisabled
+                                    + ", nativeCallbackConsumed="
+                                    + nativeCallbackConsumed
+                                    + ", type=" + session.nativeAnimationType);
+                    return;
+                }
+                if (!pendingCloseInterruption.compareAndSet(token, null)) {
+                    return;
+                }
+                log(Log.INFO, TAG,
+                        "Accepted interrupted Xiaomi return-home completion boundary"
+                                + ", generation=" + session.generation
+                                + ", type=" + session.nativeAnimationType
+                                + ", animationIdentity="
+                                + shortObject(token.animationIdentity)
+                                + ", windowElement=" + shortObject(windowElement));
+                // Xiaomi has completed the exact old CLOSE callback, while its outer icon-click
+                // callback has not yet created or requested the new FastLaunch OPEN. Release the
+                // prepared Shell transition here so its finish transaction cannot land on top of
+                // that new OPEN. The old surface is already cancelled, so never restore preview.
+                finishSession(session, "nativeCloseInterruptedForLauncherOpen", false);
+            } catch (Throwable throwable) {
+                pendingCloseInterruption.compareAndSet(token, null);
+                log(Log.WARN, TAG,
+                        "Failed to verify interrupted return-home completion boundary"
+                                + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        ReturnHomeDirectCancelToken prepareNativeDirectCancel(
+                Object windowElement, Object[] args) throws Throwable {
+            if (args == null || args.length != 5
+                    || !MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(args[0])
+                    || !Boolean.FALSE.equals(args[1])
+                    || args[2] == null || args[3] != null || args[4] != null) {
+                return null;
+            }
+            Class<?> callbackClass = Class.forName(
+                    MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
+            Object originalCallback = args[2];
+            if (!callbackClass.isInstance(originalCallback)) {
+                return null;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || session.stateManager == null
+                    || session.nativeWindowElement != windowElement
+                    || session.nativeAnimationIdentity == null
+                    || !isReturnHomeNativeCloseType(session.nativeAnimationType)) {
+                return null;
+            }
+
+            Object stateManager = session.stateManager;
+            Object currentElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object pendingReference = invokeAnyMethod(
+                    stateManager, "getPendingIconViewWeakRef", new Object[0]);
+            Object pendingIcon = pendingReference instanceof WeakReference<?>
+                    ? ((WeakReference<?>) pendingReference).get() : null;
+            boolean samePendingIcon = pendingIcon instanceof View
+                    && Boolean.TRUE.equals(invokeAnyMethod(windowElement,
+                    "isSameElement", new Object[]{pendingIcon}));
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            boolean reusable = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isReusefulAnimRunning", new Object[0]));
+            boolean mainAnimPending = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "mainAnimNoFinishClear", new Object[0]));
+            boolean validSurface = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "hasValidSurface", new Object[0]));
+            boolean canceled = Boolean.TRUE.equals(
+                    readField(windowElement, "mCanceled"));
+            boolean surfaceCanceled = Boolean.TRUE.equals(
+                    readField(windowElement, "mSurfaceCanceled"));
+            boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                    readField(windowElement, "mSurfaceCanceledExecute"));
+            boolean listenerDisabled = Boolean.TRUE.equals(
+                    readField(windowElement, "mDisableStateManagerListener"));
+            boolean useShellListener = Boolean.TRUE.equals(
+                    readField(windowElement, "mUseShellAnimListener"));
+            boolean couldExecuteShellEnd = Boolean.TRUE.equals(
+                    readField(windowElement, "couldExecuteShellAnimEnd"));
+            boolean callbackClear =
+                    readField(windowElement, "mShellTransitionCallback") == null;
+            boolean valid = currentSession == session
+                    && session.generation > 0L
+                    && session.stateManager == stateManager
+                    && currentElement == windowElement
+                    && currentIdentity == session.nativeAnimationIdentity
+                    && session.nativeAnimationType.equals(currentType)
+                    && samePendingIcon && running && !reusable
+                    && mainAnimPending && validSurface
+                    && !canceled && !surfaceCanceled && !surfaceCancelExecuted
+                    && !listenerDisabled && useShellListener
+                    && couldExecuteShellEnd && callbackClear;
+            if (!valid) {
+                log(Log.WARN, TAG,
+                        "Rejected direct same-icon Xiaomi CLOSE handoff"
+                                + ", generation=" + session.generation
+                                + ", currentSession=" + (currentSession == session)
+                                + ", sameElement=" + (currentElement == windowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity == session.nativeAnimationIdentity)
+                                + ", type=" + currentType
+                                + ", expectedType=" + session.nativeAnimationType
+                                + ", samePendingIcon=" + samePendingIcon
+                                + ", running=" + running
+                                + ", reusable=" + reusable
+                                + ", mainAnimPending=" + mainAnimPending
+                                + ", validSurface=" + validSurface
+                                + ", canceled=" + canceled
+                                + ", surfaceCanceled=" + surfaceCanceled
+                                + ", surfaceCancelExecuted="
+                                + surfaceCancelExecuted
+                                + ", listenerDisabled=" + listenerDisabled
+                                + ", useShellListener=" + useShellListener
+                                + ", couldExecuteShellEnd="
+                                + couldExecuteShellEnd
+                                + ", callbackClear=" + callbackClear);
+                return null;
+            }
+
+            ReturnHomeDirectCancelToken token =
+                    new ReturnHomeDirectCancelToken(session, stateManager,
+                            windowElement, session.nativeAnimationIdentity,
+                            pendingIcon, originalCallback);
+            Object wrappedCallback = Proxy.newProxyInstance(
+                    callbackClass.getClassLoader(),
+                    new Class<?>[]{callbackClass},
+                    (proxy, method, invocationArgs) ->
+                            invokeNativeDirectCancelCallback(
+                                    token, proxy, method, invocationArgs));
+            token.wrappedCallback = wrappedCallback;
+            if (!pendingDirectCancel.compareAndSet(null, token)) {
+                log(Log.WARN, TAG,
+                        "Rejected overlapping direct same-icon Xiaomi CLOSE handoff"
+                                + ", generation=" + session.generation);
+                return null;
+            }
+            Runnable cleanupGuard = () -> {
+                int phase = token.phase.get();
+                if (phase == ReturnHomeDirectCancelToken.PHASE_PENDING) {
+                    invalidateNativeDirectCancel(
+                            token, "callbackTimeout", false);
+                } else if (phase
+                        == ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED) {
+                    cleanupNativeDirectCancel(
+                            token, "directCancelCleanupGuard");
+                }
+            };
+            token.cleanupGuard = cleanupGuard;
+            handler.postDelayed(cleanupGuard,
+                    RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS);
+            log(Log.INFO, TAG,
+                    "Prepared direct same-icon Xiaomi CLOSE handoff"
+                            + ", generation=" + session.generation
+                            + ", type=" + currentType
+                            + ", animationIdentity="
+                            + shortObject(token.animationIdentity)
+                            + ", windowElement=" + shortObject(windowElement)
+                            + ", pendingIcon=" + shortObject(pendingIcon));
+            return token;
+        }
+
+        private Object invokeNativeDirectCancelCallback(
+                ReturnHomeDirectCancelToken token, Object proxy,
+                Method method, Object[] invocationArgs) throws Throwable {
+            if (method.getDeclaringClass() == Object.class) {
+                if ("toString".equals(method.getName())) {
+                    return "PredictiveReturnHomeDirectCancelCallback{"
+                            + shortObject(token.originalCallback) + "}";
+                }
+                if ("hashCode".equals(method.getName())) {
+                    return Integer.valueOf(System.identityHashCode(proxy));
+                }
+                if ("equals".equals(method.getName())) {
+                    return Boolean.valueOf(invocationArgs != null
+                            && invocationArgs.length == 1
+                            && proxy == invocationArgs[0]);
+                }
+            }
+            if ("onFinish".equals(method.getName())
+                    && method.getParameterCount() == 0) {
+                try {
+                    acceptNativeDirectCancelCallback(token);
+                } catch (Throwable throwable) {
+                    invalidateNativeDirectCancel(
+                            token, "callbackVerificationFailed", false);
+                    log(Log.WARN, TAG,
+                            "Failed direct same-icon Xiaomi CLOSE callback boundary"
+                                    + ", generation=" + token.generation,
+                            throwable);
+                }
+            }
+            try {
+                return method.invoke(token.originalCallback, invocationArgs);
+            } catch (InvocationTargetException exception) {
+                Throwable cause = exception.getCause();
+                throw cause == null ? exception : cause;
+            }
+        }
+
+        private void acceptNativeDirectCancelCallback(
+                ReturnHomeDirectCancelToken token) throws Throwable {
+            if (pendingDirectCancel.get() != token
+                    || token.phase.get()
+                    != ReturnHomeDirectCancelToken.PHASE_PENDING) {
+                return;
+            }
+            ReturnHomeSession session = token.session;
+            Object currentElement = invokeAnyMethod(
+                    token.stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    token.windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    token.windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object pendingReference = invokeAnyMethod(
+                    token.stateManager, "getPendingIconViewWeakRef", new Object[0]);
+            Object pendingIcon = pendingReference instanceof WeakReference<?>
+                    ? ((WeakReference<?>) pendingReference).get() : null;
+            boolean samePendingIcon = pendingIcon == token.pendingIcon
+                    && pendingIcon instanceof View
+                    && Boolean.TRUE.equals(invokeAnyMethod(token.windowElement,
+                    "isSameElement", new Object[]{pendingIcon}));
+            boolean canceled = Boolean.TRUE.equals(
+                    readField(token.windowElement, "mCanceled"));
+            boolean surfaceCanceled = Boolean.TRUE.equals(
+                    readField(token.windowElement, "mSurfaceCanceled"));
+            boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                    readField(token.windowElement, "mSurfaceCanceledExecute"));
+            boolean listenerDisabled = Boolean.TRUE.equals(
+                    readField(token.windowElement,
+                            "mDisableStateManagerListener"));
+            boolean useShellListener = Boolean.TRUE.equals(
+                    readField(token.windowElement, "mUseShellAnimListener"));
+            boolean couldExecuteShellEnd = Boolean.TRUE.equals(
+                    readField(token.windowElement, "couldExecuteShellAnimEnd"));
+            boolean callbackConsumed =
+                    readField(token.windowElement,
+                            "mShellTransitionCallback") == null;
+            boolean validSurface = Boolean.TRUE.equals(invokeAnyMethod(
+                    token.windowElement, "hasValidSurface", new Object[0]));
+            boolean valid = currentSession == session
+                    && session.finished.get() == 0
+                    && session.generation == token.generation
+                    && session.stateManager == token.stateManager
+                    && session.nativeWindowElement == token.windowElement
+                    && session.nativeAnimationStarted
+                    && session.nativeAnimationIdentity == token.animationIdentity
+                    && currentElement == token.windowElement
+                    && currentIdentity == token.animationIdentity
+                    && session.nativeAnimationType.equals(currentType)
+                    && isReturnHomeNativeCloseType(currentType)
+                    && samePendingIcon && canceled
+                    && !surfaceCanceled && !surfaceCancelExecuted
+                    && !listenerDisabled && !useShellListener
+                    && !couldExecuteShellEnd && callbackConsumed
+                    && validSurface;
+            if (!valid) {
+                invalidateNativeDirectCancel(token,
+                        "callbackStateMismatch", false);
+                log(Log.WARN, TAG,
+                        "Rejected direct same-icon Xiaomi CLOSE callback boundary"
+                                + ", generation=" + session.generation
+                                + ", currentSession=" + (currentSession == session)
+                                + ", finished=" + session.finished.get()
+                                + ", sameElement="
+                                + (currentElement == token.windowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity == token.animationIdentity)
+                                + ", type=" + currentType
+                                + ", samePendingIcon=" + samePendingIcon
+                                + ", canceled=" + canceled
+                                + ", surfaceCanceled=" + surfaceCanceled
+                                + ", surfaceCancelExecuted="
+                                + surfaceCancelExecuted
+                                + ", listenerDisabled=" + listenerDisabled
+                                + ", useShellListener=" + useShellListener
+                                + ", couldExecuteShellEnd="
+                                + couldExecuteShellEnd
+                                + ", callbackConsumed=" + callbackConsumed
+                                + ", validSurface=" + validSurface);
+                return;
+            }
+            if (!token.phase.compareAndSet(
+                    ReturnHomeDirectCancelToken.PHASE_PENDING,
+                    ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED)) {
+                return;
+            }
+            if (!session.finished.compareAndSet(0, 1)) {
+                token.phase.set(ReturnHomeDirectCancelToken.PHASE_CLEANED);
+                pendingDirectCancel.compareAndSet(token, null);
+                Runnable guard = token.cleanupGuard;
+                if (guard != null) {
+                    handler.removeCallbacks(guard);
+                }
+                return;
+            }
+            freezePreviewProgress(session, "directSameIconCancel");
+            invalidatePendingCloseInterruption(
+                    session, "directSameIconCancel");
+            Runnable timeout = session.nativeTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            Runnable cleanupGuard = token.cleanupGuard;
+            if (cleanupGuard != null) {
+                // The pending callback timeout starts at hook preparation. Once Xiaomi
+                // consumes the callback, restart the full cleanup guard from this verified
+                // Shell-finish boundary so a late callback cannot shorten target lifetime.
+                handler.removeCallbacks(cleanupGuard);
+                handler.postDelayed(cleanupGuard,
+                        RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS);
+            }
+            notifyRemoteAnimationFinished(session.finishedCallback,
+                    "nativeDirectCancelBeforeLauncherOpen");
+            log(Log.INFO, TAG,
+                    "Finished Shell runner before direct same-icon Xiaomi OPEN"
+                            + ", generation=" + session.generation
+                            + ", type=" + currentType
+                            + ", animationIdentity="
+                            + shortObject(token.animationIdentity)
+                            + ", windowElement="
+                            + shortObject(token.windowElement));
+        }
+
+        void invalidateNativeDirectCancel(ReturnHomeDirectCancelToken token,
+                                          String reason,
+                                          boolean cleanupAccepted) {
+            if (token == null) {
+                return;
+            }
+            int phase = token.phase.get();
+            if (phase == ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED) {
+                if (cleanupAccepted) {
+                    cleanupNativeDirectCancel(token, reason);
+                }
+                return;
+            }
+            if (phase != ReturnHomeDirectCancelToken.PHASE_PENDING
+                    || !token.phase.compareAndSet(
+                    ReturnHomeDirectCancelToken.PHASE_PENDING,
+                    ReturnHomeDirectCancelToken.PHASE_CLEANED)) {
+                return;
+            }
+            pendingDirectCancel.compareAndSet(token, null);
+            Runnable guard = token.cleanupGuard;
+            if (guard != null) {
+                handler.removeCallbacks(guard);
+            }
+            log(Log.INFO, TAG,
+                    "Invalidated direct same-icon Xiaomi CLOSE handoff"
+                            + ", generation=" + token.generation
+                            + ", reason=" + reason);
+        }
+
+        private void invalidatePendingDirectCancel(
+                ReturnHomeSession session, String reason,
+                boolean cleanupAccepted) {
+            ReturnHomeDirectCancelToken token = pendingDirectCancel.get();
+            if (token == null
+                    || (session != null && token.session != session)) {
+                return;
+            }
+            invalidateNativeDirectCancel(token, reason, cleanupAccepted);
+        }
+
+        private void cleanupNativeDirectCancel(
+                ReturnHomeDirectCancelToken token, String reason) {
+            if (token == null || !token.phase.compareAndSet(
+                    ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED,
+                    ReturnHomeDirectCancelToken.PHASE_CLEANED)) {
+                return;
+            }
+            pendingDirectCancel.compareAndSet(token, null);
+            Runnable guard = token.cleanupGuard;
+            if (guard != null) {
+                handler.removeCallbacks(guard);
+            }
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                cleanupFinishedSession(token.session, reason, false);
+            } else {
+                handler.post(() -> cleanupFinishedSession(
+                        token.session, reason, false));
+            }
+        }
+
+        private void finishNativeDirectCancelOnAnimationEnd(
+                Object listener, Object animationIdentity) {
+            ReturnHomeDirectCancelToken token = pendingDirectCancel.get();
+            if (token == null
+                    || token.phase.get()
+                    != ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED
+                    || token.animationIdentity != animationIdentity) {
+                return;
+            }
+            try {
+                Object callbackStateManager = readField(listener, "this$0");
+                Object currentIdentity = invokeAnyMethod(
+                        token.windowElement, "getAnimSymbol", new Object[0]);
+                boolean valid = token.session.finished.get() == 1
+                        && token.session.stateManager == token.stateManager
+                        && token.session.nativeWindowElement == token.windowElement
+                        && token.session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && callbackStateManager == token.stateManager
+                        && currentIdentity == token.animationIdentity
+                        && isReturnHomeNativeCloseType(
+                        token.session.nativeAnimationType);
+                if (!valid) {
+                    log(Log.WARN, TAG,
+                            "Rejected direct same-icon Xiaomi CLOSE end"
+                                    + ", generation=" + token.generation
+                                    + ", finished="
+                                    + token.session.finished.get()
+                                    + ", sameStateManager="
+                                    + (callbackStateManager
+                                    == token.stateManager)
+                                    + ", sameIdentity="
+                                    + (currentIdentity
+                                    == token.animationIdentity)
+                                    + ", type="
+                                    + token.session.nativeAnimationType);
+                    return;
+                }
+                log(Log.INFO, TAG,
+                        "Accepted direct same-icon Xiaomi CLOSE end"
+                                + ", generation=" + token.generation
+                                + ", type="
+                                + token.session.nativeAnimationType
+                                + ", animationIdentity="
+                                + shortObject(token.animationIdentity));
+                handler.post(() -> cleanupNativeDirectCancel(
+                        token, "nativeDirectCancelAnimationEnd"));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to verify direct same-icon Xiaomi CLOSE end"
+                                + ", generation=" + token.generation,
+                        throwable);
+            }
+        }
+
+        private boolean isReturnHomeNativeCloseType(String typeName) {
+            return "CLOSE_TO_HOME".equals(typeName)
+                    || "CLOSE_TO_HOME_CENTER".equals(typeName)
+                    || "CLOSE_TO_ELEMENT".equals(typeName);
+        }
+
+        private void invalidatePendingCloseInterruption(
+                ReturnHomeSession session, String reason) {
+            while (true) {
+                ReturnHomeCloseInterruptionToken token =
+                        pendingCloseInterruption.get();
+                if (token == null || (session != null && token.session != session)) {
+                    return;
+                }
+                if (pendingCloseInterruption.compareAndSet(token, null)) {
+                    log(Log.INFO, TAG,
+                            "Invalidated interrupted return-home token"
+                                    + ", generation=" + token.generation
+                                    + ", reason=" + reason);
+                    return;
+                }
+            }
+        }
+
+        private void verifyNativeAnimationStarted(ReturnHomeSession session,
+                                                  Object stateManager,
+                                                  Object windowElement,
+                                                  Object animationIdentity) {
+            if (currentSession != session || session.finished.get() != 0
+                    || session.nativeAnimationIdentity != animationIdentity) {
+                return;
+            }
+            try {
+                Object currentElement = invokeAnyMethod(stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(windowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object currentType = invokeAnyMethod(windowElement,
+                        "getCurrentAnimType", new Object[0]);
+                String typeName = currentType instanceof Enum<?>
+                        ? ((Enum<?>) currentType).name() : String.valueOf(currentType);
+                boolean closeToHome = isReturnHomeNativeCloseType(typeName);
+                boolean running = Boolean.TRUE.equals(invokeAnyMethod(windowElement,
+                        "isAnimRunning", new Object[0]));
+                if (currentElement == windowElement
+                        && currentIdentity == animationIdentity
+                        && closeToHome && running) {
+                    session.nativeAnimationStarted = true;
+                    session.nativeAnimationType = typeName;
+                    log(Log.INFO, TAG, "Verified Xiaomi predictive return post-commit"
+                            + ", generation=" + session.generation
+                            + ", type=" + typeName
+                            + ", animationIdentity="
+                            + shortObject(animationIdentity));
+                } else {
+                    log(Log.WARN, TAG, "Xiaomi CLOSE start did not settle as expected"
+                            + ", generation=" + session.generation
+                            + ", sameElement=" + (currentElement == windowElement)
+                            + ", sameIdentity="
+                            + (currentIdentity == animationIdentity)
+                            + ", type=" + typeName
+                            + ", running=" + running);
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to verify Xiaomi CLOSE animation start"
+                        + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        void onNativeAnimationEnd(Object listener, Object animationIdentity) {
+            finishNativeDirectCancelOnAnimationEnd(listener, animationIdentity);
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeAnimationStarted
+                    || session.nativeAnimationIdentity != animationIdentity) {
+                return;
+            }
+            try {
+                Object callbackStateManager = readField(listener, "this$0");
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement, "getAnimSymbol", new Object[0]);
+                String typeName = session.nativeAnimationType;
+                boolean closeToHome = isReturnHomeNativeCloseType(typeName);
+                if (callbackStateManager != session.stateManager
+                        || currentIdentity != animationIdentity
+                        || !closeToHome) {
+                    log(Log.WARN, TAG, "Rejected mismatched Xiaomi CLOSE end"
+                            + ", generation=" + session.generation
+                            + ", sameStateManager="
+                            + (callbackStateManager == session.stateManager)
+                            + ", sameIdentity="
+                            + (currentIdentity == animationIdentity)
+                            + ", type=" + typeName);
+                    return;
+                }
+                log(Log.INFO, TAG, "Accepted Xiaomi predictive return end"
+                        + ", generation=" + session.generation
+                        + ", type=" + typeName
+                        + ", animationIdentity=" + shortObject(animationIdentity));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to verify Xiaomi CLOSE animation end"
+                        + ", generation=" + session.generation, throwable);
+                return;
+            }
+            // The hooked listener's original body may already replace StateManager's current
+            // element before this after-hook runs. The stored WindowElement and exact animation
+            // symbol still identify the completed CLOSE; queue once behind the remaining
+            // listener cleanup before releasing Shell's prepared animation.
+            handler.post(() -> {
+                if (currentSession == session && session.finished.get() == 0
+                        && session.nativeAnimationIdentity == animationIdentity) {
+                    finishSession(session, "nativeAnimationEnd", false);
+                }
+            });
+        }
+
+        private void finishSession(ReturnHomeSession session, String reason,
+                                   boolean restoreSurface) {
+            if (session == null || !session.finished.compareAndSet(0, 1)) {
+                return;
+            }
+            freezePreviewProgress(session, "finish:" + reason);
+            invalidatePendingCloseInterruption(session, "finish:" + reason);
+            invalidatePendingDirectCancel(
+                    session, "finish:" + reason, false);
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                notifyRemoteAnimationFinished(session.finishedCallback, reason);
+                handler.post(() -> cleanupFinishedSession(
+                        session, reason, restoreSurface));
+                return;
+            }
+            if (restoreSurface && session.previewInitialized) {
+                session.currentRect.set(session.startRect);
+                session.currentCornerRadius = session.startCornerRadius;
+                applyPreviewTransform(session, session.currentRect,
+                        session.currentCornerRadius, false);
+            }
+            notifyRemoteAnimationFinished(session.finishedCallback, reason);
+            cleanupFinishedSession(session, reason, false);
+        }
+
+        private void cleanupFinishedSession(ReturnHomeSession session, String reason,
+                                            boolean restoreSurface) {
+            if (session == null || !session.cleaned.compareAndSet(0, 1)) {
+                return;
+            }
+            freezePreviewProgress(session, "cleanup:" + reason);
+            if (restoreSurface && session.previewInitialized) {
+                session.currentRect.set(session.startRect);
+                session.currentCornerRadius = session.startCornerRadius;
+                applyPreviewTransform(session, session.currentRect,
+                        session.currentCornerRadius, false);
+            }
+            Runnable timeout = session.nativeTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            Runnable cancelFinishGuard = session.cancelFinishGuard;
+            if (cancelFinishGuard != null) {
+                handler.removeCallbacks(cancelFinishGuard);
+            }
+            ValueAnimator animator = session.cancelAnimator;
+            if (animator != null && animator.isRunning()) {
+                animator.cancel();
+            }
+            restoreNativePreviewBlur(session, "cleanup:" + reason);
+            restoreNativePreviewBackdrop(session, "cleanup:" + reason);
+            MiuiHomeLocalHandoffToken handoffToken = session.localHandoffToken;
+            if (handoffToken != null) {
+                miuiHomeLocalHandoffToken.compareAndSet(handoffToken, null);
+            }
+            if (session.nativeStatusPublished
+                    && session.nativeWindowAnimContext != null) {
+                try {
+                    Object currentStatus = invokeAnyMethod(
+                            session.nativeWindowAnimContext,
+                            "getLocalAnimLastStatus", new Object[0]);
+                    if (currentStatus == session.nativePublishedStatus) {
+                        invokeAnyMethod(session.nativeWindowAnimContext,
+                                "setLocalAnimLastStatus", new Object[]{null});
+                    } else if (currentStatus != null) {
+                        log(Log.INFO, TAG, "Preserved replacement Xiaomi handoff status"
+                                + ", generation=" + session.generation
+                                + ", published="
+                                + shortObject(session.nativePublishedStatus)
+                                + ", current=" + shortObject(currentStatus));
+                    }
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "Failed to clear unused Xiaomi handoff status"
+                            + ", generation=" + session.generation, throwable);
+                }
+            }
+            session.nativeStatusPublished = false;
+            session.nativePublishedStatus = null;
+            session.nativeWindowAnimContext = null;
+            session.localHandoffToken = null;
+            try {
+                session.transaction.close();
+            } catch (Throwable ignored) {
+            }
+            if (session.previewLeash != null
+                    && session.previewLeash != session.closingLeash) {
+                try {
+                    session.previewLeash.release();
+                } catch (Throwable ignored) {
+                }
+            }
+            session.previewTarget = null;
+            session.previewLeash = null;
+            releaseTargets(session.apps);
+            releaseTargets(session.wallpapers);
+            releaseTargets(session.nonApps);
+            if (currentSession == session) {
+                currentSession = null;
+            }
+            log(Log.INFO, TAG, "Finished MiuiHome return-to-home runner"
+                    + ", generation=" + session.generation
+                    + ", reason=" + reason
+                    + ", nativeHandoff=" + session.nativeHandoffStarted
+                    + ", nativeStarted=" + session.nativeAnimationStarted);
+        }
+
+        private void notifyRemoteAnimationFinished(IBinder callback, String reason) {
+            if (callback == null) {
+                return;
+            }
+            Parcel data = Parcel.obtain();
+            try {
+                data.writeInterfaceToken(REMOTE_ANIMATION_FINISHED_DESCRIPTOR);
+                callback.transact(1, data, null, IBinder.FLAG_ONEWAY);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to finish Shell remote animation"
+                        + ", reason=" + reason, throwable);
+            } finally {
+                data.recycle();
+            }
+        }
+
+        private Rect resolveRemoteAnimationBounds(Object target) {
+            try {
+                Object configuration = readField(target, "windowConfiguration");
+                Object bounds = invokeAnyMethod(configuration,
+                        "getMaxBounds", new Object[0]);
+                if (bounds instanceof Rect && !((Rect) bounds).isEmpty()) {
+                    return trimRemoteAnimationContentInsets(
+                            target, new Rect((Rect) bounds));
+                }
+            } catch (Throwable ignored) {
+            }
+            for (String fieldName : new String[]{
+                    "screenSpaceBounds", "startBounds", "sourceContainerBounds",
+                    "localBounds"}) {
+                try {
+                    Object value = readField(target, fieldName);
+                    if (value instanceof Rect && !((Rect) value).isEmpty()) {
+                        return trimRemoteAnimationContentInsets(
+                                target, new Rect((Rect) value));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return null;
+        }
+
+        private Rect trimRemoteAnimationContentInsets(Object target, Rect bounds) {
+            try {
+                Object value = readField(target, "contentInsets");
+                if (value instanceof Rect) {
+                    int bottomInset = Math.max(0, ((Rect) value).bottom);
+                    if (bottomInset > 0 && bottomInset < bounds.height()) {
+                        // Launcher3's return-to-home preview excludes only the navigation
+                        // inset from the closing app's starting content rectangle.
+                        bounds.bottom -= bottomInset;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            return bounds;
+        }
+
+        private float resolveMiuiWindowCornerRadius(Object target) {
+            try {
+                Class<?> radiusClass = Class.forName(
+                        MIUI_HOME_WINDOW_CORNER_RADIUS_UTIL, false, classLoader);
+                Method method = radiusClass.getDeclaredMethod("getCornerRadius");
+                method.setAccessible(true);
+                Object value = method.invoke(null);
+                if (value instanceof Number) {
+                    return Math.max(0.0f, ((Number) value).floatValue());
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to resolve Xiaomi window corner radius",
+                        throwable);
+            }
+            return Math.max(0.0f, readFloatFieldOrDefault(
+                    target, "cornerRadius", 0.0f));
+        }
+
+        private void releaseTargets(Object[] targets) {
+            if (targets == null) {
+                return;
+            }
+            for (Object target : targets) {
+                try {
+                    Object leash = readField(target, "leash");
+                    if (leash instanceof SurfaceControl) {
+                        ((SurfaceControl) leash).release();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        private float dp(float value) {
+            Context currentContext = context;
+            float density = currentContext == null ? 1.0f
+                    : currentContext.getResources().getDisplayMetrics().density;
+            return value * Math.max(0.1f, density);
+        }
+
+        private float clamp01(float value) {
+            return Math.max(0.0f, Math.min(1.0f, value));
+        }
+
+        private float lerp(float start, float end, float progress) {
+            return start + ((end - start) * progress);
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private BackMotionEvent readBackMotionEvent(Parcel parcel) throws Exception {
+            Parcelable.Creator creator = (Parcelable.Creator) readStaticField(
+                    BackMotionEvent.class, "CREATOR");
+            return (BackMotionEvent) parcel.readTypedObject(creator);
+        }
+
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private Object[] readRemoteAnimationTargets(Parcel parcel) throws Exception {
+            Parcelable.Creator creator = (Parcelable.Creator) readStaticField(
+                    android.view.RemoteAnimationTarget.class, "CREATOR");
+            return (Object[]) parcel.createTypedArray(creator);
+        }
+
+        private final class ReturnHomeBackCallback extends Binder implements IInterface {
+            ReturnHomeBackCallback() {
+                attachInterface(this, ON_BACK_INVOKED_CALLBACK_DESCRIPTOR);
+            }
+
+            @Override
+            public IBinder asBinder() {
+                return this;
+            }
+
+            @Override
+            protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                    throws android.os.RemoteException {
+                if (code == INTERFACE_TRANSACTION) {
+                    if (reply != null) {
+                        reply.writeString(ON_BACK_INVOKED_CALLBACK_DESCRIPTOR);
+                    }
+                    return true;
+                }
+                if (code >= 1 && code <= 6) {
+                    data.enforceInterface(ON_BACK_INVOKED_CALLBACK_DESCRIPTOR);
+                }
+                try {
+                    switch (code) {
+                        case 1: {
+                            BackMotionEvent event = readBackMotionEvent(data);
+                            data.enforceNoDataAvail();
+                            handler.post(() -> onBackStarted(event));
+                            return true;
+                        }
+                        case 2: {
+                            BackMotionEvent event = readBackMotionEvent(data);
+                            data.enforceNoDataAvail();
+                            handler.post(() -> onBackProgressed(event));
+                            return true;
+                        }
+                        case 3:
+                            data.enforceNoDataAvail();
+                            handler.post(MiuiHomeReturnHomeController.this::onBackCancelled);
+                            return true;
+                        case 4:
+                            data.enforceNoDataAvail();
+                            handler.post(MiuiHomeReturnHomeController.this::onBackInvoked);
+                            return true;
+                        case 5:
+                            data.readBoolean();
+                            data.enforceNoDataAvail();
+                            return true;
+                        case 6:
+                            data.readStrongBinder();
+                            data.enforceNoDataAvail();
+                            return true;
+                        default:
+                            return super.onTransact(code, data, reply, flags);
+                    }
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG, "MiuiHome back callback transact failed"
+                            + ", code=" + code, throwable);
+                    return true;
+                }
+            }
+        }
+
+        private final class ReturnHomeAnimationRunner extends Binder implements IInterface {
+            ReturnHomeAnimationRunner() {
+                attachInterface(this, REMOTE_ANIMATION_RUNNER_DESCRIPTOR);
+            }
+
+            @Override
+            public IBinder asBinder() {
+                return this;
+            }
+
+            @Override
+            protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
+                    throws android.os.RemoteException {
+                if (code == INTERFACE_TRANSACTION) {
+                    if (reply != null) {
+                        reply.writeString(REMOTE_ANIMATION_RUNNER_DESCRIPTOR);
+                    }
+                    return true;
+                }
+                if (code == 1 || code == 2) {
+                    data.enforceInterface(REMOTE_ANIMATION_RUNNER_DESCRIPTOR);
+                }
+                try {
+                    if (code == 1) {
+                        int transit = data.readInt();
+                        Object[] apps = readRemoteAnimationTargets(data);
+                        Object[] wallpapers = readRemoteAnimationTargets(data);
+                        Object[] nonApps = readRemoteAnimationTargets(data);
+                        IBinder finishedCallback = data.readStrongBinder();
+                        data.enforceNoDataAvail();
+                        handler.post(() -> onRemoteAnimationStart(transit, apps,
+                                wallpapers, nonApps, finishedCallback));
+                        return true;
+                    }
+                    if (code == 2) {
+                        data.enforceNoDataAvail();
+                        handler.post(
+                                MiuiHomeReturnHomeController.this::onRemoteAnimationCancelled);
+                        return true;
+                    }
+                    return super.onTransact(code, data, reply, flags);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG, "MiuiHome remote runner transact failed"
+                            + ", code=" + code, throwable);
+                    return true;
+                }
+            }
+        }
+
+        private final class ReturnHomeCloseInterruptionToken {
+            final long generation;
+            final ReturnHomeSession session;
+            final Object stateManager;
+            final Object windowElement;
+            final Object animationIdentity;
+
+            ReturnHomeCloseInterruptionToken(
+                    ReturnHomeSession session, Object stateManager,
+                    Object windowElement, Object animationIdentity) {
+                this.generation = session.generation;
+                this.session = session;
+                this.stateManager = stateManager;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+            }
+        }
+
+        private final class ReturnHomeDirectCancelToken {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_FINISHED_NOTIFIED = 1;
+            static final int PHASE_CLEANED = 2;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object stateManager;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object pendingIcon;
+            final Object originalCallback;
+            final AtomicInteger phase = new AtomicInteger(PHASE_PENDING);
+            volatile Object wrappedCallback;
+            volatile Runnable cleanupGuard;
+
+            ReturnHomeDirectCancelToken(
+                    ReturnHomeSession session, Object stateManager,
+                    Object windowElement, Object animationIdentity,
+                    Object pendingIcon, Object originalCallback) {
+                this.generation = session.generation;
+                this.session = session;
+                this.stateManager = stateManager;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+                this.pendingIcon = pendingIcon;
+                this.originalCallback = originalCallback;
+            }
+        }
+
+        private final class ReturnHomeSession {
+            final long generation;
+            final int transit;
+            final Object[] apps;
+            final Object[] wallpapers;
+            final Object[] nonApps;
+            final IBinder finishedCallback;
+            final AtomicInteger finished = new AtomicInteger();
+            final AtomicInteger cleaned = new AtomicInteger();
+            final Rect startRect = new Rect();
+            final RectF currentRect = new RectF();
+            final Matrix matrix = new Matrix();
+            final float[] matrixValues = new float[9];
+            final SurfaceControl.Transaction transaction =
+                    new SurfaceControl.Transaction();
+            final BackProgressAnimator progressAnimator;
+            final AtomicInteger progressReset = new AtomicInteger();
+            Object closingTarget;
+            Object openingTarget;
+            SurfaceControl closingLeash;
+            Object previewTarget;
+            SurfaceControl previewLeash;
+            String previewTargetSource;
+            boolean previewInitialized;
+            boolean previewLeashPrepared;
+            float initialTouchY;
+            int swipeEdge;
+            float progress;
+            float startCornerRadius;
+            float endCornerRadius;
+            float currentCornerRadius;
+            float previewProgressDistancePx;
+            float lastInputProgress;
+            float lastSmoothedProgress;
+            float lastLoggedPreviewProgress = -1.0f;
+            volatile boolean progressFrozen;
+            boolean progressAnimatorStarted;
+            boolean progressAnimatorFailed;
+            boolean progressInitialCallbackDelivered;
+            boolean frameTimelineTagFailed;
+            boolean nativeHandoffStarted;
+            boolean nativeStatusPublished;
+            boolean nativeAnimationStarted;
+            boolean nativeContinuationVerified;
+            Object stateManager;
+            Object nativeWindowElement;
+            Object nativeWindowAnimContext;
+            Object nativePublishedStatus;
+            Object nativeAnimationIdentity;
+            String nativeAnimationType;
+            MiuiHomeLocalHandoffToken localHandoffToken;
+            Runnable nativeTimeout;
+            Runnable cancelFinishGuard;
+            ValueAnimator cancelAnimator;
+            Object previewBackdropStateManager;
+            boolean previewBackdropProviderReturned;
+            boolean previewShortcutOwned;
+            Object previewShortcutElement;
+            View previewShortcutView;
+            Object previewShortcutAppParams;
+            Object previewShortcutHomeParams;
+            Object previewShortcutOwnedParams;
+            float previewShortcutAppAlpha;
+            float previewShortcutAppScaleX;
+            float previewShortcutAppScaleY;
+            boolean previewWallpaperOwned;
+            Object previewWallpaperElement;
+            Object previewWallpaperWorkspace;
+            Object previewWallpaperAppParams;
+            Object previewWallpaperHomeParams;
+            float previewWallpaperAppZoom;
+            float previewWallpaperHomeZoom;
+            int previewWallpaperModuleCommandDepth;
+            boolean previewWallpaperNativeAppSetObserved;
+            boolean previewWallpaperNativeHomeAnimObserved;
+            boolean previewBlurOwned;
+            boolean previewBlurProviderReturned;
+            Object previewBlurElement;
+            Object previewBlurView;
+            Object previewBlurAppParams;
+            Object previewBlurOwnedParams;
+            Object previewBlurHomeParams;
+            int previewBlurInitialRadius;
+            float previewBlurInitialDimming;
+            int previewBlurTargetRadius;
+            float previewBlurTargetDimming;
+            int previewBlurPublishedRadius;
+            float previewBlurPublishedDimming;
+            boolean previewBlurInterruptedHomeSpring;
+            int previewBlurDiagnosticStage = -1;
+
+            ReturnHomeSession(long generation, int transit, Object[] apps,
+                              Object[] wallpapers, Object[] nonApps,
+                              IBinder finishedCallback) {
+                this.generation = generation;
+                this.transit = transit;
+                this.apps = apps;
+                this.wallpapers = wallpapers;
+                this.nonApps = nonApps;
+                this.finishedCallback = finishedCallback;
+                BackProgressAnimator animator = null;
+                try {
+                    if (Looper.myLooper() != Looper.getMainLooper()) {
+                        throw new IllegalStateException(
+                                "BackProgressAnimator constructed outside main Looper");
+                    }
+                    animator = new BackProgressAnimator();
+                } catch (Throwable throwable) {
+                    progressAnimatorFailed = true;
+                    log(Log.WARN, TAG,
+                            "Could not create AOSP return-home progress smoothing"
+                                    + ", generation=" + generation,
+                            throwable);
+                }
+                this.progressAnimator = animator;
+            }
+
+            boolean resolveTargets() {
+                if (apps == null || apps.length == 0 || finishedCallback == null) {
+                    return false;
+                }
+                for (Object target : apps) {
+                    int mode = readIntFieldOrDefault(target, "mode", -1);
+                    if (mode == 1 && closingTarget == null) {
+                        closingTarget = target;
+                    } else if (mode == 0 && openingTarget == null) {
+                        openingTarget = target;
+                    }
+                }
+                if (closingTarget == null || openingTarget == null) {
+                    return false;
+                }
+                try {
+                    Object leash = readField(closingTarget, "leash");
+                    if (leash instanceof SurfaceControl
+                            && ((SurfaceControl) leash).isValid()) {
+                        closingLeash = (SurfaceControl) leash;
+                    }
+                } catch (Throwable ignored) {
+                }
+                return closingLeash != null;
+            }
         }
     }
 
@@ -4667,39 +9686,20 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return true;
             }
             dispatchToEdgePlugin(event, activeEdge);
-            updateActiveTracker(event.getRawX(), event.getRawY());
             float releaseDistance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            if (thresholdCrossed) {
-                dispatchExplicitProgress(releaseDistance);
-            }
             boolean trigger = allowTrigger
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
-            updateTriggerBack(trigger);
-            Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
-            if (tracker != null) {
-                if (startRemotePostCommitIfNeeded(tracker)) {
-                    log(Log.INFO, TAG, "SystemUI gesture driver delegated remote post-commit"
-                            + ", trigger=" + trigger + ", edge=" + activeEdge);
-                } else {
-                    invokeAnyMethod(controller, "invokeOrCancelBack", new Object[]{tracker});
-                    resetGestureState(tracker);
-                }
-            } else if (trigger) {
-                log(Log.WARN, TAG, "No active back tracker on release; using fallback back");
-                dispatchRealBack();
-                invokeAnyMethod(controller, "finishBackNavigation",
-                        new Object[]{Boolean.TRUE});
-                resetGestureState(null);
-            } else {
-                dispatchCancelBack();
-                invokeAnyMethod(controller, "finishBackNavigation",
-                        new Object[]{Boolean.FALSE});
-                resetGestureState(null);
-            }
-            log(Log.INFO, TAG, "SystemUI gesture driver finish, trigger=" + trigger
+            triggerBack = trigger;
+            boolean queued = queueShellReleaseTransaction(
+                    event.getRawX(), event.getRawY(), releaseDistance,
+                    thresholdCrossed, trigger, activeEdge,
+                    launcherOverviewGesture, launcherDrawerGesture);
+            log(queued ? Log.INFO : Log.ERROR, TAG,
+                    "SystemUI gesture driver release queued=" + queued
+                    + ", requestedTrigger=" + trigger
                     + ", recentsShellCallback=" + launcherOverviewGesture
                     + ", drawerShellCallback=" + launcherDrawerGesture
                     + ", edge=" + activeEdge);
@@ -5015,66 +10015,386 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private boolean startRemotePostCommitIfNeeded(Object tracker) {
+        private boolean queueShellReleaseTransaction(float rawX, float rawY,
+                                                       float releaseDistance,
+                                                       boolean dispatchFinalProgress,
+                                                       boolean requestedTrigger,
+                                                       int releaseEdge,
+                                                       boolean recentsCallback,
+                                                       boolean drawerCallback) {
+            Object releaseController = controller;
             try {
-                Object info = readField(controller, "mBackNavigationInfo");
-                if (!isPreparedRemoteAnimation(info)) {
-                    return false;
+                Object shellExecutor = readField(releaseController, "mShellExecutor");
+                if (!(shellExecutor instanceof Executor)) {
+                    throw new IllegalStateException("mShellExecutor is "
+                            + shortObject(shellExecutor));
                 }
-                writeField(controller, "mThresholdCrossed", Boolean.FALSE);
-                writeField(controller, "mPointersPilfered", Boolean.FALSE);
-                writeField(controller, "mBackGestureStarted", Boolean.FALSE);
-                setTrackerState(tracker, "FINISHED");
-                if (isRemoteAnimationWaiting(info)) {
-                    scheduleShellAnimationTimeout();
-                    log(Log.INFO, TAG, "SystemUI gesture driver waiting for remote animation start"
-                            + ", type=" + ((BackNavigationInfo) info).getType());
-                    return true;
-                }
-                invokeAnyMethod(controller, "startPostCommitAnimation", new Object[0]);
+                ((Executor) shellExecutor).execute(() -> finishGestureOnShellExecutor(
+                        releaseController, rawX, rawY, releaseDistance,
+                        dispatchFinalProgress, requestedTrigger, releaseEdge,
+                        recentsCallback, drawerCallback));
                 return true;
             } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to start remote post-commit path", throwable);
-                return false;
-            }
-        }
-
-        private boolean isRemoteAnimationWaiting(Object info) {
-            try {
-                int type = ((BackNavigationInfo) info).getType();
-                Object registry = readField(controller, "mShellBackAnimationRegistry");
-                Object definitions = readField(registry, "mAnimationDefinition");
-                Object runner = invokeAnyMethod(definitions, "get",
-                        new Object[]{Integer.valueOf(type)});
-                return runner != null
-                        && Boolean.TRUE.equals(readField(runner, "mWaitingAnimation"));
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to inspect remote animation waiting state",
+                // A release must never fall back to mutating controller/tracker state from
+                // the input Looper. Fail closed if the owner executor cannot be reached.
+                log(Log.ERROR, TAG, "Failed to queue complete Shell release transaction",
                         throwable);
                 return false;
             }
         }
 
-        private void scheduleShellAnimationTimeout() {
+        private void finishGestureOnShellExecutor(Object releaseController,
+                                                  float rawX, float rawY,
+                                                  float releaseDistance,
+                                                  boolean dispatchFinalProgress,
+                                                  boolean requestedTrigger,
+                                                  int releaseEdge,
+                                                  boolean recentsCallback,
+                                                  boolean drawerCallback) {
+            Object tracker = null;
             try {
-                Object executor = readField(controller, "mShellExecutor");
-                Object timeout = readField(controller, "mAnimationTimeoutRunnable");
-                invokeAnyMethod(executor, "executeDelayed",
-                        new Object[]{timeout, Long.valueOf(2000L)});
+                tracker = invokeAnyMethod(releaseController,
+                        "getActiveTracker", new Object[0]);
+                if (tracker != null) {
+                    applyProgressThresholds(tracker);
+                    ((BackTouchTracker) tracker).update(rawX, rawY);
+                }
+                // BackPanelController and the module driver can both have queued threshold
+                // changes. Make this release's requested value authoritative on the same
+                // executor, then read the tracker's actual value back.
+                invokeAnyMethod(releaseController, "setTriggerBack",
+                        new Object[]{Boolean.valueOf(requestedTrigger)});
+                tracker = invokeAnyMethod(releaseController,
+                        "getActiveTracker", new Object[0]);
+                if (tracker == null) {
+                    finishShellReleaseWithoutTracker(releaseController,
+                            recentsCallback, drawerCallback);
+                    return;
+                }
+                boolean actualTrigger = Boolean.TRUE.equals(invokeAnyMethod(
+                        tracker, "getTriggerBack", new Object[0]));
+                if (dispatchFinalProgress) {
+                    dispatchExplicitProgressOnShell(releaseController, tracker,
+                            releaseDistance);
+                }
+                Object infoObject = readField(releaseController,
+                        "mBackNavigationInfo");
+                BackNavigationInfo info = infoObject instanceof BackNavigationInfo
+                        ? (BackNavigationInfo) infoObject : null;
+                if (actualTrigger && info != null) {
+                    Object observer = readField(releaseController,
+                            "mBackTransitionObserver");
+                    Object focusedTaskId = invokeAnyMethod(info,
+                            "getFocusedTaskId", new Object[0]);
+                    if (!(focusedTaskId instanceof Number)) {
+                        throw new IllegalStateException("getFocusedTaskId returned "
+                                + shortObject(focusedTaskId));
+                    }
+                    writeField(observer, "mFocusedTaskId",
+                            Integer.valueOf(((Number) focusedTaskId).intValue()));
+                }
+                writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
+                writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
+                writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
+                setTrackerState(tracker, "FINISHED");
+
+                if (Boolean.TRUE.equals(readField(releaseController,
+                        "mPostCommitAnimationInProgress"))) {
+                    log(Log.WARN, TAG, "Shell release found an existing post-commit animation"
+                            + ", actualTrigger=" + actualTrigger
+                            + ", edge=" + releaseEdge);
+                    return;
+                }
+                if (info == null) {
+                    // Unlike stock's legacy fallback, a null navigation from this deferred
+                    // driver is cancelled and cleaned exactly once with no injected key.
+                    ((BackTouchTracker) tracker).reset();
+                    invokeAnyMethod(releaseController, "finishBackNavigation",
+                            new Object[]{Boolean.FALSE});
+                    log(Log.WARN, TAG, "Cancelled released gesture with null navigation"
+                            + ", requestedTrigger=" + requestedTrigger
+                            + ", actualTrigger=" + actualTrigger
+                            + ", edge=" + releaseEdge);
+                    return;
+                }
+                if (!info.isPrepareRemoteAnimation()) {
+                    invokeAnyMethod(releaseController, "invokeOrCancelBack",
+                            new Object[]{tracker});
+                    ((BackTouchTracker) tracker).reset();
+                    logShellReleaseResult(info, requestedTrigger, actualTrigger,
+                            "direct-callback", releaseEdge,
+                            recentsCallback, drawerCallback);
+                    return;
+                }
+
+                int runnerState = inspectRemoteRunnerState(releaseController, info);
+                if (runnerState == REMOTE_RUNNER_MISSING
+                        || runnerState == REMOTE_RUNNER_CANCELLED) {
+                    invokeAnyMethod(releaseController, "invokeOrCancelBack",
+                            new Object[]{tracker});
+                    ((BackTouchTracker) tracker).reset();
+                    logShellReleaseResult(info, requestedTrigger, actualTrigger,
+                            runnerState == REMOTE_RUNNER_MISSING
+                                    ? "runner-missing" : "runner-cancelled",
+                            releaseEdge, recentsCallback, drawerCallback);
+                    return;
+                }
+                if (runnerState == REMOTE_RUNNER_WAITING
+                        || runnerState == REMOTE_RUNNER_UNKNOWN) {
+                    scheduleShellAnimationTimeout(releaseController);
+                    logShellReleaseResult(info, requestedTrigger, actualTrigger,
+                            runnerState == REMOTE_RUNNER_WAITING
+                                    ? "runner-waiting" : "runner-unknown",
+                            releaseEdge, recentsCallback, drawerCallback);
+                    return;
+                }
+                if (!actualTrigger && info.getType() == TYPE_RETURN_TO_HOME) {
+                    prepareReturnHomeCancelTransitionCleanup(releaseController);
+                }
+                invokeAnyMethod(releaseController,
+                        "startPostCommitAnimation", new Object[0]);
+                logShellReleaseResult(info, requestedTrigger, actualTrigger,
+                        "post-commit", releaseEdge,
+                        recentsCallback, drawerCallback);
             } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to schedule Shell animation timeout", throwable);
+                log(Log.ERROR, TAG, "Complete Shell release transaction failed; cancelling",
+                        throwable);
+                cancelFailedShellRelease(releaseController, tracker);
             }
         }
 
-        private boolean isPreparedRemoteAnimation(Object info) {
-            if (info == null) {
-                return false;
-            }
+        private void prepareReturnHomeCancelTransitionCleanup(
+                Object releaseController) {
             try {
-                return ((BackNavigationInfo) info).isPrepareRemoteAnimation();
+                Object transitionHandler = readField(releaseController,
+                        "mBackTransitionHandler");
+                Object prepareOpen = readField(transitionHandler,
+                        "mPrepareOpenTransition");
+                Object prepareClose = readField(transitionHandler,
+                        "mClosePrepareTransition");
+                Object closeRequested = readField(transitionHandler,
+                        "mCloseTransitionRequested");
+                if (prepareOpen == null) {
+                    return;
+                }
+                boolean staleCloseRequested = prepareClose == null
+                        && Boolean.TRUE.equals(closeRequested);
+                if (staleCloseRequested) {
+                    // A preceding committed Xiaomi close can finish without entering Shell's
+                    // handleCloseTransition() callback, leaving this flag true after both
+                    // prepared-transition tokens are gone. If it survives into a later cancel,
+                    // stock finishBackAnimation() skips createClosePrepareTransition() and WM
+                    // keeps the previous composed navigation indefinitely. Clear only that
+                    // stale gate for this exact prepared return-home cancellation; stock
+                    // startPostCommitAnimation()/finishBackAnimation() still own restoreBackNavi.
+                    writeField(transitionHandler, "mCloseTransitionRequested",
+                            Boolean.FALSE);
+                }
+                log(Log.INFO, TAG,
+                        "Prepared stock return-to-home cancel transition cleanup"
+                                + ", staleCloseRequested="
+                                + staleCloseRequested
+                                + ", prepareOpen="
+                                + shortObject(prepareOpen)
+                                + ", prepareClose="
+                                + shortObject(prepareClose));
             } catch (Throwable throwable) {
-                return false;
+                // Keep stock cancellation moving even when a vendor field changes. Its normal
+                // timeout remains safer than finishing a prepared transition from this driver.
+                log(Log.WARN, TAG,
+                        "Failed to prepare return-to-home cancel transition cleanup",
+                        throwable);
             }
+        }
+
+        private void dispatchExplicitProgressOnShell(Object releaseController,
+                                                     Object tracker,
+                                                     float distance) {
+            try {
+                Object callback = readField(releaseController, "mActiveCallback");
+                float progress = Math.max(0.0f,
+                        Math.min(1.0f, distance
+                                / Math.max(1.0f, progressDistancePx())));
+                BackMotionEvent progressEvent =
+                        ((BackTouchTracker) tracker).createProgressEvent(progress);
+                invokeAnyMethod(releaseController, "dispatchOnBackProgressed",
+                        new Object[]{callback, progressEvent});
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to dispatch final progress on Shell executor",
+                        throwable);
+            }
+        }
+
+        private int inspectRemoteRunnerState(Object releaseController,
+                                             BackNavigationInfo info) {
+            try {
+                Object registry = readField(releaseController,
+                        "mShellBackAnimationRegistry");
+                Object definitions = readField(registry, "mAnimationDefinition");
+                Object runner = invokeAnyMethod(definitions, "get",
+                        new Object[]{Integer.valueOf(info.getType())});
+                if (runner == null) {
+                    return REMOTE_RUNNER_MISSING;
+                }
+                Object cancelled = readField(runner, "mAnimationCancelled");
+                if (!(cancelled instanceof Boolean)) {
+                    throw new IllegalStateException("mAnimationCancelled is "
+                            + shortObject(cancelled));
+                }
+                if (Boolean.TRUE.equals(cancelled)) {
+                    return REMOTE_RUNNER_CANCELLED;
+                }
+                Object waiting = readField(runner, "mWaitingAnimation");
+                if (!(waiting instanceof Boolean)) {
+                    throw new IllegalStateException("mWaitingAnimation is "
+                            + shortObject(waiting));
+                }
+                return Boolean.TRUE.equals(waiting)
+                        ? REMOTE_RUNNER_WAITING : REMOTE_RUNNER_READY;
+            } catch (Throwable throwable) {
+                // Unknown is deliberately not treated as missing/cancelled. The tracker stays
+                // FINISHED and Shell's own timeout is allowed to resolve the navigation.
+                log(Log.WARN, TAG, "Remote runner state is unknown; waiting for Shell timeout",
+                        throwable);
+                return REMOTE_RUNNER_UNKNOWN;
+            }
+        }
+
+        private void scheduleShellAnimationTimeout(Object releaseController) {
+            try {
+                Object executor = readField(releaseController, "mShellExecutor");
+                Object timeout = readField(releaseController,
+                        "mAnimationTimeoutRunnable");
+                invokeAnyMethod(executor, "executeDelayed",
+                        new Object[]{timeout, Long.valueOf(2000L)});
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to schedule required Shell animation timeout",
+                        throwable);
+            }
+        }
+
+        private void finishShellReleaseWithoutTracker(Object releaseController,
+                                                      boolean recentsCallback,
+                                                      boolean drawerCallback)
+                throws Exception {
+            writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
+            writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
+            writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
+            Object infoObject = readField(releaseController, "mBackNavigationInfo");
+            Object animationCallback = readField(releaseController,
+                    "mActiveCallback");
+            boolean hasSeparateAnimatorCallback = infoObject == null
+                    || (infoObject instanceof BackNavigationInfo
+                    && ((BackNavigationInfo) infoObject).isPrepareRemoteAnimation());
+            if (hasSeparateAnimatorCallback && animationCallback != null) {
+                try {
+                    // This is the phase-2 animator callback which startPostCommitAnimation()
+                    // would normally cancel before the core navigation completion below.
+                    invokeAnyMethod(releaseController, "tryDispatchOnBackCancelled",
+                            new Object[]{animationCallback});
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Failed to cancel animator callback without active tracker",
+                            throwable);
+                }
+            }
+            Object currentTracker = readField(releaseController, "mCurrentTracker");
+            Object queuedTracker = readField(releaseController, "mQueuedTracker");
+            Object completionTracker = currentTracker != null
+                    ? currentTracker : queuedTracker;
+            if (completionTracker != null) {
+                invokeAnyMethod(completionTracker, "setTriggerBack",
+                        new Object[]{Boolean.FALSE});
+                setTrackerState(completionTracker, "FINISHED");
+                // This atomically returns mBackAnimationFinishedCallback(false), cancels the
+                // real BackNavigationInfo callback, and calls finishBackNavigation(false).
+                invokeAnyMethod(releaseController, "invokeOrCancelBack",
+                        new Object[]{completionTracker});
+                ((BackTouchTracker) completionTracker).reset();
+                if (currentTracker != null && currentTracker != completionTracker) {
+                    ((BackTouchTracker) currentTracker).reset();
+                }
+                if (queuedTracker != null && queuedTracker != completionTracker) {
+                    ((BackTouchTracker) queuedTracker).reset();
+                }
+            } else {
+                finishShellReleaseWithoutAnyTracker(releaseController);
+            }
+            log(Log.WARN, TAG, "Cancelled Shell release without an active tracker"
+                    + ", recentsShellCallback=" + recentsCallback
+                    + ", drawerShellCallback=" + drawerCallback);
+        }
+
+        private void finishShellReleaseWithoutAnyTracker(Object releaseController)
+                throws Exception {
+            Object finishedCallback = readField(releaseController,
+                    "mBackAnimationFinishedCallback");
+            if (finishedCallback != null) {
+                try {
+                    invokeAnyMethod(finishedCallback, "onAnimationFinished",
+                            new Object[]{Boolean.FALSE});
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Failed false-completion without any Shell tracker",
+                            throwable);
+                } finally {
+                    writeField(releaseController,
+                            "mBackAnimationFinishedCallback", null);
+                }
+            }
+            Object infoObject = readField(releaseController, "mBackNavigationInfo");
+            if (infoObject instanceof BackNavigationInfo
+                    && !Boolean.TRUE.equals(readField(releaseController,
+                    "mRealCallbackInvoked"))) {
+                Object callback = ((BackNavigationInfo) infoObject)
+                        .getOnBackInvokedCallback();
+                if (callback != null) {
+                    invokeAnyMethod(releaseController,
+                            "tryDispatchOnBackCancelled", new Object[]{callback});
+                }
+            }
+            writeField(releaseController, "mRealCallbackInvoked", Boolean.FALSE);
+            invokeAnyMethod(releaseController, "finishBackNavigation",
+                    new Object[]{Boolean.FALSE});
+        }
+
+        private void cancelFailedShellRelease(Object releaseController,
+                                              Object tracker) {
+            try {
+                writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
+                writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
+                writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
+                if (tracker != null) {
+                    invokeAnyMethod(tracker, "setTriggerBack",
+                            new Object[]{Boolean.FALSE});
+                    setTrackerState(tracker, "FINISHED");
+                    invokeAnyMethod(releaseController, "invokeOrCancelBack",
+                            new Object[]{tracker});
+                    ((BackTouchTracker) tracker).reset();
+                } else {
+                    finishShellReleaseWithoutTracker(releaseController,
+                            false, false);
+                }
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to cancel broken Shell release transaction",
+                        throwable);
+            }
+        }
+
+        private void logShellReleaseResult(BackNavigationInfo info,
+                                           boolean requestedTrigger,
+                                           boolean actualTrigger,
+                                           String outcome, int releaseEdge,
+                                           boolean recentsCallback,
+                                           boolean drawerCallback) {
+            log(Log.INFO, TAG, "Completed Shell release transaction"
+                    + ", type=" + info.getType()
+                    + ", requestedTrigger=" + requestedTrigger
+                    + ", actualTrigger=" + actualTrigger
+                    + ", outcome=" + outcome
+                    + ", recentsShellCallback=" + recentsCallback
+                    + ", drawerShellCallback=" + drawerCallback
+                    + ", edge=" + releaseEdge);
         }
 
         private void setTrackerState(Object tracker, String stateName) throws Exception {
@@ -5085,17 +10405,6 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private float dp(float value) {
             return value * context.getResources().getDisplayMetrics().density;
-        }
-
-        private void resetGestureState(Object tracker) {
-            try {
-                writeField(controller, "mBackGestureStarted", Boolean.FALSE);
-                if (tracker != null) {
-                    ((BackTouchTracker) tracker).reset();
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to reset back gesture state", throwable);
-            }
         }
 
         private void updateTriggerBack(boolean newTriggerBack) {
@@ -5226,24 +10535,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.WARN, TAG, "Failed to dispatch real back callback", throwable);
             }
             injectLegacyBackKey();
-        }
-
-        private void dispatchCancelBack() {
-            try {
-                Object info = readField(controller, "mBackNavigationInfo");
-                Object callback = info == null ? null
-                        : ((BackNavigationInfo) info).getOnBackInvokedCallback();
-                if (callback != null) {
-                    try {
-                        invokeAnyMethod(controller, "tryDispatchOnBackCancelled",
-                                new Object[]{callback});
-                    } catch (Throwable ignored) {
-                        invokeAnyMethod(callback, "onBackCancelled", new Object[0]);
-                    }
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to dispatch back cancel", throwable);
-            }
         }
 
         private void injectLegacyBackKey() {
