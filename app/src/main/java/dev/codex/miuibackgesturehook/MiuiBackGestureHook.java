@@ -82,7 +82,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.5.17-minimal-atomic-handoff";
+            "systemui-aosp-back-0.5.18-atomic-handoff-recents-cleanup";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -13929,8 +13929,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             if (recentsVisualOnlyGesture) {
                 // BackPanelController may set BackAnimationImpl's trigger bit while completing
-                // its local animation. Clear it after UP/CANCEL: the rejected Shell navigation
-                // was already finished, and this gesture must never be committed later.
+                // its local animation. Clear it after UP/CANCEL: cancellation of the rejected
+                // Shell navigation was already queued, and this gesture must never commit later.
                 dispatchToEdgePlugin(event, activeEdge);
                 float releaseDistance = activeEdge == EDGE_LEFT
                         ? event.getRawX() - downX
@@ -14110,9 +14110,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", info=" + shortObject(info)
                         + ", receivedNull=" + receivedNull
                         + ", state=" + describeShellState());
-                cleanupRejectedShellGesture();
                 if (launcherOverviewGesture) {
                     recentsVisualOnlyGesture = true;
+                }
+                cleanupRejectedShellGesture();
+                if (launcherOverviewGesture) {
                     log(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
                             + ", mode=visual-only"
                             + ", retry=false");
@@ -14140,10 +14142,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                             : "Rejected non-callback MiuiHome editing Shell target")
                             + ", type=" + navigationType
                             + ", info=" + shortObject(info));
-                    cleanupRejectedShellGesture();
                     if (launcherOverviewGesture) {
                         recentsVisualOnlyGesture = true;
                     }
+                    cleanupRejectedShellGesture();
                     return false;
                 }
                 log(Log.INFO, TAG, (launcherOverviewGesture
@@ -14213,17 +14215,23 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private void cleanupRejectedShellGesture() {
-            try {
-                writeField(controller, "mBackGestureStarted", Boolean.FALSE);
-                Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
-                if (tracker != null) {
-                    ((BackTouchTracker) tracker).reset();
-                }
-                invokeAnyMethod(controller, "finishBackNavigation",
-                        new Object[]{Boolean.FALSE});
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to clean rejected Shell gesture", throwable);
-            }
+            // A prepared adapter may deliver onAnimationStart after onGestureStarted() returns.
+            // Finishing navigation here would clear mBackNavigationInfo first; the late adapter
+            // callback would then be retained while startSystemAnimation() exits early, leaving
+            // every later gesture blocked by mBackAnimationFinishedCallback. Reuse the complete
+            // Shell-owner release transaction so the tracker is finished with trigger=false and
+            // a waiting runner receives cancellation before normal navigation cleanup.
+            boolean queued = queueShellReleaseTransaction(
+                    downX, downY, 0.0f, false, false, activeEdge,
+                    launcherOverviewGesture, launcherDrawerGesture,
+                    launcherEditingGesture);
+            log(queued ? Log.INFO : Log.ERROR, TAG,
+                    "Rejected Shell navigation cancellation queued=" + queued
+                            + ", requestedTrigger=false"
+                            + ", recentsProbe=" + launcherOverviewGesture
+                            + ", drawerProbe=" + launcherDrawerGesture
+                            + ", editingProbe=" + launcherEditingGesture
+                            + ", edge=" + activeEdge);
         }
 
         private void clearControllerTriggerAfterVisualOnlyGesture() {
@@ -14280,6 +14288,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             if (gestureActive) {
+                if (recentsVisualOnlyGesture) {
+                    log(Log.INFO, TAG,
+                            "Preserved visual-only Recents gesture after Shell cancellation"
+                                    + ", reason=" + reason);
+                    return;
+                }
                 clearLocalGestureState();
                 log(Log.WARN, TAG, "Cleared local gesture after Shell animation completion"
                         + ", reason=" + reason);
