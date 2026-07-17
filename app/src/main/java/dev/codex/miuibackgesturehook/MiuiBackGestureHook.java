@@ -108,6 +108,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.anim.StateManager";
     private static final String MIUI_HOME_WINDOW_ELEMENT =
             "com.miui.home.recents.anim.WindowElement";
+    private static final String MIUI_HOME_WINDOW_TRANSITION_COMPAT =
+            "com.android.systemui.shared.recents.system.WindowTransitionCompat";
     private static final String MIUI_HOME_SHELL_TRANSITION_CALLBACK =
             "com.android.systemui.shared.recents.utilities.ShellTransitionCallback";
     private static final String MIUI_HOME_RECENT_BLUR_PARAMS =
@@ -172,12 +174,18 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final String DISPLAY_POLICY = "com.android.server.wm.DisplayPolicy";
 
     private static final int TRANSACTION_MIUI_ON_GESTURE_LINE_PROGRESS = 4;
+    private static final int TRANSIT_OPEN = 1;
+    private static final int TRANSIT_CLOSE = 2;
     private static final int TRANSIT_PREDICTIVE_BACK = 13;
     private static final int TRANSIT_TO_FRONT = 3;
     private static final int TRANSIT_TO_BACK = 4;
     private static final int TRANSIT_CHANGE = 6;
     private static final int FLAG_IS_WALLPAPER = 1 << 1;
+    private static final int FLAG_TRANSLUCENT = 1 << 2;
+    private static final int FLAG_FILLS_TASK = 1 << 10;
+    private static final int FLAG_IS_OCCLUDED = 1 << 15;
     private static final int FLAG_BACK_GESTURE_ANIMATED = 1 << 17;
+    private static final int FLAG_ONLY_ACTIVITY_RECORD = 1 << 26;
     private static final int EDGE_LEFT = 0;
     private static final int EDGE_RIGHT = 1;
     private static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
@@ -240,6 +248,9 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
     private static final String MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON =
             "Icon click without recent.";
+    private static final ComponentName PERMISSION_GRANT_ACTIVITY = new ComponentName(
+            "com.android.permissioncontroller",
+            "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity");
     private static final String SHELL_BACK_ANIMATION_DESCRIPTOR =
             "com.android.wm.shell.back.IBackAnimation";
     private static final String ON_BACK_INVOKED_CALLBACK_DESCRIPTOR =
@@ -291,10 +302,16 @@ public final class MiuiBackGestureHook extends XposedModule {
     private final AtomicInteger systemUiInputArbiterMonitorCount = new AtomicInteger();
     private final AtomicLong miuiHomeReturnHomeGenerationIds =
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    private final AtomicLong miuiHomeLauncherOpenSnapshotIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicReference<MiuiHomeAcceptedInputToken> acceptedInputToken =
             new AtomicReference<>();
     private final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
             new AtomicReference<>();
+    private final AtomicReference<MiuiHomeLauncherOpenSnapshot>
+            miuiHomeLauncherOpenSnapshot = new AtomicReference<>();
+    private final AtomicReference<MiuiHomePermissionMergeToken>
+            miuiHomePermissionMergeToken = new AtomicReference<>();
     private final long systemUiInputArbiterGeneration =
             Math.max(1L, SystemClock.elapsedRealtimeNanos());
     private volatile boolean acceptingOpenSnapshots = true;
@@ -458,6 +475,113 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
+    private static final class LauncherOpenMainTask {
+        final Object change;
+        final Object taskInfo;
+        final int taskId;
+        final int displayId;
+        final ComponentName component;
+        final Rect bounds;
+
+        LauncherOpenMainTask(Object change, Object taskInfo, int taskId,
+                             int displayId, ComponentName component, Rect bounds) {
+            this.change = change;
+            this.taskInfo = taskInfo;
+            this.taskId = taskId;
+            this.displayId = displayId;
+            this.component = component;
+            this.bounds = bounds;
+        }
+    }
+
+    private static final class MiuiHomeLauncherOpenSnapshot {
+        final long generation;
+        final long callbackEpoch;
+        final Object stateManager;
+        final Object windowElement;
+        final Object animationIdentity;
+        final String animationType;
+        final Object windowTransitionCompat;
+        final Object helper;
+        final Object mainTransitionToken;
+        final Object mainTransitionInfo;
+        final int mainTransitionDebugId;
+        final LauncherOpenMainTask mainTask;
+
+        MiuiHomeLauncherOpenSnapshot(
+                long generation, long callbackEpoch, Object stateManager,
+                Object windowElement, Object animationIdentity,
+                String animationType, Object windowTransitionCompat,
+                Object helper, Object mainTransitionToken,
+                Object mainTransitionInfo, int mainTransitionDebugId,
+                LauncherOpenMainTask mainTask) {
+            this.generation = generation;
+            this.callbackEpoch = callbackEpoch;
+            this.stateManager = stateManager;
+            this.windowElement = windowElement;
+            this.animationIdentity = animationIdentity;
+            this.animationType = animationType;
+            this.windowTransitionCompat = windowTransitionCompat;
+            this.helper = helper;
+            this.mainTransitionToken = mainTransitionToken;
+            this.mainTransitionInfo = mainTransitionInfo;
+            this.mainTransitionDebugId = mainTransitionDebugId;
+            this.mainTask = mainTask;
+        }
+    }
+
+    private static final class PermissionActivityTransition {
+        final Object infoExpose;
+        final Object transitionInfo;
+        final Object changeExpose;
+        final Object change;
+        final Object container;
+        final Object parent;
+        final SurfaceControl leash;
+        final ComponentName component;
+        final Rect startBounds;
+        final Rect endBounds;
+        final int debugId;
+        final int backgroundColor;
+        final int startDisplayId;
+        final int endDisplayId;
+
+        PermissionActivityTransition(
+                Object infoExpose, Object transitionInfo,
+                Object changeExpose, Object change, Object container,
+                Object parent, SurfaceControl leash, ComponentName component,
+                Rect startBounds, Rect endBounds, int debugId,
+                int backgroundColor, int startDisplayId, int endDisplayId) {
+            this.infoExpose = infoExpose;
+            this.transitionInfo = transitionInfo;
+            this.changeExpose = changeExpose;
+            this.change = change;
+            this.container = container;
+            this.parent = parent;
+            this.leash = leash;
+            this.component = component;
+            this.startBounds = startBounds;
+            this.endBounds = endBounds;
+            this.debugId = debugId;
+            this.backgroundColor = backgroundColor;
+            this.startDisplayId = startDisplayId;
+            this.endDisplayId = endDisplayId;
+        }
+    }
+
+    private static final class MiuiHomePermissionMergeToken {
+        final MiuiHomeLauncherOpenSnapshot launcherOpen;
+        final PermissionActivityTransition permissionOpen;
+        final AtomicInteger consumed = new AtomicInteger();
+
+        MiuiHomePermissionMergeToken(
+                MiuiHomeLauncherOpenSnapshot launcherOpen,
+                PermissionActivityTransition permissionOpen) {
+            this.launcherOpen = launcherOpen;
+            this.permissionOpen = permissionOpen;
+        }
+    }
+
     private static final class ReturnHomeComposition {
         final Object appsIdentity;
         final Object closingTarget;
@@ -617,6 +741,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean savedMiuiHomeOpenBreakCommandPending =
                 miuiHomeOpenBreakCommandPending;
         miuiHomeLocalHandoffToken.set(null);
+        invalidateMiuiHomeLauncherOpenSnapshot(null, "hotReload");
         IBinder savedMiuiHomeReturnHomeBinder =
                 detachMiuiHomeReturnHome("hotReload", true);
         acceptingOpenSnapshots = false;
@@ -687,6 +812,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
         boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
         boolean hadMiuiHomeReusedCloseOpenHook = false;
+        boolean hadMiuiHomePermissionMergeHook = false;
         boolean hadMiuiHomeReturnHomeCancelSurfaceHook = false;
         boolean hadMiuiHomeReturnHomeSameIconParallelHook = false;
         boolean hadMiuiHomeReturnHomeCancelDirectHook = false;
@@ -753,6 +879,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     hadMiuiHomeOpenBreakAnimationEndHook = true;
                 } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
                     hadMiuiHomeReusedCloseOpenHook = true;
+                } else if ("miui_home_permission_activity_merge".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomePermissionMergeHook = true;
                 } else if ("miui_home_return_home_cancel_surface".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeReturnHomeCancelSurfaceHook = true;
@@ -916,6 +1045,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!hadMiuiHomeReusedCloseOpenHook) {
                     hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
                 }
+                if (!hadMiuiHomePermissionMergeHook) {
+                    hookMiuiHomePermissionActivityMerge(hotReloadClassLoader);
+                }
                 if (!hadMiuiHomeReturnHomeCancelSurfaceHook
                         || !hadMiuiHomeReturnHomeSetToOldHook) {
                     hookMiuiHomeReturnHomeCloseInterruption(
@@ -1032,6 +1164,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("miui_home_reused_close_open".equals(hookId)) {
             return this::restoreMiuiHomeReusedCloseOpen;
+        }
+        if ("miui_home_permission_activity_merge".equals(hookId)) {
+            return this::preserveMiuiHomeOpenAcrossPermissionMerge;
         }
         if ("miui_home_return_home_cancel_surface".equals(hookId)) {
             return this::captureMiuiHomeReturnHomeCloseInterruption;
@@ -1266,6 +1401,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookMiuiHomeOpenBreakAnimationStart(windowElementAnimListenerClass);
             hookMiuiHomeOpenBreakAnimationEnd(windowElementAnimListenerClass);
             hookMiuiHomeReusedCloseOpen(classLoader);
+            hookMiuiHomePermissionActivityMerge(classLoader);
             hookMiuiHomeReturnHomeCloseInterruption(classLoader, true, true);
             hookMiuiHomeReturnHomeSameIconParallel(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
@@ -1439,6 +1575,38 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::restoreMiuiHomeReusedCloseOpen));
     }
 
+    private void hookMiuiHomePermissionActivityMerge(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> compatClass = Class.forName(
+                MIUI_HOME_WINDOW_TRANSITION_COMPAT, false, classLoader);
+        Method handlerMethod = null;
+        for (Method method : compatClass.getDeclaredMethods()) {
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            if ("handleTransitionForHandlerType".equals(method.getName())
+                    && parameterTypes.length == 5
+                    && "com.android.hideapi.TransitionInfoExpose".equals(
+                    parameterTypes[0].getName())
+                    && parameterTypes[1] == Object.class
+                    && parameterTypes[2] == Object.class
+                    && parameterTypes[3] == SurfaceControl.Transaction.class
+                    && "android.window.IRemoteTransitionFinishedCallback".equals(
+                    parameterTypes[4].getName())) {
+                handlerMethod = method;
+                break;
+            }
+        }
+        if (handlerMethod == null) {
+            throw new NoSuchMethodException(
+                    MIUI_HOME_WINDOW_TRANSITION_COMPAT
+                            + ".handleTransitionForHandlerType");
+        }
+        handlerMethod.setAccessible(true);
+        recordHookHandle(hook(handlerMethod)
+                .setId("miui_home_permission_activity_merge")
+                .intercept(this::preserveMiuiHomeOpenAcrossPermissionMerge));
+        log(Log.INFO, TAG, "Hooked PermissionController merge continuity");
+    }
+
     private void hookMiuiHomeReturnHomeCloseInterruption(
             ClassLoader classLoader, boolean hookCancelSurface, boolean hookSetToOld)
             throws ClassNotFoundException, NoSuchMethodException {
@@ -1551,18 +1719,20 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object mirrorMiuiHomeOpenBreakAnimationStart(XposedInterface.Chain chain)
             throws Throwable {
         Object result = chain.proceed();
+        Object animationListener = chain.getThisObject();
+        Object animationIdentity = chain.getArg(0);
+        invalidateMiuiHomeLauncherOpenSnapshot(null, "animationStart");
         MiuiHomeReturnHomeController returnHomeController =
                 miuiHomeReturnHomeController;
         if (returnHomeController != null) {
             returnHomeController.onNativeAnimationStart(
-                    chain.getThisObject(), chain.getArg(0));
+                    animationListener, animationIdentity);
         }
         if (!miuiHomeOpenBreakGenerationPrepared
                 || miuiHomeOpenBreakGeneration == 0L) {
             miuiHomeOpenBreakGeneration = nextMiuiHomeOpenBreakGeneration();
         }
         miuiHomeOpenBreakGenerationPrepared = false;
-        Object animationIdentity = chain.getArg(0);
         miuiHomeOpenBreakAnimationIdentity = animationIdentity;
         miuiHomeOpenBreakAnimationActive = true;
         miuiHomeOpenBreakCommandPending = false;
@@ -1578,6 +1748,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && miuiHomeOpenBreakAnimationActive) {
                 refreshMiuiHomeOpenBreakAvailability(
                         miuiHomeOpenBreakController, "animationStartSettled");
+                captureMiuiHomeLauncherOpenSnapshot(
+                        animationListener, animationIdentity,
+                        generation, callbackEpoch);
             }
         });
         return result;
@@ -1593,6 +1766,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             returnHomeController.onNativeAnimationEnd(
                     chain.getThisObject(), endedAnimationIdentity);
         }
+        invalidateMiuiHomeLauncherOpenSnapshot(
+                endedAnimationIdentity, "animationEnd");
         long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
         // Xiaomi's listener posts its actual StateManager cleanup to the main executor.
         // Queue behind it so isOpenAnimRunning() observes the final state. If another OPEN
@@ -1609,6 +1784,504 @@ public final class MiuiBackGestureHook extends XposedModule {
                     miuiHomeOpenBreakController, "animationEnd");
         });
         return result;
+    }
+
+    private Object preserveMiuiHomeOpenAcrossPermissionMerge(
+            XposedInterface.Chain chain) throws Throwable {
+        Object handlerTypeObject = chain.getArg(1);
+        int handlerType = handlerTypeObject instanceof Number
+                ? ((Number) handlerTypeObject).intValue() : -1;
+        boolean onlyActivityRecord = Boolean.TRUE.equals(chain.getArg(2));
+        MiuiHomeLauncherOpenSnapshot snapshot =
+                miuiHomeLauncherOpenSnapshot.get();
+
+        MiuiHomePermissionMergeToken pending =
+                miuiHomePermissionMergeToken.get();
+        if (pending != null) {
+            boolean routed = false;
+            PermissionActivityTransition permissionClose = null;
+            try {
+                if (handlerType == 99 && onlyActivityRecord) {
+                    permissionClose = resolveMatchingPermissionActivityClose(
+                            chain.getThisObject(), chain.getArg(0), pending);
+                }
+                if (permissionClose != null) {
+                    routed = pending.consumed.compareAndSet(0, 1)
+                            && miuiHomePermissionMergeToken.compareAndSet(
+                            pending, null);
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to verify PermissionController CLOSE merge",
+                        throwable);
+            }
+            if (routed) {
+                Object[] routedArgs = chain.getArgs().toArray();
+                // Xiaomi's existing handler-0/only-ActivityRecord branch applies and finishes
+                // this merge without cancelling the launcher OPEN. Reuse that branch verbatim.
+                routedArgs[1] = Integer.valueOf(0);
+                log(Log.INFO, TAG,
+                        "Preserved Xiaomi launcher OPEN across PermissionController CLOSE"
+                                + ", launcherGeneration="
+                                + pending.launcherOpen.generation
+                                + ", taskId="
+                                + pending.launcherOpen.mainTask.taskId
+                                + ", openDebugId="
+                                + pending.permissionOpen.debugId
+                                + ", closeDebugId="
+                                + readTransitionDebugId(chain.getArg(0))
+                                + ", animationType="
+                                + pending.launcherOpen.animationType);
+                return chain.proceed(routedArgs);
+            }
+            if (miuiHomePermissionMergeToken.compareAndSet(pending, null)) {
+                log(Log.INFO, TAG,
+                        "Invalidated non-adjacent PermissionController merge"
+                                + ", launcherGeneration="
+                                + pending.launcherOpen.generation
+                                + ", handlerType=" + handlerType
+                                + ", onlyActivityRecord="
+                                + onlyActivityRecord);
+            }
+        }
+
+        PermissionActivityTransition permissionOpen = null;
+        if (handlerType == 0 && onlyActivityRecord && snapshot != null) {
+            try {
+                if (isMiuiHomeLauncherOpenSnapshotCurrent(
+                        chain.getThisObject(), snapshot)) {
+                    permissionOpen = resolvePermissionActivityTransition(
+                            chain.getArg(0), TRANSIT_OPEN,
+                            FLAG_TRANSLUCENT | FLAG_FILLS_TASK,
+                            FLAG_ONLY_ACTIVITY_RECORD, snapshot);
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect PermissionController OPEN merge",
+                        throwable);
+            }
+        }
+
+        Object result = chain.proceed();
+        if (permissionOpen != null && Boolean.TRUE.equals(result)) {
+            try {
+                if (miuiHomeLauncherOpenSnapshot.get() == snapshot
+                        && isMiuiHomeLauncherOpenSnapshotCurrent(
+                        chain.getThisObject(), snapshot)) {
+                    MiuiHomePermissionMergeToken token =
+                            new MiuiHomePermissionMergeToken(
+                                    snapshot, permissionOpen);
+                    MiuiHomePermissionMergeToken replaced =
+                            miuiHomePermissionMergeToken.getAndSet(token);
+                    if (replaced != null) {
+                        replaced.consumed.compareAndSet(0, 1);
+                    }
+                    log(Log.INFO, TAG,
+                            "Captured PermissionController ActivityRecord OPEN merge"
+                                    + ", launcherGeneration="
+                                    + snapshot.generation
+                                    + ", taskId=" + snapshot.mainTask.taskId
+                                    + ", debugId=" + permissionOpen.debugId
+                                    + ", animationType="
+                                    + snapshot.animationType);
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to publish PermissionController OPEN token",
+                        throwable);
+            }
+        }
+        return result;
+    }
+
+    private void captureMiuiHomeLauncherOpenSnapshot(
+            Object animationListener, Object animationIdentity,
+            long nativeGeneration, long callbackEpoch) {
+        if (Looper.myLooper() != Looper.getMainLooper()
+                || miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch
+                || miuiHomeOpenBreakAnimationIdentity != animationIdentity
+                || !miuiHomeOpenBreakAnimationActive) {
+            return;
+        }
+        try {
+            Object stateManager = readField(animationListener, "this$0");
+            Object windowElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            if (windowElement == null) {
+                return;
+            }
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            if (currentIdentity != animationIdentity || !running
+                    || !isMiuiHomeLauncherOpenType(currentType)) {
+                return;
+            }
+            Object compat = invokeAnyMethod(windowElement,
+                    "getWindowTransitionCompat", new Object[0]);
+            Object helper = invokeAnyMethod(compat,
+                    "getCallbackHelper", new Object[0]);
+            Object mainInfo = readField(helper,
+                    "mRecentsMergeTransitionInfo");
+            Object mainToken = readField(helper, "mRecentsMergeAnimToken");
+            int mainDebugId = readTransitionDebugId(mainInfo);
+            int compatDebugId = readIntFieldOrDefault(
+                    compat, "mMainTransitionInfoDebugId", -1);
+            LauncherOpenMainTask mainTask =
+                    resolveLauncherOpenMainTask(mainInfo);
+            if (mainToken == null || mainDebugId < 0
+                    || compatDebugId != mainDebugId || mainTask == null) {
+                return;
+            }
+            MiuiHomeLauncherOpenSnapshot snapshot =
+                    new MiuiHomeLauncherOpenSnapshot(
+                            miuiHomeLauncherOpenSnapshotIds.incrementAndGet(),
+                            callbackEpoch, stateManager, windowElement,
+                            animationIdentity, currentType, compat, helper,
+                            mainToken, mainInfo, mainDebugId, mainTask);
+            miuiHomePermissionMergeToken.set(null);
+            miuiHomeLauncherOpenSnapshot.set(snapshot);
+            log(Log.INFO, TAG, "Published Xiaomi launcher OPEN snapshot"
+                    + ", generation=" + snapshot.generation
+                    + ", nativeGeneration=" + nativeGeneration
+                    + ", taskId=" + mainTask.taskId
+                    + ", displayId=" + mainTask.displayId
+                    + ", component=" + mainTask.component
+                    + ", transitionDebugId=" + mainDebugId
+                    + ", animationType=" + currentType
+                    + ", animationIdentity="
+                    + shortObject(animationIdentity));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to publish Xiaomi launcher OPEN snapshot",
+                    throwable);
+        }
+    }
+
+    private void invalidateMiuiHomeLauncherOpenSnapshot(
+            Object animationIdentity, String reason) {
+        while (true) {
+            MiuiHomeLauncherOpenSnapshot snapshot =
+                    miuiHomeLauncherOpenSnapshot.get();
+            if (snapshot == null) {
+                if (animationIdentity == null) {
+                    MiuiHomePermissionMergeToken strayToken =
+                            miuiHomePermissionMergeToken.getAndSet(null);
+                    if (strayToken != null) {
+                        strayToken.consumed.compareAndSet(0, 1);
+                    }
+                }
+                return;
+            }
+            if (animationIdentity != null
+                    && snapshot.animationIdentity != animationIdentity) {
+                return;
+            }
+            if (!miuiHomeLauncherOpenSnapshot.compareAndSet(snapshot, null)) {
+                continue;
+            }
+            MiuiHomePermissionMergeToken permissionToken =
+                    miuiHomePermissionMergeToken.get();
+            if (permissionToken != null
+                    && permissionToken.launcherOpen == snapshot
+                    && miuiHomePermissionMergeToken.compareAndSet(
+                    permissionToken, null)) {
+                permissionToken.consumed.compareAndSet(0, 1);
+            }
+            log(Log.INFO, TAG, "Invalidated Xiaomi launcher OPEN snapshot"
+                    + ", generation=" + snapshot.generation
+                    + ", reason=" + reason);
+            return;
+        }
+    }
+
+    private boolean isMiuiHomeLauncherOpenSnapshotCurrent(
+            Object compat, MiuiHomeLauncherOpenSnapshot snapshot)
+            throws Exception {
+        return snapshot != null
+                && miuiHomeLauncherOpenSnapshot.get() == snapshot
+                && snapshot.callbackEpoch
+                == miuiHomeOpenBreakCallbackEpoch.get()
+                && snapshot.windowTransitionCompat == compat
+                && readField(compat, "mHelper") == snapshot.helper
+                && readField(snapshot.helper, "mRecentsMergeTransitionInfo")
+                == snapshot.mainTransitionInfo
+                && readField(snapshot.helper, "mRecentsMergeAnimToken")
+                == snapshot.mainTransitionToken
+                && readIntFieldOrDefault(
+                compat, "mMainTransitionInfoDebugId", -1)
+                == snapshot.mainTransitionDebugId;
+    }
+
+    private LauncherOpenMainTask resolveLauncherOpenMainTask(Object info)
+            throws Exception {
+        if (info == null) {
+            return null;
+        }
+        Object typeObject = invokeAnyMethod(info, "getType", new Object[0]);
+        if (!(typeObject instanceof Number)
+                || ((Number) typeObject).intValue() != TRANSIT_OPEN) {
+            return null;
+        }
+        Object changesObject = invokeAnyMethod(
+                info, "getChanges", new Object[0]);
+        if (!(changesObject instanceof List<?>)) {
+            return null;
+        }
+        LauncherOpenMainTask candidate = null;
+        for (Object change : (List<?>) changesObject) {
+            Object taskInfo = invokeAnyMethod(
+                    change, "getTaskInfo", new Object[0]);
+            if (taskInfo == null
+                    || resolveTaskInfoActivityType(taskInfo)
+                    != ACTIVITY_TYPE_STANDARD) {
+                continue;
+            }
+            Object modeObject = invokeAnyMethod(
+                    change, "getMode", new Object[0]);
+            int mode = modeObject instanceof Number
+                    ? ((Number) modeObject).intValue() : -1;
+            if ((mode != TRANSIT_OPEN && mode != TRANSIT_TO_FRONT)
+                    || resolveTaskInfoWindowingMode(taskInfo)
+                    != WINDOWING_MODE_FULLSCREEN || candidate != null) {
+                return null;
+            }
+            int taskId = readIntFieldOrDefault(taskInfo, "taskId", -1);
+            int displayId = readIntFieldOrDefault(
+                    taskInfo, "displayId", -1);
+            Object boundsObject = invokeAnyMethod(
+                    change, "getEndAbsBounds", new Object[0]);
+            ComponentName component = readTaskInfoComponent(taskInfo);
+            if (taskId < 0 || displayId < 0
+                    || !(boundsObject instanceof Rect)
+                    || ((Rect) boundsObject).isEmpty()
+                    || component == null
+                    || MIUI_HOME.equals(component.getPackageName())
+                    || PERMISSION_GRANT_ACTIVITY.equals(component)) {
+                return null;
+            }
+            candidate = new LauncherOpenMainTask(
+                    change, taskInfo, taskId, displayId, component,
+                    new Rect((Rect) boundsObject));
+        }
+        return candidate;
+    }
+
+    private int resolveTaskInfoActivityType(Object taskInfo) {
+        try {
+            Object directValue = invokeAnyMethod(
+                    taskInfo, "getActivityType", new Object[0]);
+            if (directValue instanceof Number) {
+                return ((Number) directValue).intValue();
+            }
+            Object configuration = readField(taskInfo, "configuration");
+            Object windowConfiguration = readField(
+                    configuration, "windowConfiguration");
+            Object value = invokeAnyMethod(windowConfiguration,
+                    "getActivityType", new Object[0]);
+            if (value instanceof Number) {
+                return ((Number) value).intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return readIntFieldOrDefault(taskInfo, "topActivityType", -1);
+    }
+
+    private int resolveTaskInfoWindowingMode(Object taskInfo) {
+        try {
+            Object directValue = invokeAnyMethod(
+                    taskInfo, "getWindowingMode", new Object[0]);
+            if (directValue instanceof Number) {
+                return ((Number) directValue).intValue();
+            }
+            Object configuration = readField(taskInfo, "configuration");
+            Object windowConfiguration = readField(
+                    configuration, "windowConfiguration");
+            Object value = invokeAnyMethod(windowConfiguration,
+                    "getWindowingMode", new Object[0]);
+            if (value instanceof Number) {
+                return ((Number) value).intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    private ComponentName readTaskInfoComponent(Object taskInfo) {
+        for (String fieldName : new String[]{
+                "baseActivity", "realActivity", "topActivity"}) {
+            try {
+                Object component = readField(taskInfo, fieldName);
+                if (component instanceof ComponentName) {
+                    return (ComponentName) component;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private boolean isMiuiHomeLauncherOpenType(String typeName) {
+        return "OPEN_FROM_ELEMENT".equals(typeName)
+                || "OPEN_FROM_HOME".equals(typeName)
+                || "OPEN_FROM_RECENTS".equals(typeName);
+    }
+
+    private PermissionActivityTransition resolvePermissionActivityTransition(
+            Object infoExpose, int expectedMode, int expectedChangeFlags,
+            int expectedInfoFlags, MiuiHomeLauncherOpenSnapshot snapshot)
+            throws Exception {
+        if (infoExpose == null || snapshot == null) {
+            return null;
+        }
+        Object infoFlagsObject = invokeAnyMethod(
+                infoExpose, "getFlags", new Object[0]);
+        int infoFlags = infoFlagsObject instanceof Number
+                ? ((Number) infoFlagsObject).intValue() : Integer.MIN_VALUE;
+        Object transitionInfo = invokeAnyMethod(
+                infoExpose, "unbox", new Object[0]);
+        Object typeObject = invokeAnyMethod(
+                transitionInfo, "getType", new Object[0]);
+        if (infoFlags != expectedInfoFlags || !(typeObject instanceof Number)
+                || ((Number) typeObject).intValue() != expectedMode) {
+            return null;
+        }
+        Object changesObject = invokeAnyMethod(
+                infoExpose, "getChanges", new Object[0]);
+        if (!(changesObject instanceof List<?>)
+                || ((List<?>) changesObject).size() != 1) {
+            return null;
+        }
+        Object changeExpose = ((List<?>) changesObject).get(0);
+        Object modeObject = invokeAnyMethod(
+                changeExpose, "getMode", new Object[0]);
+        Object flagsObject = invokeAnyMethod(
+                changeExpose, "getFlags", new Object[0]);
+        Object taskInfo = invokeAnyMethod(
+                changeExpose, "getTaskInfo", new Object[0]);
+        Object componentObject = invokeAnyMethod(
+                changeExpose, "getActivityComponent", new Object[0]);
+        Object leashObject = invokeAnyMethod(
+                changeExpose, "getLeash", new Object[0]);
+        Object startBoundsObject = invokeAnyMethod(
+                changeExpose, "getStartAbsBounds", new Object[0]);
+        Object endBoundsObject = invokeAnyMethod(
+                changeExpose, "getEndAbsBounds", new Object[0]);
+        if (!(modeObject instanceof Number)
+                || ((Number) modeObject).intValue() != expectedMode
+                || !(flagsObject instanceof Number)
+                || ((Number) flagsObject).intValue()
+                != expectedChangeFlags || taskInfo != null
+                || !PERMISSION_GRANT_ACTIVITY.equals(componentObject)
+                || !(leashObject instanceof SurfaceControl)
+                || !((SurfaceControl) leashObject).isValid()
+                || !(startBoundsObject instanceof Rect)
+                || !(endBoundsObject instanceof Rect)) {
+            return null;
+        }
+        Rect startBounds = new Rect((Rect) startBoundsObject);
+        Rect endBounds = new Rect((Rect) endBoundsObject);
+        Object startDisplayObject = invokeAnyMethod(
+                changeExpose, "getStartDisplayId", new Object[0]);
+        Object endDisplayObject = invokeAnyMethod(
+                changeExpose, "getEndDisplayId", new Object[0]);
+        int startDisplay = startDisplayObject instanceof Number
+                ? ((Number) startDisplayObject).intValue() : -2;
+        int endDisplay = endDisplayObject instanceof Number
+                ? ((Number) endDisplayObject).intValue() : -2;
+        if (expectedMode == TRANSIT_OPEN) {
+            if (!startBounds.isEmpty()
+                    || !endBounds.equals(snapshot.mainTask.bounds)
+                    || startDisplay >= 0
+                    || endDisplay != snapshot.mainTask.displayId) {
+                return null;
+            }
+        } else if (!startBounds.equals(snapshot.mainTask.bounds)
+                || !endBounds.equals(snapshot.mainTask.bounds)
+                || startDisplay != snapshot.mainTask.displayId
+                || endDisplay != snapshot.mainTask.displayId) {
+            return null;
+        }
+        Object change = invokeAnyMethod(
+                changeExpose, "unbox", new Object[0]);
+        Object container = invokeAnyMethod(
+                change, "getContainer", new Object[0]);
+        Object parent = invokeAnyMethod(
+                changeExpose, "getParent", new Object[0]);
+        Object backgroundObject = invokeAnyMethod(
+                changeExpose, "getBackgroundColor", new Object[0]);
+        return new PermissionActivityTransition(
+                infoExpose, transitionInfo, changeExpose, change,
+                container, parent, (SurfaceControl) leashObject,
+                (ComponentName) componentObject, startBounds, endBounds,
+                readTransitionDebugId(transitionInfo),
+                backgroundObject instanceof Number
+                        ? ((Number) backgroundObject).intValue() : 0,
+                startDisplay, endDisplay);
+    }
+
+    private PermissionActivityTransition resolveMatchingPermissionActivityClose(
+            Object compat, Object infoExpose,
+            MiuiHomePermissionMergeToken token) throws Exception {
+        if (token == null || token.consumed.get() != 0
+                || !isMiuiHomeLauncherOpenSnapshotCurrent(
+                compat, token.launcherOpen)) {
+            return null;
+        }
+        PermissionActivityTransition close =
+                resolvePermissionActivityTransition(
+                        infoExpose, TRANSIT_CLOSE,
+                        FLAG_TRANSLUCENT | FLAG_FILLS_TASK
+                                | FLAG_IS_OCCLUDED,
+                        0, token.launcherOpen);
+        PermissionActivityTransition open = token.permissionOpen;
+        if (close == null || open.debugId < 0
+                || close.debugId != open.debugId + 1
+                || !open.component.equals(close.component)
+                || open.backgroundColor != close.backgroundColor
+                || !open.endBounds.equals(close.startBounds)
+                || !open.endBounds.equals(close.endBounds)
+                || open.endDisplayId != close.startDisplayId
+                || open.endDisplayId != close.endDisplayId) {
+            return null;
+        }
+        if ((open.container == null) != (close.container == null)
+                || (open.container != null
+                && !open.container.equals(close.container))) {
+            return null;
+        }
+        if ((open.parent == null) != (close.parent == null)
+                || (open.parent != null && !open.parent.equals(close.parent))) {
+            return null;
+        }
+        return open.leash.isValid() && close.leash.isValid()
+                && surfacesAreSame(open.leash, close.leash) ? close : null;
+    }
+
+    private int readTransitionDebugId(Object infoOrExpose) {
+        if (infoOrExpose == null) {
+            return -1;
+        }
+        try {
+            Object info = infoOrExpose;
+            if (!"android.window.TransitionInfo".equals(
+                    infoOrExpose.getClass().getName())) {
+                info = invokeAnyMethod(
+                        infoOrExpose, "unbox", new Object[0]);
+            }
+            Object value = invokeAnyMethod(
+                    info, "getDebugId", new Object[0]);
+            return value instanceof Number
+                    ? ((Number) value).intValue() : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
     }
 
     private Object captureMiuiHomeReturnHomeCloseInterruption(
