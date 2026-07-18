@@ -82,7 +82,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.5.1-launcher-editing-exact";
+            "systemui-aosp-back-0.5.17-minimal-atomic-handoff";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
 
@@ -108,8 +108,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.anim.StateManager";
     private static final String MIUI_HOME_WINDOW_ELEMENT =
             "com.miui.home.recents.anim.WindowElement";
+    private static final String MIUI_HOME_REMOTE_TRANSITION_INFO =
+            "com.miui.home.recents.event.RemoteTransitionInfo";
     private static final String MIUI_HOME_WINDOW_TRANSITION_COMPAT =
             "com.android.systemui.shared.recents.system.WindowTransitionCompat";
+    private static final String MIUI_HOME_WINDOW_TRANSITION_CALLBACK_HELPER =
+            "com.android.systemui.shared.recents.utilities.WindowTransitionCallbackHelper";
+    private static final String MIUI_HOME_ANIM_BACKGROUND_THREAD =
+            "com.miui.launcher.common.AnimBackgroundThread";
     private static final String MIUI_HOME_SHELL_TRANSITION_CALLBACK =
             "com.android.systemui.shared.recents.utilities.ShellTransitionCallback";
     private static final String MIUI_HOME_RECENT_BLUR_PARAMS =
@@ -130,6 +136,23 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.anim.windowanim.sfanim.AnimStatusParam";
     private static final String MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR =
             "com.miui.home.recents.anim.windowanim.LocalWindowAnimImplementor";
+    private static final String MIUI_HOME_CLIP_ANIMATION_HELPER =
+            "com.miui.home.recents.util.ClipAnimationHelper";
+    private static final String MIUI_HOME_SYNC_RT_SURFACE_APPLIER =
+            "com.android.systemui.shared.recents.system."
+                    + "SyncRtSurfaceTransactionApplierCompat";
+    private static final String MIUI_HOME_TRANSACTION_COMPAT =
+            "com.android.systemui.shared.recents.system.TransactionCompat";
+    private static final String MIUI_HOME_TRANSITION_UTIL =
+            "com.android.wm.shell.util.TransitionUtil";
+    private static final String MIUI_HOME_SURFACE_PARAMS =
+            MIUI_HOME_SYNC_RT_SURFACE_APPLIER + "$SurfaceParams";
+    private static final String MIUI_HOME_SURFACE_PARAMS_ARRAY =
+            "[L" + MIUI_HOME_SURFACE_PARAMS + ";";
+    private static final String MIUI_HOME_CORNER_RADII =
+            "com.android.systemui.shared.recents.utilities.CornerRadii";
+    private static final String MIUI_HOME_VALUE_CALLBACK =
+            "com.miui.home.recents.anim.IValueCallBack";
     private static final String MIUI_HOME_SHORTCUT_MENU_LAYER_ELEMENT =
             "com.miui.home.recents.anim.ShortcutMenuLayerElement";
     private static final String MIUI_HOME_SHORTCUT_MENU_LAYER_PARAMS =
@@ -185,6 +208,10 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int FLAG_FILLS_TASK = 1 << 10;
     private static final int FLAG_IS_OCCLUDED = 1 << 15;
     private static final int FLAG_BACK_GESTURE_ANIMATED = 1 << 17;
+    private static final int FLAG_DISPLAY_CHANGE = 1 << 27;
+    private static final int FLAG_IS_ELEMENT = Integer.MIN_VALUE;
+    private static final int XIAOMI_PREPARED_HOME_CHANGE_FLAGS = 0x00028001;
+    private static final int XIAOMI_ELEMENT_HOME_CHANGE_FLAGS = 0x00120001;
     private static final int FLAG_ONLY_ACTIVITY_RECORD = 1 << 26;
     private static final int EDGE_LEFT = 0;
     private static final int EDGE_RIGHT = 1;
@@ -246,6 +273,14 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final long RETURN_HOME_CANCEL_FINISH_GUARD_MS = 350L;
     private static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
     private static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
+    private static final long RETURN_HOME_NATIVE_GEOMETRY_MAX_AGE_NS =
+            TimeUnit.MILLISECONDS.toNanos(100L);
+    private static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
+    private static final int RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS = 2;
+    private static final int MIUI_SURFACE_PARAM_FLAG_MATRIX = 2;
+    private static final int MIUI_SURFACE_PARAM_FLAG_WINDOW_CROP = 4;
+    private static final int MIUI_SURFACE_PARAM_FLAG_CORNER_RADIUS = 16;
+    private static final int MIUI_SURFACE_PARAM_FLAG_SHOW = 512;
     private static final String MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON =
             "Icon click without recent.";
     private static final ComponentName PERMISSION_GRANT_ACTIVITY = new ComponentName(
@@ -304,6 +339,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicLong miuiHomeLauncherOpenSnapshotIds =
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    private final AtomicLong miuiHomeNativeGeometryFrameIds = new AtomicLong();
+    private final ThreadLocal<ReturnHomeNativeGeometrySnapshot>
+            miuiHomePendingNativeGeometry = new ThreadLocal<>();
+    private final ThreadLocal<ReturnHomeFinishTransferCandidate>
+            returnHomeFinishTransferCandidate = new ThreadLocal<>();
+    private volatile boolean backCommitCompositionHookReady;
+    private volatile boolean backFinishOpenAtomicHookReady;
+    private volatile boolean backFinishOpenCallerDeoptimized;
     private final AtomicReference<MiuiHomeAcceptedInputToken> acceptedInputToken =
             new AtomicReference<>();
     private final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
@@ -359,6 +402,51 @@ public final class MiuiBackGestureHook extends XposedModule {
     private HeadlessNavBarLease headlessNavBarLease;
     private volatile Object[][] pendingHotReloadInputState = new Object[0][0];
     private volatile Object[][] pendingHotReloadHeadlessState = new Object[0][0];
+
+    private static final class ReturnHomeNativeGeometrySnapshot {
+        final long generation;
+        final Object animationIdentity;
+        final long frameTraceId;
+        final int sourceKind;
+        final long capturedElapsedRealtimeNanos;
+        private final float[] matrixValues;
+        private final int cropLeft;
+        private final int cropTop;
+        private final int cropRight;
+        private final int cropBottom;
+        private final float[] surfaceCornerRadii;
+
+        ReturnHomeNativeGeometrySnapshot(
+                long generation, Object animationIdentity,
+                float[] matrixValues, Rect windowCrop,
+                float[] surfaceCornerRadii, long frameTraceId,
+                int sourceKind) {
+            this.generation = generation;
+            this.animationIdentity = animationIdentity;
+            this.frameTraceId = frameTraceId;
+            this.sourceKind = sourceKind;
+            this.matrixValues = matrixValues.clone();
+            this.cropLeft = windowCrop.left;
+            this.cropTop = windowCrop.top;
+            this.cropRight = windowCrop.right;
+            this.cropBottom = windowCrop.bottom;
+            this.surfaceCornerRadii = surfaceCornerRadii.clone();
+            this.capturedElapsedRealtimeNanos =
+                    SystemClock.elapsedRealtimeNanos();
+        }
+
+        float[] copyMatrixValues() {
+            return matrixValues.clone();
+        }
+
+        Rect copyWindowCrop() {
+            return new Rect(cropLeft, cropTop, cropRight, cropBottom);
+        }
+
+        float[] copySurfaceCornerRadii() {
+            return surfaceCornerRadii.clone();
+        }
+    }
 
     private static final class HeadlessNavBarLease {
         final Object controller;
@@ -744,6 +832,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         invalidateMiuiHomeLauncherOpenSnapshot(null, "hotReload");
         IBinder savedMiuiHomeReturnHomeBinder =
                 detachMiuiHomeReturnHome("hotReload", true);
+        miuiHomePendingNativeGeometry.remove();
+        returnHomeFinishTransferCandidate.remove();
+        backCommitCompositionHookReady = false;
+        backFinishOpenAtomicHookReady = false;
+        backFinishOpenCallerDeoptimized = false;
         acceptingOpenSnapshots = false;
         acceptingHeadlessNavBarLifecycle = false;
         synchronized (backInputLifecycleLock) {
@@ -812,6 +905,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
         boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
         boolean hadMiuiHomeReusedCloseOpenHook = false;
+        boolean hadMiuiHomeElementTransitionHook = false;
+        boolean hadMiuiHomeElementLeashRearmHook = false;
+        boolean hadMiuiHomeElementAnimTypeHook = false;
+        boolean hadMiuiHomeTraceOnAnimUpdateHook = false;
+        boolean hadMiuiHomeTraceApplySurfaceParamsHook = false;
+        boolean hadMiuiHomeTraceSetupLeashHook = false;
+        Set<String> hadMiuiHomeSurfaceTransactionTraceHookIds =
+                ConcurrentHashMap.newKeySet();
         boolean hadMiuiHomePermissionMergeHook = false;
         boolean hadMiuiHomeReturnHomeCancelSurfaceHook = false;
         boolean hadMiuiHomeReturnHomeSameIconParallelHook = false;
@@ -828,11 +929,13 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadBackSendEventHook = false;
         boolean hadBackPrepareReparentHook = false;
         boolean hadBackCommitCompositionHook = false;
+        boolean hadBackFinishOpenAtomicHook = false;
         boolean hadAnyServerHook = false;
         ClassLoader hotReloadClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
             try {
-                if (oldHandle.getId() != null && oldHandle.getId().startsWith("server_")) {
+                String oldHookId = oldHandle.getId();
+                if (oldHookId != null && oldHookId.startsWith("server_")) {
                     hadAnyServerHook = true;
                 }
                 if ("server_back_window_start_animation".equals(oldHandle.getId())) {
@@ -879,6 +982,24 @@ public final class MiuiBackGestureHook extends XposedModule {
                     hadMiuiHomeOpenBreakAnimationEndHook = true;
                 } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
                     hadMiuiHomeReusedCloseOpenHook = true;
+                } else if ("miui_home_return_home_element_transition".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeElementTransitionHook = true;
+                } else if ("miui_home_return_home_element_leash_rearm".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeElementLeashRearmHook = true;
+                } else if ("miui_home_return_home_element_anim_type".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeElementAnimTypeHook = true;
+                } else if ("miui_home_trace_on_anim_update".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeTraceOnAnimUpdateHook = true;
+                } else if ("miui_home_trace_apply_surface_params".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeTraceApplySurfaceParamsHook = true;
+                } else if ("miui_home_trace_transition_setup_leash".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeTraceSetupLeashHook = true;
                 } else if ("miui_home_permission_activity_merge".equals(
                         oldHandle.getId())) {
                     hadMiuiHomePermissionMergeHook = true;
@@ -921,6 +1042,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("systemui_back_commit_composition".equals(
                         oldHandle.getId())) {
                     hadBackCommitCompositionHook = true;
+                } else if ("systemui_back_finish_open_atomic".equals(
+                        oldHandle.getId())) {
+                    hadBackFinishOpenAtomicHook = true;
                 }
                 if (hotReloadClassLoader == null
                         && oldHandle.getExecutable() != null
@@ -930,7 +1054,19 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 XposedInterface.Hooker replacement = createHotReloadHooker(oldHandle.getId());
                 if (replacement != null) {
-                    hookHandles.add(oldHandle.replaceHook(replacement));
+                    XposedInterface.HookHandle replacementHandle =
+                            oldHandle.replaceHook(replacement);
+                    hookHandles.add(replacementHandle);
+                    if ("systemui_back_commit_composition".equals(oldHookId)) {
+                        backCommitCompositionHookReady = true;
+                    } else if ("systemui_back_finish_open_atomic".equals(
+                            oldHookId)) {
+                        backFinishOpenAtomicHookReady = true;
+                    }
+                    if (oldHookId != null && oldHookId.startsWith(
+                            "miui_home_trace_surface_transaction_")) {
+                        hadMiuiHomeSurfaceTransactionTraceHookIds.add(oldHookId);
+                    }
                     replaced++;
                 } else {
                     oldHandle.unhook();
@@ -992,8 +1128,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!hadBackPrepareReparentHook) {
                 hookBackPrepareTransitionReparent(hotReloadClassLoader);
             }
-            if (!hadBackCommitCompositionHook) {
+            if (!backCommitCompositionHookReady) {
                 hookBackCommitComposition(hotReloadClassLoader);
+            }
+            if (!backFinishOpenAtomicHookReady) {
+                hookBackFinishOpenAtomicTransfer(hotReloadClassLoader);
+            }
+            if (backCommitCompositionHookReady
+                    && backFinishOpenAtomicHookReady
+                    && !backFinishOpenCallerDeoptimized) {
+                deoptimizeBackFinishOpenCaller(hotReloadClassLoader);
             }
         }
         if (SYSTEM_UI.equals(processName)) {
@@ -1045,9 +1189,49 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!hadMiuiHomeReusedCloseOpenHook) {
                     hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomePermissionMergeHook) {
-                    hookMiuiHomePermissionActivityMerge(hotReloadClassLoader);
+                if (!hadMiuiHomeElementTransitionHook
+                        || !hadMiuiHomeElementLeashRearmHook
+                        || !hadMiuiHomeElementAnimTypeHook) {
+                    try {
+                        hookMiuiHomeTransitionContinuity(
+                                hotReloadClassLoader,
+                                !hadMiuiHomeElementTransitionHook,
+                                !hadMiuiHomeElementLeashRearmHook,
+                                !hadMiuiHomeElementAnimTypeHook);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to backfill MiuiHome element continuity",
+                                throwable);
+                    }
                 }
+                if (!hadMiuiHomePermissionMergeHook) {
+                    try {
+                        hookMiuiHomePermissionMerge(hotReloadClassLoader);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to backfill MiuiHome permission merge",
+                                throwable);
+                    }
+                }
+                if (!hadMiuiHomeTraceOnAnimUpdateHook
+                        || !hadMiuiHomeTraceApplySurfaceParamsHook) {
+                    hookMiuiHomeGeometryFrames(
+                            hotReloadClassLoader,
+                            !hadMiuiHomeTraceOnAnimUpdateHook,
+                            !hadMiuiHomeTraceApplySurfaceParamsHook);
+                }
+                if (!hadMiuiHomeTraceSetupLeashHook) {
+                    try {
+                        hookMiuiHomeTransitionSetupLeash(
+                                hotReloadClassLoader);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to backfill MiuiHome transition geometry hook",
+                                throwable);
+                    }
+                }
+                hookMiuiHomeStartTransactionApply(
+                        hadMiuiHomeSurfaceTransactionTraceHookIds);
                 if (!hadMiuiHomeReturnHomeCancelSurfaceHook
                         || !hadMiuiHomeReturnHomeSetToOldHook) {
                     hookMiuiHomeReturnHomeCloseInterruption(
@@ -1165,6 +1349,55 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("miui_home_reused_close_open".equals(hookId)) {
             return this::restoreMiuiHomeReusedCloseOpen;
         }
+        if ("miui_home_return_home_element_transition".equals(hookId)) {
+            return this::prepareMiuiHomeElementTransitionContinuity;
+        }
+        if ("miui_home_return_home_element_leash_rearm".equals(hookId)) {
+            return this::rearmMiuiHomeElementLeashAfterNativeClear;
+        }
+        if ("miui_home_return_home_element_anim_type".equals(hookId)) {
+            return this::observeMiuiHomeElementAnimType;
+        }
+        if ("miui_home_return_home_element_retarget".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_recents_map_alpha".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_on_anim_update".equals(hookId)) {
+            return this::captureMiuiHomeNativeGeometry;
+        }
+        if ("miui_home_trace_update_element_value".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_update_all_anim_values".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_apply_transform_new".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_apply_surface_params".equals(hookId)) {
+            return this::applyMiuiHomeNativeSurfaceParams;
+        }
+        if ("miui_home_trace_task_view_primary".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_task_view_surface".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_schedule_apply_directly".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_transition_create_leash".equals(hookId)) {
+            return XposedInterface.Chain::proceed;
+        }
+        if ("miui_home_trace_transition_setup_leash".equals(hookId)) {
+            return this::armMiuiHomeTransitionStartGeometry;
+        }
+        if (hookId.startsWith(
+                "miui_home_trace_surface_transaction_")) {
+            return this::applyMiuiHomeStartGeometry;
+        }
         if ("miui_home_permission_activity_merge".equals(hookId)) {
             return this::preserveMiuiHomeOpenAcrossPermissionMerge;
         }
@@ -1251,6 +1484,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("systemui_back_commit_composition".equals(hookId)) {
             return this::correctPredictiveBackCommitComposition;
+        }
+        if ("systemui_back_finish_open_atomic".equals(hookId)) {
+            return this::transferReturnHomeFinishIntoCloseStart;
         }
         if ("systemui_edge_back_setBackAnimation".equals(hookId)) {
             return this::onEdgeBackSetBackAnimation;
@@ -1401,7 +1637,31 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookMiuiHomeOpenBreakAnimationStart(windowElementAnimListenerClass);
             hookMiuiHomeOpenBreakAnimationEnd(windowElementAnimListenerClass);
             hookMiuiHomeReusedCloseOpen(classLoader);
-            hookMiuiHomePermissionActivityMerge(classLoader);
+            try {
+                hookMiuiHomeTransitionContinuity(
+                        classLoader, true, true, true);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to install MiuiHome element continuity",
+                        throwable);
+            }
+            try {
+                hookMiuiHomePermissionMerge(classLoader);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to install MiuiHome permission merge",
+                        throwable);
+            }
+            hookMiuiHomeGeometryFrames(classLoader, true, true);
+            try {
+                hookMiuiHomeTransitionSetupLeash(classLoader);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to install MiuiHome transition geometry hook",
+                        throwable);
+            }
+            hookMiuiHomeStartTransactionApply(
+                    Collections.emptySet());
             hookMiuiHomeReturnHomeCloseInterruption(classLoader, true, true);
             hookMiuiHomeReturnHomeSameIconParallel(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
@@ -1575,7 +1835,58 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::restoreMiuiHomeReusedCloseOpen));
     }
 
-    private void hookMiuiHomePermissionActivityMerge(ClassLoader classLoader)
+    private void hookMiuiHomeTransitionContinuity(
+            ClassLoader classLoader, boolean hookElementTransition,
+            boolean hookElementLeashRearm, boolean hookElementAnimType)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        if (hookElementTransition) {
+            Class<?> remoteTransitionInfoClass = Class.forName(
+                    MIUI_HOME_REMOTE_TRANSITION_INFO, false, classLoader);
+            Method injectRemoteTransition = windowElementClass.getDeclaredMethod(
+                    "injectRemoteTransition", remoteTransitionInfoClass);
+            injectRemoteTransition.setAccessible(true);
+            recordHookHandle(hook(injectRemoteTransition)
+                    .setId("miui_home_return_home_element_transition")
+                    .intercept(this::prepareMiuiHomeElementTransitionContinuity));
+        }
+        if (hookElementLeashRearm) {
+            Class<?> helperClass = Class.forName(
+                    MIUI_HOME_WINDOW_TRANSITION_CALLBACK_HELPER, false,
+                    classLoader);
+            Method clearOpenLeash = helperClass.getDeclaredMethod(
+                    "clearTempSaveOpenLeash");
+            clearOpenLeash.setAccessible(true);
+            recordHookHandle(hook(clearOpenLeash)
+                    .setId("miui_home_return_home_element_leash_rearm")
+                    .intercept(this::rearmMiuiHomeElementLeashAfterNativeClear));
+        }
+        if (hookElementAnimType) {
+            Method animTo = null;
+            for (Method method : windowElementClass.getDeclaredMethods()) {
+                if ("animTo".equals(method.getName())
+                        && method.getParameterCount() == 1) {
+                    animTo = method;
+                    break;
+                }
+            }
+            if (animTo == null) {
+                throw new NoSuchMethodException(
+                        MIUI_HOME_WINDOW_ELEMENT + ".animTo(T)");
+            }
+            animTo.setAccessible(true);
+            recordHookHandle(hook(animTo)
+                    .setId("miui_home_return_home_element_anim_type")
+                    .intercept(this::observeMiuiHomeElementAnimType));
+        }
+        log(Log.INFO, TAG, "Hooked MiuiHome transition continuity"
+                + ", elementTransition=" + hookElementTransition
+                + ", elementLeashRearm=" + hookElementLeashRearm
+                + ", elementAnimType=" + hookElementAnimType);
+    }
+
+    private void hookMiuiHomePermissionMerge(ClassLoader classLoader)
             throws ClassNotFoundException, NoSuchMethodException {
         Class<?> compatClass = Class.forName(
                 MIUI_HOME_WINDOW_TRANSITION_COMPAT, false, classLoader);
@@ -1588,7 +1899,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     parameterTypes[0].getName())
                     && parameterTypes[1] == Object.class
                     && parameterTypes[2] == Object.class
-                    && parameterTypes[3] == SurfaceControl.Transaction.class
+                    && parameterTypes[3]
+                    == SurfaceControl.Transaction.class
                     && "android.window.IRemoteTransitionFinishedCallback".equals(
                     parameterTypes[4].getName())) {
                 handlerMethod = method;
@@ -1604,7 +1916,239 @@ public final class MiuiBackGestureHook extends XposedModule {
         recordHookHandle(hook(handlerMethod)
                 .setId("miui_home_permission_activity_merge")
                 .intercept(this::preserveMiuiHomeOpenAcrossPermissionMerge));
-        log(Log.INFO, TAG, "Hooked PermissionController merge continuity");
+    }
+
+    private Method requireExactDeclaredMethod(
+            Class<?> owner, String methodName, String returnTypeName,
+            String... parameterTypeNames) throws NoSuchMethodException {
+        for (Method method : owner.getDeclaredMethods()) {
+            if (!methodName.equals(method.getName())
+                    || !returnTypeName.equals(method.getReturnType().getName())) {
+                continue;
+            }
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            if (parameterTypes.length != parameterTypeNames.length) {
+                continue;
+            }
+            boolean exact = true;
+            for (int index = 0; index < parameterTypes.length; index++) {
+                if (!parameterTypeNames[index].equals(
+                        parameterTypes[index].getName())) {
+                    exact = false;
+                    break;
+                }
+            }
+            if (exact) {
+                method.setAccessible(true);
+                return method;
+            }
+        }
+        throw new NoSuchMethodException(owner.getName() + "." + methodName
+                + "(" + String.join(",", parameterTypeNames) + "):"
+                + returnTypeName);
+    }
+
+    private void hookMiuiHomeNativeGeometryUpdate(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> owner = Class.forName(
+                MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR, false, classLoader);
+        Method method = requireExactDeclaredMethod(owner, "onAnimUpdate", "void",
+                RectF.class.getName(), "float", "float",
+                MIUI_HOME_CORNER_RADII, MIUI_HOME_VALUE_CALLBACK);
+        recordHookHandle(hook(method)
+                .setId("miui_home_trace_on_anim_update")
+                .intercept(this::captureMiuiHomeNativeGeometry));
+    }
+
+    private void hookMiuiHomeNativeGeometryApply(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> owner = Class.forName(
+                MIUI_HOME_CLIP_ANIMATION_HELPER, false, classLoader);
+        Method method = requireExactDeclaredMethod(owner,
+                "applySurfaceParams", "void",
+                MIUI_HOME_SYNC_RT_SURFACE_APPLIER,
+                MIUI_HOME_SURFACE_PARAMS_ARRAY,
+                MIUI_HOME_TRANSACTION_COMPAT);
+        recordHookHandle(hook(method)
+                .setId("miui_home_trace_apply_surface_params")
+                .intercept(this::applyMiuiHomeNativeSurfaceParams));
+    }
+
+    private void hookMiuiHomeGeometryFrames(
+            ClassLoader classLoader, boolean hookOnAnimUpdate,
+            boolean hookApplySurfaceParams) {
+        if (hookOnAnimUpdate) {
+            try {
+                hookMiuiHomeNativeGeometryUpdate(classLoader);
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed to hook MiuiHome onAnimUpdate trace", throwable);
+            }
+        }
+        if (hookApplySurfaceParams) {
+            try {
+                hookMiuiHomeNativeGeometryApply(classLoader);
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed to hook MiuiHome applySurfaceParams trace",
+                        throwable);
+            }
+        }
+        log(Log.INFO, TAG, "Installed MiuiHome native geometry hooks"
+                + ", onAnimUpdate=" + hookOnAnimUpdate
+                + ", applySurfaceParams=" + hookApplySurfaceParams);
+    }
+
+    private void hookMiuiHomeTransitionSetupLeash(
+            ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> owner = Class.forName(
+                MIUI_HOME_TRANSITION_UTIL, false, classLoader);
+        Method setupLeash = null;
+        for (Method method : owner.getDeclaredMethods()) {
+            if ("setupLeash".equals(method.getName())
+                    && method.getParameterCount() == 6
+                    && method.getReturnType() == void.class) {
+                setupLeash = method;
+            }
+        }
+        if (setupLeash == null) {
+            throw new NoSuchMethodException(
+                    MIUI_HOME_TRANSITION_UTIL + ".setupLeash");
+        }
+        setupLeash.setAccessible(true);
+        recordHookHandle(hook(setupLeash)
+                .setId("miui_home_trace_transition_setup_leash")
+                .intercept(this::armMiuiHomeTransitionStartGeometry));
+        log(Log.INFO, TAG,
+                "Installed MiuiHome transition start-geometry hook");
+    }
+
+    private void hookMiuiHomeStartTransactionApply(
+            Set<String> existingHookIds) {
+        int expected = 0;
+        int installed = 0;
+        for (Method method : SurfaceControl.Transaction.class
+                .getDeclaredMethods()) {
+            if (!"apply".equals(method.getName())
+                    || method.getParameterCount() != 1
+                    || method.getParameterTypes()[0] != boolean.class) {
+                continue;
+            }
+            String hookId = miuiHomeStartTransactionHookId(method);
+            expected++;
+            if (existingHookIds != null
+                    && existingHookIds.contains(hookId)) {
+                continue;
+            }
+            try {
+                method.setAccessible(true);
+                recordHookHandle(hook(method)
+                        .setId(hookId)
+                        .intercept(this::applyMiuiHomeStartGeometry));
+                installed++;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to hook MiuiHome start transaction apply"
+                                + ", method=" + method.toGenericString()
+                                + ", hookId=" + hookId,
+                        throwable);
+            }
+        }
+        log(Log.INFO, TAG,
+                "Installed MiuiHome start transaction apply hooks"
+                        + ", expected=" + expected
+                        + ", existing="
+                        + (existingHookIds == null
+                        ? 0 : existingHookIds.size())
+                        + ", installed=" + installed);
+    }
+
+    private static final class ReturnHomeFinishTransferCandidate {
+        final Object handler;
+        final Object controller;
+        final Thread ownerThread;
+        final Object transitions;
+        final Object remoteTransitionHandler;
+        final ReturnHomeComposition composition;
+        final Object transitionToken;
+        final Object transitionInfo;
+        final Object mergeTarget;
+        final SurfaceControl.Transaction startTransaction;
+        final Object preparedOpenInfo;
+        final SurfaceControl.Transaction preparedFinishTransaction;
+        final Object preparedFinishCallback;
+        final Object elementChange;
+        final Object appChange;
+        final SurfaceControl homeLeash;
+        final SurfaceControl elementLeash;
+        final SurfaceControl appLeash;
+        final Rect fullscreenBounds;
+        final Rect elementEndBounds;
+        final int transitionType;
+        final int appFlags;
+        final int elementStartDisplayId;
+        final int elementEndDisplayId;
+        final int transitionDebugId;
+        final int preparedDebugId;
+        final AtomicInteger transferAttempted = new AtomicInteger();
+
+        ReturnHomeFinishTransferCandidate(
+                Object handler, Object controller,
+                Thread ownerThread,
+                Object transitions, Object remoteTransitionHandler,
+                ReturnHomeComposition composition,
+                Object transitionToken, Object transitionInfo,
+                Object mergeTarget,
+                SurfaceControl.Transaction startTransaction,
+                Object preparedOpenInfo,
+                SurfaceControl.Transaction preparedFinishTransaction,
+                Object preparedFinishCallback, Object elementChange,
+                Object appChange,
+                SurfaceControl homeLeash, SurfaceControl elementLeash,
+                SurfaceControl appLeash, Rect fullscreenBounds,
+                Rect elementEndBounds, int transitionType, int appFlags,
+                int elementStartDisplayId,
+                int elementEndDisplayId, int transitionDebugId,
+                int preparedDebugId) {
+            this.handler = handler;
+            this.controller = controller;
+            this.ownerThread = ownerThread;
+            this.transitions = transitions;
+            this.remoteTransitionHandler = remoteTransitionHandler;
+            this.composition = composition;
+            this.transitionToken = transitionToken;
+            this.transitionInfo = transitionInfo;
+            this.mergeTarget = mergeTarget;
+            this.startTransaction = startTransaction;
+            this.preparedOpenInfo = preparedOpenInfo;
+            this.preparedFinishTransaction = preparedFinishTransaction;
+            this.preparedFinishCallback = preparedFinishCallback;
+            this.elementChange = elementChange;
+            this.appChange = appChange;
+            this.homeLeash = homeLeash;
+            this.elementLeash = elementLeash;
+            this.appLeash = appLeash;
+            this.fullscreenBounds = new Rect(fullscreenBounds);
+            this.elementEndBounds = new Rect(elementEndBounds);
+            this.transitionType = transitionType;
+            this.appFlags = appFlags;
+            this.elementStartDisplayId = elementStartDisplayId;
+            this.elementEndDisplayId = elementEndDisplayId;
+            this.transitionDebugId = transitionDebugId;
+            this.preparedDebugId = preparedDebugId;
+        }
+    }
+
+    private String miuiHomeStartTransactionHookId(Method method) {
+        StringBuilder signature = new StringBuilder(method.getName());
+        for (Class<?> parameter : method.getParameterTypes()) {
+            signature.append(':').append(parameter.getName());
+        }
+        return "miui_home_trace_surface_transaction_"
+                + method.getName() + "_"
+                + method.getParameterCount() + "_"
+                + Integer.toHexString(signature.toString().hashCode());
     }
 
     private void hookMiuiHomeReturnHomeCloseInterruption(
@@ -1784,6 +2328,170 @@ public final class MiuiBackGestureHook extends XposedModule {
                     miuiHomeOpenBreakController, "animationEnd");
         });
         return result;
+    }
+
+    private Object prepareMiuiHomeElementTransitionContinuity(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        boolean prepared = false;
+        if (controller != null) {
+            try {
+                prepared = controller.prepareElementTransitionContinuity(
+                        chain.getThisObject(), chain.getArg(0));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect Xiaomi element CLOSE takeover",
+                        throwable);
+            }
+        }
+        try {
+            return chain.proceed();
+        } catch (Throwable throwable) {
+            if (prepared && controller != null) {
+                controller.invalidateElementTransitionContinuity(
+                        null, "injectRemoteTransitionThrew", true);
+            }
+            throw throwable;
+        }
+    }
+
+    private Object rearmMiuiHomeElementLeashAfterNativeClear(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            try {
+                controller.rearmElementLeashAfterNativeClear(
+                        chain.getThisObject());
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to rearm predictive leash after Xiaomi clear",
+                        throwable);
+            }
+        }
+        return result;
+    }
+
+    private Object observeMiuiHomeElementAnimType(XposedInterface.Chain chain)
+            throws Throwable {
+        Object params = chain.getArg(0);
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        Object result = chain.proceed();
+        if (controller != null) {
+            try {
+                controller.adoptElementTransitionIfStarted(
+                        chain.getThisObject(), params);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to verify Xiaomi element CLOSE adoption",
+                        throwable);
+            }
+        }
+        return result;
+    }
+
+    private Object captureMiuiHomeNativeGeometry(XposedInterface.Chain chain)
+            throws Throwable {
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        if (controller == null
+                || !controller.hasEligibleNativeGeometrySession()) {
+            return chain.proceed();
+        }
+        ReturnHomeNativeGeometrySnapshot previousPendingGeometry =
+                miuiHomePendingNativeGeometry.get();
+        long traceId = miuiHomeNativeGeometryFrameIds.incrementAndGet();
+        ReturnHomeNativeGeometrySnapshot pendingGeometry =
+                controller.prepareNativeGeometryBeforeAnimUpdate(
+                        chain.getThisObject(), chain.getArg(0),
+                        chain.getArg(3), traceId);
+        if (pendingGeometry == null) {
+            miuiHomePendingNativeGeometry.remove();
+        } else {
+            miuiHomePendingNativeGeometry.set(pendingGeometry);
+        }
+        try {
+            return chain.proceed();
+        } finally {
+            if (previousPendingGeometry == null) {
+                miuiHomePendingNativeGeometry.remove();
+            } else {
+                miuiHomePendingNativeGeometry.set(
+                        previousPendingGeometry);
+            }
+        }
+    }
+
+    private Object applyMiuiHomeNativeSurfaceParams(
+            XposedInterface.Chain chain) throws Throwable {
+        Object surfaceParams = chain.getArg(1);
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        if (controller == null
+                || !controller.hasEligibleNativeGeometrySession()) {
+            return chain.proceed();
+        }
+        ReturnHomeNativeGeometrySnapshot pendingGeometry =
+                miuiHomePendingNativeGeometry.get();
+        long frameId = pendingGeometry == null
+                ? miuiHomeNativeGeometryFrameIds.incrementAndGet()
+                : pendingGeometry.frameTraceId;
+        ReturnHomeNativeGeometrySnapshot surfaceGeometry =
+                controller.captureNativeGeometryFromSurfaceParams(
+                        frameId, surfaceParams);
+        ReturnHomeNativeGeometrySnapshot frameGeometry =
+                surfaceGeometry == null ? pendingGeometry : surfaceGeometry;
+        Object geometryApplyLock = controller.resolveNativeGeometryFrameApplyLock(
+                frameId, chain.getArg(0), frameGeometry, surfaceParams);
+        if (geometryApplyLock == null) {
+            return chain.proceed();
+        }
+        synchronized (geometryApplyLock) {
+            return chain.proceed();
+        }
+    }
+
+    private Object armMiuiHomeTransitionStartGeometry(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        Object result = chain.proceed();
+        if (controller != null) {
+            controller.armElementAndClosingLeashStartGeometry(
+                    chain.getArg(0), chain.getArg(1), chain.getArg(3),
+                    chain.getArg(4));
+        }
+        return result;
+    }
+
+    private Object applyMiuiHomeStartGeometry(
+            XposedInterface.Chain chain) throws Throwable {
+        if (!"apply".equals(chain.getExecutable().getName())
+                || chain.getArgs().size() != 1
+                || !Boolean.TRUE.equals(chain.getArg(0))) {
+            // Retire old diagnostic hooks and ignore unrelated apply paths.
+            return chain.proceed();
+        }
+        Object transaction = chain.getThisObject();
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        Object startGeometryApplyLock = controller == null ? null
+                : controller.resolveStartGeometryApplyLock(
+                transaction, chain.getArgs());
+        if (startGeometryApplyLock == null) {
+            return chain.proceed();
+        }
+        synchronized (startGeometryApplyLock) {
+            controller.refreshStartGeometryAtApply(transaction);
+            try {
+                Object result = chain.proceed();
+                controller.finishStartGeometryApply(transaction, true);
+                return result;
+            } catch (Throwable throwable) {
+                controller.finishStartGeometryApply(transaction, false);
+                throw throwable;
+            }
+        }
     }
 
     private Object preserveMiuiHomeOpenAcrossPermissionMerge(
@@ -5298,6 +6006,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookBackNavigationInfoReceived(controllerClass);
             hookBackPrepareTransitionReparent(classLoader);
             hookBackCommitComposition(classLoader);
+            hookBackFinishOpenAtomicTransfer(classLoader);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
@@ -5349,6 +6058,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     recordHookHandle(hook(method)
                             .setId("systemui_back_commit_composition")
                             .intercept(this::correctPredictiveBackCommitComposition));
+                    backCommitCompositionHookReady = true;
                     log(Log.INFO, TAG,
                             "Hooked Shell predictive return-home commit composition");
                     return;
@@ -5396,8 +6106,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (composition == null) {
                 return result;
             }
-            Object closingTarget = composition.closingTarget;
-            Object openingTarget = composition.openingTarget;
             int closingTaskId = composition.closingTaskId;
             int openingTaskId = composition.openingTaskId;
             Object changesObject = invokeAnyMethod(info, "getChanges", new Object[0]);
@@ -5454,15 +6162,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (matchingChange == null || closingMatchCount != 1
                     || homeMatchCount != 1 || wallpaperMatchCount != 1
                     || unexpectedChange) {
-                log(Log.INFO, TAG,
-                        "Predictive return-home prepare role needs no correction"
-                                + ", taskId=" + closingTaskId
-                                + ", mode=" + matchingMode
-                                + ", closingMatches=" + closingMatchCount
-                                + ", homeMatches=" + homeMatchCount
-                                + ", wallpaperMatches="
-                                + wallpaperMatchCount
-                                + ", unexpectedChange=" + unexpectedChange);
                 return result;
             }
             Object changeLeashObject = invokeAnyMethod(
@@ -5503,16 +6202,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.INFO, TAG,
                     "Corrected Xiaomi predictive return-home prepare role"
                             + ", taskId=" + closingTaskId
-                            + ", mode=" + matchingMode + "->" + normalizedMode
-                            + ", changeLeash=" + changeLeash
-                            + ", closingLeash=" + composition.closingLeash
-                            + ", closingPrefix=" + readIntFieldOrDefault(
-                            closingTarget, "prefixOrderIndex", -1)
-                            + ", openingTaskId=" + openingTaskId
-                            + ", openingPrefix=" + readIntFieldOrDefault(
-                            openingTarget, "prefixOrderIndex", -1)
-                            + ", openingLeash=" + shortObject(
-                            readFieldOrNull(openingTarget, "leash")));
+                            + ", mode=" + matchingMode + "->" + normalizedMode);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
                     "Failed Xiaomi predictive return-home prepare role correction",
@@ -5531,13 +6221,55 @@ public final class MiuiBackGestureHook extends XposedModule {
                     "Failed to inspect predictive return-home commit composition",
                     throwable);
         }
-
-        Object result = chain.proceed();
+        ReturnHomeFinishTransferCandidate finishTransfer = null;
+        if (isReturnHomeFinishTransferReady()) {
+            try {
+                finishTransfer = captureReturnHomeFinishTransferCandidate(chain);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect rejected return-home CLOSE boundary",
+                        throwable);
+            }
+        }
+        boolean finishTransferArmed = false;
+        if (finishTransfer != null) {
+            ReturnHomeFinishTransferCandidate nested =
+                    returnHomeFinishTransferCandidate.get();
+            if (nested == null) {
+                returnHomeFinishTransferCandidate.set(finishTransfer);
+                finishTransferArmed = true;
+                log(Log.INFO, TAG,
+                        "Armed atomic prepared-finish transfer"
+                                + ", transitionDebugId="
+                                + finishTransfer.transitionDebugId
+                                + ", preparedDebugId="
+                                + finishTransfer.preparedDebugId
+                                + ", taskId="
+                                + finishTransfer.composition.closingTaskId);
+            } else {
+                log(Log.WARN, TAG,
+                        "Rejected nested atomic prepared-finish transfer"
+                                + ", transitionDebugId="
+                                + finishTransfer.transitionDebugId
+                                + ", activeTransitionDebugId="
+                                + nested.transitionDebugId);
+            }
+        }
+        Object result;
+        try {
+            result = chain.proceed();
+        } finally {
+            if (finishTransferArmed
+                    && returnHomeFinishTransferCandidate.get()
+                    == finishTransfer) {
+                returnHomeFinishTransferCandidate.remove();
+            }
+        }
         if (candidate == null) {
             return result;
         }
+        ReturnHomeComposition composition = candidate.composition;
         try {
-            ReturnHomeComposition composition = candidate.composition;
             Object currentApps = readField(candidate.controller, "mApps");
             Object navigationInfo = readField(candidate.controller,
                     "mBackNavigationInfo");
@@ -5570,63 +6302,36 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean changeLeashValid = candidate.changeLeash.isValid();
             boolean closingLeashValid = composition.closingLeash.isValid();
             boolean openingLeashValid = composition.openingLeash.isValid();
-            if (!appsSame || !callIdentitySame || !returnHomeStillCurrent
-                    || !closeStillRequested || !prepareOpenSame
-                    || !preparedInfoConsumed || !freshFinishCallback
-                    || !changeLeashValid || !closingLeashValid
-                    || !openingLeashValid) {
+            boolean accepted = appsSame && callIdentitySame
+                    && returnHomeStillCurrent
+                    && closeStillRequested && prepareOpenSame
+                    && preparedInfoConsumed && freshFinishCallback
+                    && changeLeashValid && closingLeashValid
+                    && openingLeashValid;
+            if (accepted) {
+                try (SurfaceControl.Transaction transaction =
+                             new SurfaceControl.Transaction()) {
+                    // This reparent is intentionally after the original handler has accepted
+                    // the merge. The exact rejected CLOSE+IS_ELEMENT boundary is handled by
+                    // the separate prepared-finish/start atomic composition path below.
+                    transaction.reparent(candidate.changeLeash,
+                            composition.closingLeash);
+                    transaction.apply();
+                }
                 log(Log.INFO, TAG,
-                        "Skipped stale predictive return-home commit composition"
+                        "Corrected accepted predictive return-home commit composition"
                                 + ", taskId=" + composition.closingTaskId
-                                + ", transitionType=" + candidate.transitionType
+                                + ", homeTaskId=" + composition.openingTaskId
+                                + ", transitionType="
+                                + candidate.transitionType
                                 + ", changeMode=" + candidate.changeMode
-                                + ", appsSame=" + appsSame
-                                + ", callIdentitySame=" + callIdentitySame
-                                + ", navigationType=" + navigationType
-                                + ", closeRequested=" + currentCloseRequested
-                                + ", prepareOpenSame=" + prepareOpenSame
-                                + ", prepareOpen=" + shortObject(
-                                currentPrepareOpen)
-                                + ", preparedInfoConsumed="
-                                + preparedInfoConsumed
-                                + ", openInfo=" + shortObject(currentOpenInfo)
-                                + ", freshFinishCallback="
-                                + freshFinishCallback
-                                + ", finishCallback=" + shortObject(
-                                animationFinishCallback)
-                                + ", leashValid=" + changeLeashValid + "/"
-                                + closingLeashValid + "/" + openingLeashValid);
-                return result;
+                                + ", changeLeash=" + candidate.changeLeash
+                                + ", closingLeash="
+                                + composition.closingLeash);
             }
-
-            try (SurfaceControl.Transaction transaction =
-                         new SurfaceControl.Transaction()) {
-                // Xiaomi's prepared transition reports the departing task as opening and the
-                // commit transaction can consequently restore it outside the predictive
-                // closing wrapper. Reassert the exact AOSP handleCloseTransition parent after
-                // the accepted merge. The existing animation leashes retain WM's layer order;
-                // changing it without a SurfaceFlinger trace would be a separate intervention.
-                transaction.reparent(candidate.changeLeash,
-                        composition.closingLeash);
-                transaction.apply();
-            }
-            log(Log.INFO, TAG,
-                    "Corrected predictive return-home commit composition"
-                            + ", taskId=" + composition.closingTaskId
-                            + ", homeTaskId=" + composition.openingTaskId
-                            + ", displayId=" + composition.displayId
-                            + ", transitionType=" + candidate.transitionType
-                            + ", changeMode=" + candidate.changeMode
-                            + ", backGestureAnimated="
-                            + candidate.backGestureAnimated
-                            + ", changeLeash=" + candidate.changeLeash
-                            + ", closingLeash=" + composition.closingLeash
-                            + ", openingLeash=" + composition.openingLeash
-                            + ", prefixes=" + composition.closingPrefix
-                            + "/" + composition.openingPrefix);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
-                    "Failed predictive return-home commit composition correction",
+                    "Failed predictive return-home merge exit verification",
                     throwable);
         }
         return result;
@@ -5753,6 +6458,709 @@ public final class MiuiBackGestureHook extends XposedModule {
                 finishCallback, preparedOpenInfo,
                 previousAnimationFinishCallback, transitionType,
                 matchingMode, backGestureAnimated);
+    }
+
+    private ReturnHomeFinishTransferCandidate
+            captureReturnHomeFinishTransferCandidate(
+            XposedInterface.Chain chain) throws Exception {
+        Thread ownerThread = Thread.currentThread();
+        if (!isReturnHomeFinishTransferReady()
+                || !"wmshell.main".equals(ownerThread.getName())) {
+            return null;
+        }
+        Object handler = chain.getThisObject();
+        if (!Boolean.TRUE.equals(readField(
+                handler, "mCloseTransitionRequested"))) {
+            return null;
+        }
+        Object controller = readField(handler, "this$0");
+        Object navigationInfo = readField(controller, "mBackNavigationInfo");
+        Object navigationType = navigationInfo == null ? null
+                : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+        if (!(navigationType instanceof Number)
+                || ((Number) navigationType).intValue()
+                != TYPE_RETURN_TO_HOME) {
+            return null;
+        }
+
+        Object transitionToken = chain.getArg(0);
+        Object info = chain.getArg(1);
+        Object startTransactionObject = chain.getArg(2);
+        Object incomingFinishTransactionObject = chain.getArg(3);
+        Object mergeTarget = chain.getArg(4);
+        Object incomingFinishCallback = chain.getArg(5);
+        Object preparedOpenInfo = readField(handler, "mOpenTransitionInfo");
+        Object preparedOpenToken = readField(
+                handler, "mPrepareOpenTransition");
+        Object preparedFinishTransactionObject = readField(
+                handler, "mFinishOpenTransaction");
+        Object preparedFinishCallback = readField(
+                handler, "mFinishOpenTransitionCallback");
+        Object animationFinishCallback = readField(
+                handler, "mOnAnimationFinishCallback");
+        Object closePrepareTransition = readField(
+                handler, "mClosePrepareTransition");
+        Object takeoverHandler = readField(handler, "mTakeoverHandler");
+        if (transitionToken == null || info == null
+                || !(startTransactionObject
+                instanceof SurfaceControl.Transaction)
+                || !(incomingFinishTransactionObject
+                instanceof SurfaceControl.Transaction)
+                || mergeTarget == null || incomingFinishCallback == null
+                || preparedOpenInfo == null
+                || preparedOpenToken != mergeTarget
+                || !(preparedFinishTransactionObject
+                instanceof SurfaceControl.Transaction)
+                || preparedFinishCallback == null
+                || animationFinishCallback != null
+                || closePrepareTransition != null
+                || takeoverHandler != null
+                || transitionToken == mergeTarget
+                || startTransactionObject == incomingFinishTransactionObject
+                || startTransactionObject == preparedFinishTransactionObject
+                || incomingFinishTransactionObject
+                == preparedFinishTransactionObject
+                || incomingFinishCallback == preparedFinishCallback) {
+            return null;
+        }
+
+        Object incomingTypeObject = invokeAnyMethod(
+                info, "getType", new Object[0]);
+        Object preparedTypeObject = invokeAnyMethod(
+                preparedOpenInfo, "getType", new Object[0]);
+        int incomingType = incomingTypeObject instanceof Number
+                ? ((Number) incomingTypeObject).intValue() : -1;
+        int preparedType = preparedTypeObject instanceof Number
+                ? ((Number) preparedTypeObject).intValue() : -1;
+        int transitionDebugId = readTransitionDebugId(info);
+        int preparedDebugId = readTransitionDebugId(preparedOpenInfo);
+        boolean supportedIncomingType = incomingType == TRANSIT_CLOSE
+                || incomingType == TRANSIT_TO_BACK;
+        if (!supportedIncomingType
+                || preparedType != TRANSIT_PREDICTIVE_BACK
+                || transitionDebugId < 0 || preparedDebugId < 0
+                || transitionDebugId == preparedDebugId) {
+            return null;
+        }
+        Object transitions = readField(handler, "mTransitions");
+        Object remoteTransitionHandler = invokeAnyMethod(
+                transitions, "getRemoteTransitionHandler", new Object[0]);
+        Object remoteHandlerType = invokeAnyMethod(
+                remoteTransitionHandler, "getTransitionType", new Object[0]);
+        Object miuiTransitionInfo = invokeAnyMethod(
+                info, "getMiuiTransitionInfo", new Object[0]);
+        Object expectedHandlerType = invokeAnyMethod(
+                miuiTransitionInfo, "getExpectHandlerType", new Object[0]);
+        Object remoteCanHandle = invokeAnyMethod(
+                remoteTransitionHandler, "canHandleTransition",
+                new Object[]{transitionToken, info});
+        if (!"com.android.wm.shell.transition.RemoteTransitionHandler".equals(
+                remoteTransitionHandler.getClass().getName())
+                || !(remoteHandlerType instanceof Number)
+                || ((Number) remoteHandlerType).intValue() != 11
+                || !(expectedHandlerType instanceof Number)
+                || ((Number) expectedHandlerType).intValue() != 11
+                || !Boolean.TRUE.equals(remoteCanHandle)) {
+            return null;
+        }
+
+        ReturnHomeComposition composition = resolveReturnHomeComposition(
+                readField(controller, "mApps"));
+        if (composition == null) {
+            return null;
+        }
+        Object focusedTaskIdObject = invokeAnyMethod(
+                navigationInfo, "getFocusedTaskId", new Object[0]);
+        if (!(focusedTaskIdObject instanceof Number)
+                || ((Number) focusedTaskIdObject).intValue()
+                != composition.closingTaskId) {
+            return null;
+        }
+        Rect closingBounds = resolveExactRemoteTargetTransitionBounds(
+                composition.closingTarget);
+        Rect openingBounds = resolveExactRemoteTargetTransitionBounds(
+                composition.openingTarget);
+        if (!closingBounds.equals(openingBounds)) {
+            return null;
+        }
+
+        Object changesObject = invokeAnyMethod(
+                info, "getChanges", new Object[0]);
+        if (!(changesObject instanceof List<?>)
+                || ((List<?>) changesObject).size() != 3) {
+            return null;
+        }
+        Object elementChange = null;
+        Object appChange = null;
+        SurfaceControl homeLeash = null;
+        SurfaceControl elementLeash = null;
+        SurfaceControl appLeash = null;
+        Rect elementEndBounds = null;
+        int capturedAppFlags = Integer.MIN_VALUE;
+        int elementStartDisplayId = Integer.MIN_VALUE;
+        int elementEndDisplayId = Integer.MIN_VALUE;
+        for (Object change : (List<?>) changesObject) {
+            Object modeObject = invokeAnyMethod(
+                    change, "getMode", new Object[0]);
+            Object flagsObject = invokeAnyMethod(
+                    change, "getFlags", new Object[0]);
+            Object taskInfo = invokeAnyMethod(
+                    change, "getTaskInfo", new Object[0]);
+            Object leashObject = invokeAnyMethod(
+                    change, "getLeash", new Object[0]);
+            Object startBoundsObject = invokeAnyMethod(
+                    change, "getStartAbsBounds", new Object[0]);
+            Object endBoundsObject = invokeAnyMethod(
+                    change, "getEndAbsBounds", new Object[0]);
+            Object startDisplayObject = invokeAnyMethod(
+                    change, "getStartDisplayId", new Object[0]);
+            Object endDisplayObject = invokeAnyMethod(
+                    change, "getEndDisplayId", new Object[0]);
+            int mode = modeObject instanceof Number
+                    ? ((Number) modeObject).intValue() : -1;
+            int flags = flagsObject instanceof Number
+                    ? ((Number) flagsObject).intValue() : 0;
+            int taskId = readIntFieldOrDefault(taskInfo, "taskId", -1);
+            int startDisplayId = startDisplayObject instanceof Number
+                    ? ((Number) startDisplayObject).intValue() : -2;
+            int endDisplayId = endDisplayObject instanceof Number
+                    ? ((Number) endDisplayObject).intValue() : -2;
+            if (!(leashObject instanceof SurfaceControl)
+                    || !((SurfaceControl) leashObject).isValid()
+                    || !(startBoundsObject instanceof Rect)
+                    || !(endBoundsObject instanceof Rect)) {
+                return null;
+            }
+            Rect startBounds = (Rect) startBoundsObject;
+            Rect endBounds = (Rect) endBoundsObject;
+            if (taskId == composition.openingTaskId
+                    && homeLeash == null) {
+                if (mode != TRANSIT_TO_FRONT
+                        || flags != XIAOMI_ELEMENT_HOME_CHANGE_FLAGS
+                        || resolveTaskInfoActivityType(taskInfo)
+                        != ACTIVITY_TYPE_HOME
+                        || resolveTaskInfoWindowingMode(taskInfo)
+                        != WINDOWING_MODE_FULLSCREEN
+                        || readIntFieldOrDefault(
+                        taskInfo, "displayId", -1)
+                        != composition.displayId
+                        || startDisplayId != composition.displayId
+                        || endDisplayId != composition.displayId
+                        || !startBounds.equals(openingBounds)
+                        || !endBounds.equals(openingBounds)) {
+                    return null;
+                }
+                homeLeash = (SurfaceControl) leashObject;
+                continue;
+            }
+            if (taskId == composition.closingTaskId
+                    && appChange == null) {
+                boolean appFlags = flags
+                        == FLAG_BACK_GESTURE_ANIMATED
+                        || flags == (FLAG_BACK_GESTURE_ANIMATED
+                        | FLAG_DISPLAY_CHANGE);
+                if (mode != incomingType || !appFlags
+                        || resolveTaskInfoActivityType(taskInfo)
+                        != ACTIVITY_TYPE_STANDARD
+                        || resolveTaskInfoWindowingMode(taskInfo)
+                        != WINDOWING_MODE_FULLSCREEN
+                        || readIntFieldOrDefault(
+                        taskInfo, "displayId", -1)
+                        != composition.displayId
+                        || startDisplayId != composition.displayId
+                        || endDisplayId != composition.displayId
+                        || !startBounds.equals(closingBounds)
+                        || !endBounds.equals(closingBounds)) {
+                    return null;
+                }
+                appChange = change;
+                appLeash = (SurfaceControl) leashObject;
+                capturedAppFlags = flags;
+                continue;
+            }
+            if (taskInfo == null && elementChange == null
+                    && mode == incomingType
+                    && flags == FLAG_IS_ELEMENT
+                    && startBounds.equals(closingBounds)
+                    && !endBounds.isEmpty()
+                    && !endBounds.equals(closingBounds)
+                    && startDisplayId == endDisplayId
+                    && (startDisplayId == -1
+                    || startDisplayId == composition.displayId)
+                    && closingBounds.contains(endBounds)) {
+                elementChange = change;
+                elementLeash = (SurfaceControl) leashObject;
+                elementEndBounds = new Rect(endBounds);
+                elementStartDisplayId = startDisplayId;
+                elementEndDisplayId = endDisplayId;
+                continue;
+            }
+            return null;
+        }
+        if (elementChange == null || appChange == null || homeLeash == null
+                || elementLeash == null || appLeash == null
+                || elementEndBounds == null
+                || capturedAppFlags == Integer.MIN_VALUE
+                || elementStartDisplayId == Integer.MIN_VALUE
+                || elementEndDisplayId == Integer.MIN_VALUE
+                || surfacesAreSame(homeLeash, elementLeash)
+                || surfacesAreSame(homeLeash, appLeash)
+                || surfacesAreSame(elementLeash, appLeash)
+                || surfacesAreSame(appLeash,
+                composition.closingLeash)
+                || surfacesAreSame(homeLeash,
+                composition.openingLeash)
+                || surfacesAreSame(elementLeash,
+                composition.closingLeash)
+                || surfacesAreSame(elementLeash,
+                composition.openingLeash)) {
+            return null;
+        }
+
+        Object preparedChangesObject = invokeAnyMethod(
+                preparedOpenInfo, "getChanges", new Object[0]);
+        if (!(preparedChangesObject instanceof List<?>)
+                || ((List<?>) preparedChangesObject).size() != 3) {
+            return null;
+        }
+        SurfaceControl preparedAppLeash = null;
+        SurfaceControl preparedHomeLeash = null;
+        SurfaceControl preparedWallpaperLeash = null;
+        for (Object change : (List<?>) preparedChangesObject) {
+            Object modeObject = invokeAnyMethod(
+                    change, "getMode", new Object[0]);
+            Object flagsObject = invokeAnyMethod(
+                    change, "getFlags", new Object[0]);
+            Object taskInfo = invokeAnyMethod(
+                    change, "getTaskInfo", new Object[0]);
+            Object leashObject = invokeAnyMethod(
+                    change, "getLeash", new Object[0]);
+            Object startBoundsObject = invokeAnyMethod(
+                    change, "getStartAbsBounds", new Object[0]);
+            Object endBoundsObject = invokeAnyMethod(
+                    change, "getEndAbsBounds", new Object[0]);
+            Object startDisplayObject = invokeAnyMethod(
+                    change, "getStartDisplayId", new Object[0]);
+            Object endDisplayObject = invokeAnyMethod(
+                    change, "getEndDisplayId", new Object[0]);
+            int mode = modeObject instanceof Number
+                    ? ((Number) modeObject).intValue() : -1;
+            int flags = flagsObject instanceof Number
+                    ? ((Number) flagsObject).intValue() : 0;
+            int taskId = readIntFieldOrDefault(taskInfo, "taskId", -1);
+            int startDisplayId = startDisplayObject instanceof Number
+                    ? ((Number) startDisplayObject).intValue() : -2;
+            int endDisplayId = endDisplayObject instanceof Number
+                    ? ((Number) endDisplayObject).intValue() : -2;
+            if (!(leashObject instanceof SurfaceControl)
+                    || !((SurfaceControl) leashObject).isValid()
+                    || !(startBoundsObject instanceof Rect)
+                    || !(endBoundsObject instanceof Rect)) {
+                return null;
+            }
+            Rect startBounds = (Rect) startBoundsObject;
+            Rect endBounds = (Rect) endBoundsObject;
+            if (taskId == composition.closingTaskId
+                    && preparedAppLeash == null) {
+                boolean appFlags = flags
+                        == FLAG_BACK_GESTURE_ANIMATED
+                        || flags == (FLAG_BACK_GESTURE_ANIMATED
+                        | FLAG_DISPLAY_CHANGE);
+                if (mode != TRANSIT_CHANGE || !appFlags
+                        || resolveTaskInfoActivityType(taskInfo)
+                        != ACTIVITY_TYPE_STANDARD
+                        || resolveTaskInfoWindowingMode(taskInfo)
+                        != WINDOWING_MODE_FULLSCREEN
+                        || readIntFieldOrDefault(
+                        taskInfo, "displayId", -1)
+                        != composition.displayId
+                        || startDisplayId != composition.displayId
+                        || endDisplayId != composition.displayId
+                        || !startBounds.equals(closingBounds)
+                        || !endBounds.equals(closingBounds)) {
+                    return null;
+                }
+                preparedAppLeash = (SurfaceControl) leashObject;
+                continue;
+            }
+            if (taskId == composition.openingTaskId
+                    && preparedHomeLeash == null) {
+                if (mode != TRANSIT_TO_FRONT
+                        || flags != XIAOMI_PREPARED_HOME_CHANGE_FLAGS
+                        || resolveTaskInfoActivityType(taskInfo)
+                        != ACTIVITY_TYPE_HOME
+                        || resolveTaskInfoWindowingMode(taskInfo)
+                        != WINDOWING_MODE_FULLSCREEN
+                        || readIntFieldOrDefault(
+                        taskInfo, "displayId", -1)
+                        != composition.displayId
+                        || startDisplayId != composition.displayId
+                        || endDisplayId != composition.displayId
+                        || !startBounds.equals(openingBounds)
+                        || !endBounds.equals(openingBounds)) {
+                    return null;
+                }
+                preparedHomeLeash = (SurfaceControl) leashObject;
+                continue;
+            }
+            if (taskInfo == null && preparedWallpaperLeash == null
+                    && mode == TRANSIT_TO_FRONT
+                    && flags == FLAG_IS_WALLPAPER
+                    && startBounds.equals(closingBounds)
+                    && endBounds.equals(closingBounds)) {
+                preparedWallpaperLeash = (SurfaceControl) leashObject;
+                continue;
+            }
+            return null;
+        }
+        if (preparedAppLeash == null || preparedHomeLeash == null
+                || preparedWallpaperLeash == null
+                || !surfacesAreSame(preparedAppLeash, appLeash)
+                || !surfacesAreSame(preparedHomeLeash, homeLeash)
+                || surfacesAreSame(preparedWallpaperLeash, appLeash)
+                || surfacesAreSame(preparedWallpaperLeash, homeLeash)
+                || surfacesAreSame(preparedWallpaperLeash, elementLeash)) {
+            return null;
+        }
+
+        return new ReturnHomeFinishTransferCandidate(
+                handler, controller, ownerThread, transitions,
+                remoteTransitionHandler, composition,
+                transitionToken, info,
+                mergeTarget,
+                (SurfaceControl.Transaction) startTransactionObject,
+                preparedOpenInfo,
+                (SurfaceControl.Transaction) preparedFinishTransactionObject,
+                preparedFinishCallback, elementChange, appChange,
+                homeLeash, elementLeash, appLeash, closingBounds,
+                elementEndBounds, incomingType, capturedAppFlags,
+                elementStartDisplayId,
+                elementEndDisplayId, transitionDebugId, preparedDebugId);
+    }
+
+    private Rect resolveExactRemoteTargetTransitionBounds(Object target)
+            throws Exception {
+        Object startBoundsObject = readField(target, "startBounds");
+        Object sourceBoundsObject = readField(
+                target, "sourceContainerBounds");
+        if (!(startBoundsObject instanceof Rect)
+                || !(sourceBoundsObject instanceof Rect)) {
+            throw new IllegalStateException(
+                    "RemoteAnimationTarget transition bounds unavailable");
+        }
+        Rect startBounds = (Rect) startBoundsObject;
+        Rect sourceBounds = (Rect) sourceBoundsObject;
+        if (startBounds.isEmpty() || !startBounds.equals(sourceBounds)) {
+            throw new IllegalStateException(
+                    "RemoteAnimationTarget transition bounds mismatch"
+                            + ", start=" + startBounds
+                            + ", source=" + sourceBounds);
+        }
+        return new Rect(startBounds);
+    }
+
+    private boolean isExactReturnHomeFinishTransferPostShape(
+            ReturnHomeFinishTransferCandidate candidate) throws Exception {
+        Object typeObject = invokeAnyMethod(
+                candidate.transitionInfo, "getType", new Object[0]);
+        Object changesObject = invokeAnyMethod(
+                candidate.transitionInfo, "getChanges", new Object[0]);
+        if (!(typeObject instanceof Number)
+                || ((Number) typeObject).intValue()
+                != candidate.transitionType
+                || !(changesObject instanceof List<?>)
+                || ((List<?>) changesObject).size() != 2) {
+            return false;
+        }
+        boolean elementMatched = false;
+        boolean appMatched = false;
+        for (Object change : (List<?>) changesObject) {
+            Object modeObject = invokeAnyMethod(
+                    change, "getMode", new Object[0]);
+            Object flagsObject = invokeAnyMethod(
+                    change, "getFlags", new Object[0]);
+            Object taskInfo = invokeAnyMethod(
+                    change, "getTaskInfo", new Object[0]);
+            Object leashObject = invokeAnyMethod(
+                    change, "getLeash", new Object[0]);
+            Object startBoundsObject = invokeAnyMethod(
+                    change, "getStartAbsBounds", new Object[0]);
+            Object endBoundsObject = invokeAnyMethod(
+                    change, "getEndAbsBounds", new Object[0]);
+            Object startDisplayObject = invokeAnyMethod(
+                    change, "getStartDisplayId", new Object[0]);
+            Object endDisplayObject = invokeAnyMethod(
+                    change, "getEndDisplayId", new Object[0]);
+            int mode = modeObject instanceof Number
+                    ? ((Number) modeObject).intValue() : -1;
+            int flags = flagsObject instanceof Number
+                    ? ((Number) flagsObject).intValue() : 0;
+            int startDisplayId = startDisplayObject instanceof Number
+                    ? ((Number) startDisplayObject).intValue() : -2;
+            int endDisplayId = endDisplayObject instanceof Number
+                    ? ((Number) endDisplayObject).intValue() : -2;
+            if (!(leashObject instanceof SurfaceControl)
+                    || !((SurfaceControl) leashObject).isValid()
+                    || !(startBoundsObject instanceof Rect)
+                    || !(endBoundsObject instanceof Rect)) {
+                return false;
+            }
+            if (change == candidate.elementChange) {
+                if (elementMatched || taskInfo != null
+                        || mode != candidate.transitionType
+                        || flags != FLAG_IS_ELEMENT
+                        || startDisplayId
+                        != candidate.elementStartDisplayId
+                        || endDisplayId != candidate.elementEndDisplayId
+                        || !candidate.fullscreenBounds.equals(
+                        startBoundsObject)
+                        || !candidate.elementEndBounds.equals(
+                        endBoundsObject)
+                        || !surfacesAreSame(
+                        (SurfaceControl) leashObject,
+                        candidate.elementLeash)) {
+                    return false;
+                }
+                elementMatched = true;
+                continue;
+            }
+            if (change == candidate.appChange) {
+                if (appMatched || taskInfo == null
+                        || mode != candidate.transitionType
+                        || flags != candidate.appFlags
+                        || readIntFieldOrDefault(
+                        taskInfo, "taskId", -1)
+                        != candidate.composition.closingTaskId
+                        || readIntFieldOrDefault(
+                        taskInfo, "displayId", -1)
+                        != candidate.composition.displayId
+                        || resolveTaskInfoActivityType(taskInfo)
+                        != ACTIVITY_TYPE_STANDARD
+                        || resolveTaskInfoWindowingMode(taskInfo)
+                        != WINDOWING_MODE_FULLSCREEN
+                        || startDisplayId
+                        != candidate.composition.displayId
+                        || endDisplayId
+                        != candidate.composition.displayId
+                        || !candidate.fullscreenBounds.equals(
+                        startBoundsObject)
+                        || !candidate.fullscreenBounds.equals(
+                        endBoundsObject)
+                        || !surfacesAreSame(
+                        (SurfaceControl) leashObject,
+                        candidate.appLeash)) {
+                    return false;
+                }
+                appMatched = true;
+                continue;
+            }
+            return false;
+        }
+        return elementMatched && appMatched
+                && candidate.homeLeash.isValid()
+                && candidate.elementLeash.isValid()
+                && candidate.appLeash.isValid()
+                && candidate.composition.closingLeash.isValid()
+                && candidate.composition.openingLeash.isValid();
+    }
+
+    private Object transferReturnHomeFinishIntoCloseStart(
+            XposedInterface.Chain chain) throws Throwable {
+        ReturnHomeFinishTransferCandidate candidate =
+                returnHomeFinishTransferCandidate.get();
+        if (candidate == null) {
+            return chain.proceed();
+        }
+        boolean exact = false;
+        try {
+            Object handler = chain.getThisObject();
+            Object navigationInfo = readField(
+                    candidate.controller, "mBackNavigationInfo");
+            Object navigationType = navigationInfo == null ? null
+                    : invokeAnyMethod(
+                    navigationInfo, "getType", new Object[0]);
+            Object focusedTaskId = navigationInfo == null ? null
+                    : invokeAnyMethod(navigationInfo,
+                    "getFocusedTaskId", new Object[0]);
+            Object transitions = readField(handler, "mTransitions");
+            Object remoteTransitionHandler = invokeAnyMethod(
+                    transitions, "getRemoteTransitionHandler", new Object[0]);
+            Object remoteHandlerType = invokeAnyMethod(
+                    remoteTransitionHandler, "getTransitionType", new Object[0]);
+            Object miuiTransitionInfo = invokeAnyMethod(
+                    candidate.transitionInfo,
+                    "getMiuiTransitionInfo", new Object[0]);
+            Object expectedHandlerType = invokeAnyMethod(
+                    miuiTransitionInfo,
+                    "getExpectHandlerType", new Object[0]);
+            Object remoteCanHandle = invokeAnyMethod(
+                    remoteTransitionHandler, "canHandleTransition",
+                    new Object[]{candidate.transitionToken,
+                            candidate.transitionInfo});
+            exact = isReturnHomeFinishTransferReady()
+                    && Thread.currentThread() == candidate.ownerThread
+                    && "wmshell.main".equals(
+                    Thread.currentThread().getName())
+                    && handler == candidate.handler
+                    && chain.getExecutable().getParameterCount() == 0
+                    && Boolean.TRUE.equals(readField(
+                    handler, "mCloseTransitionRequested"))
+                    && readField(handler, "mOpenTransitionInfo") == null
+                    && readField(handler, "mPrepareOpenTransition")
+                    == candidate.mergeTarget
+                    && readField(handler, "mFinishOpenTransaction")
+                    == candidate.preparedFinishTransaction
+                    && readField(handler, "mFinishOpenTransitionCallback")
+                    == candidate.preparedFinishCallback
+                    && readField(handler, "mOnAnimationFinishCallback") == null
+                    && readField(handler, "mClosePrepareTransition") == null
+                    && readField(handler, "mTakeoverHandler") == null
+                    && transitions == candidate.transitions
+                    && remoteTransitionHandler
+                    == candidate.remoteTransitionHandler
+                    && remoteHandlerType instanceof Number
+                    && ((Number) remoteHandlerType).intValue() == 11
+                    && expectedHandlerType instanceof Number
+                    && ((Number) expectedHandlerType).intValue() == 11
+                    && Boolean.TRUE.equals(remoteCanHandle)
+                    && readField(candidate.controller, "mApps")
+                    == candidate.composition.appsIdentity
+                    && navigationType instanceof Number
+                    && ((Number) navigationType).intValue()
+                    == TYPE_RETURN_TO_HOME
+                    && focusedTaskId instanceof Number
+                    && ((Number) focusedTaskId).intValue()
+                    == candidate.composition.closingTaskId
+                    && readTransitionDebugId(candidate.transitionInfo)
+                    == candidate.transitionDebugId
+                    && readTransitionDebugId(candidate.preparedOpenInfo)
+                    == candidate.preparedDebugId
+                    && isExactReturnHomeFinishTransferPostShape(candidate);
+            boolean firstAttempt = candidate.transferAttempted.compareAndSet(0, 1);
+            if (!exact || !firstAttempt) {
+                log(Log.WARN, TAG,
+                        "Rejected prepared-finish atomic transfer at apply boundary"
+                                + ", exact=" + exact
+                                + ", transitionDebugId="
+                                + candidate.transitionDebugId
+                                + ", preparedDebugId="
+                                + candidate.preparedDebugId);
+                return chain.proceed();
+            }
+
+            // BackTransitionHandler is about to apply the prepared transition's finish
+            // transaction and then release it. Move those operations into the exact incoming
+            // native start transaction first. The original method applies the now-empty donor,
+            // while MiuiHome appends its task reparent/geometry to the same incoming transaction
+            // before the transaction is finally applied. This removes the compositor-visible
+            // gap without changing either native animation's surfaces or geometry.
+            candidate.startTransaction.merge(
+                    candidate.preparedFinishTransaction);
+            log(Log.INFO, TAG,
+                    "Transferred prepared finish into Xiaomi native start transaction"
+                            + ", transitionDebugId="
+                            + candidate.transitionDebugId
+                            + ", preparedDebugId="
+                            + candidate.preparedDebugId
+                            + ", transitionType="
+                            + candidate.transitionType
+                            + ", taskId="
+                            + candidate.composition.closingTaskId);
+        } catch (Throwable throwable) {
+            candidate.transferAttempted.set(1);
+            log(Log.WARN, TAG,
+                    "Failed prepared-finish atomic transfer"
+                            + ", exact=" + exact
+                            + ", transitionDebugId="
+                            + candidate.transitionDebugId
+                            + ", preparedDebugId="
+                            + candidate.preparedDebugId,
+                    throwable);
+        }
+        return chain.proceed();
+    }
+
+    private void hookBackFinishOpenAtomicTransfer(ClassLoader classLoader) {
+        try {
+            Class<?> handlerClass = Class.forName(
+                    BACK_TRANSITION_HANDLER, false, classLoader);
+            Method applyFinishOpen = handlerClass.getDeclaredMethod(
+                    "applyFinishOpenTransition");
+            applyFinishOpen.setAccessible(true);
+            recordHookHandle(hook(applyFinishOpen)
+                    .setId("systemui_back_finish_open_atomic")
+                    .intercept(this::transferReturnHomeFinishIntoCloseStart));
+            backFinishOpenAtomicHookReady = true;
+            boolean callerDeoptimized =
+                    deoptimizeBackFinishOpenCaller(classLoader);
+            log(isReturnHomeFinishTransferReady() ? Log.INFO : Log.WARN, TAG,
+                    "Hooked Shell prepared-finish atomic transfer"
+                            + ", outerHook="
+                            + backCommitCompositionHookReady
+                            + ", nestedHook="
+                            + backFinishOpenAtomicHookReady
+                            + ", mergeCallerDeoptimized="
+                            + callerDeoptimized
+                            + ", ready="
+                            + isReturnHomeFinishTransferReady());
+        } catch (Throwable throwable) {
+            backFinishOpenAtomicHookReady = false;
+            backFinishOpenCallerDeoptimized = false;
+            log(Log.ERROR, TAG,
+                    "Failed to hook Shell prepared-finish atomic transfer",
+                    throwable);
+        }
+    }
+
+    private boolean deoptimizeBackFinishOpenCaller(ClassLoader classLoader) {
+        backFinishOpenCallerDeoptimized = false;
+        try {
+            Class<?> handlerClass = Class.forName(
+                    BACK_TRANSITION_HANDLER, false, classLoader);
+            Method mergeAnimation = null;
+            for (Method method : handlerClass.getDeclaredMethods()) {
+                Class<?>[] parameterTypes = method.getParameterTypes();
+                if ("mergeAnimation".equals(method.getName())
+                        && parameterTypes.length == 6
+                        && parameterTypes[0] == IBinder.class
+                        && "android.window.TransitionInfo".equals(
+                        parameterTypes[1].getName())
+                        && parameterTypes[2]
+                        == SurfaceControl.Transaction.class
+                        && parameterTypes[3]
+                        == SurfaceControl.Transaction.class
+                        && parameterTypes[4] == IBinder.class
+                        && "com.android.wm.shell.transition.Transitions$TransitionFinishCallback"
+                        .equals(parameterTypes[5].getName())) {
+                    mergeAnimation = method;
+                    break;
+                }
+            }
+            if (mergeAnimation == null) {
+                log(Log.WARN, TAG,
+                        "Exact BackTransitionHandler.mergeAnimation unavailable"
+                                + " for finish/start atomicity");
+                return false;
+            }
+            mergeAnimation.setAccessible(true);
+            backFinishOpenCallerDeoptimized = deoptimize(mergeAnimation);
+            log(backFinishOpenCallerDeoptimized ? Log.INFO : Log.WARN,
+                    TAG, "Deoptimized exact BackTransitionHandler.mergeAnimation"
+                            + ", success="
+                            + backFinishOpenCallerDeoptimized);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to deoptimize BackTransitionHandler.mergeAnimation"
+                            + " for finish/start atomicity",
+                    throwable);
+        }
+        return backFinishOpenCallerDeoptimized;
+    }
+
+    private boolean isReturnHomeFinishTransferReady() {
+        return backCommitCompositionHookReady
+                && backFinishOpenAtomicHookReady
+                && backFinishOpenCallerDeoptimized;
     }
 
     private ReturnHomeComposition resolveReturnHomeComposition(Object apps)
@@ -6571,11 +7979,16 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (object == null) {
             return "null";
         }
-        String value = String.valueOf(object);
-        if (value.length() > 180) {
-            value = value.substring(0, 180) + "...";
+        try {
+            String value = String.valueOf(object);
+            if (value.length() > 180) {
+                value = value.substring(0, 180) + "...";
+            }
+            return object.getClass().getName() + "{" + value + "}";
+        } catch (Throwable throwable) {
+            return object.getClass().getName() + "{toStringError="
+                    + throwable.getClass().getSimpleName() + "}";
         }
-        return object.getClass().getName() + "{" + value + "}";
     }
 
     private void logBackNavigationInfo(Object info) {
@@ -6633,6 +8046,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 pendingCloseInterruption = new AtomicReference<>();
         private final AtomicReference<ReturnHomeDirectCancelToken>
                 pendingDirectCancel = new AtomicReference<>();
+        private final AtomicReference<ReturnHomeElementLeashReuseToken>
+                pendingElementLeashReuse = new AtomicReference<>();
         private volatile Context context;
         private volatile boolean attached;
         private volatile boolean deathLinked;
@@ -6692,6 +8107,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             attached = false;
             invalidatePendingCloseInterruption(null, "detach:" + reason);
             invalidatePendingDirectCancel(null, "detach:" + reason, true);
+            invalidateElementTransitionContinuity(
+                    null, "detach:" + reason, true);
             if (deathLinked) {
                 deathLinked = false;
                 try {
@@ -8553,6 +9970,1168 @@ public final class MiuiBackGestureHook extends XposedModule {
             return currentStatus == token.status ? token : null;
         }
 
+        boolean prepareElementTransitionContinuity(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                return false;
+            }
+            boolean merge = params != null && Boolean.TRUE.equals(
+                    invokeAnyMethod(params, "isMerge", new Object[0]));
+            if (!attached || session == null || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || !session.nativeContinuationVerified
+                    || session.nativeWindowElement != windowElement
+                    || session.nativeAnimationIdentity == null
+                    || !isReturnHomeNativeCloseType(
+                    session.nativeAnimationType)
+                    || params == null
+                    || merge) {
+                return false;
+            }
+            Object transitionTypeObject = invokeAnyMethod(
+                    params, "getTransitionType", new Object[0]);
+            Object info = invokeAnyMethod(
+                    params, "getTransitionInfo", new Object[0]);
+            Object transitionToken = invokeAnyMethod(
+                    params, "getToken", new Object[0]);
+            Object mainDebugObject = invokeAnyMethod(
+                    params, "getMainInfoDebugId", new Object[0]);
+            Object infoTypeObject = invokeAnyMethod(
+                    info, "getType", new Object[0]);
+            int transitionType = transitionTypeObject instanceof Number
+                    ? ((Number) transitionTypeObject).intValue() : -1;
+            int mainDebugId = mainDebugObject instanceof Number
+                    ? ((Number) mainDebugObject).intValue() : -1;
+            int infoType = infoTypeObject instanceof Number
+                    ? ((Number) infoTypeObject).intValue() : -1;
+            int infoDebugId = readTransitionDebugId(info);
+            // A rejected unified Shell merge can consume the opening Home change before
+            // dispatching the remaining exact element/task pair to Xiaomi. That pair keeps
+            // TO_BACK on both changes; ordinary island takeover uses CLOSE. Both are closing
+            // representations here, but every task/flag/bounds/leash guard below remains exact.
+            boolean supportedClosingInfo = infoType == TRANSIT_CLOSE
+                    || infoType == TRANSIT_TO_BACK;
+            if (transitionType != 1 || transitionToken == null
+                    || !supportedClosingInfo || infoDebugId < 0
+                    || mainDebugId != infoDebugId) {
+                return false;
+            }
+            int closingTaskId = readIntFieldOrDefault(
+                    session.closingTarget, "taskId", -1);
+            Object closingTaskInfo = readField(
+                    session.closingTarget, "taskInfo");
+            int displayId = readIntFieldOrDefault(
+                    closingTaskInfo, "displayId", -1);
+            if (closingTaskId < 0 || displayId < 0
+                    || resolveRemoteTargetActivityType(
+                    session.closingTarget) != ACTIVITY_TYPE_STANDARD
+                    || resolveRemoteTargetWindowingMode(
+                    session.closingTarget) != WINDOWING_MODE_FULLSCREEN
+                    || !session.closingLeash.isValid()) {
+                return false;
+            }
+            Object changesObject = invokeAnyMethod(
+                    info, "getChanges", new Object[0]);
+            if (!(changesObject instanceof List<?>)
+                    || ((List<?>) changesObject).size() != 2) {
+                return false;
+            }
+            Object elementChange = null;
+            Object appChange = null;
+            SurfaceControl elementLeash = null;
+            SurfaceControl appLeash = null;
+            for (Object change : (List<?>) changesObject) {
+                Object modeObject = invokeAnyMethod(
+                        change, "getMode", new Object[0]);
+                Object flagsObject = invokeAnyMethod(
+                        change, "getFlags", new Object[0]);
+                int mode = modeObject instanceof Number
+                        ? ((Number) modeObject).intValue() : -1;
+                int flags = flagsObject instanceof Number
+                        ? ((Number) flagsObject).intValue() : 0;
+                Object taskInfo = invokeAnyMethod(
+                        change, "getTaskInfo", new Object[0]);
+                Object leashObject = invokeAnyMethod(
+                        change, "getLeash", new Object[0]);
+                if (mode != infoType
+                        || !(leashObject instanceof SurfaceControl)
+                        || !((SurfaceControl) leashObject).isValid()) {
+                    return false;
+                }
+                if (flags == FLAG_IS_ELEMENT && taskInfo == null
+                        && elementChange == null) {
+                    elementChange = change;
+                    elementLeash = (SurfaceControl) leashObject;
+                    continue;
+                }
+                Object startDisplayObject = invokeAnyMethod(
+                        change, "getStartDisplayId", new Object[0]);
+                Object endDisplayObject = invokeAnyMethod(
+                        change, "getEndDisplayId", new Object[0]);
+                int startDisplayId = startDisplayObject instanceof Number
+                        ? ((Number) startDisplayObject).intValue() : -1;
+                int endDisplayId = endDisplayObject instanceof Number
+                        ? ((Number) endDisplayObject).intValue() : -1;
+                if ((flags == FLAG_BACK_GESTURE_ANIMATED
+                        || flags == (FLAG_BACK_GESTURE_ANIMATED
+                        | FLAG_DISPLAY_CHANGE))
+                        && taskInfo != null && appChange == null
+                        && readIntFieldOrDefault(taskInfo, "taskId", -1)
+                        == closingTaskId
+                        && readIntFieldOrDefault(taskInfo, "displayId", -1)
+                        == displayId
+                        && startDisplayId == displayId
+                        && endDisplayId == displayId) {
+                    // This is the terminal CLOSE TaskInfo. WMS has already removed its last
+                    // Activity by this point, so TaskInfo.getActivityType()/getWindowingMode()
+                    // may read undefined values from the emptied Configuration even though
+                    // topActivityType and the transition geometry still describe the same task.
+                    // The immutable runner target above already proved standard/fullscreen;
+                    // retain exact task/display/flags/bounds/leash identity here instead of
+                    // rejecting that valid terminal representation.
+                    appChange = change;
+                    appLeash = (SurfaceControl) leashObject;
+                    continue;
+                }
+                return false;
+            }
+            if (elementChange == null || appChange == null
+                    || elementLeash == null || appLeash == null
+                    || surfacesAreSame(elementLeash, appLeash)
+                    || surfacesAreSame(elementLeash, session.closingLeash)
+                    || surfacesAreSame(appLeash, session.closingLeash)) {
+                return false;
+            }
+            Object appStartBounds = invokeAnyMethod(
+                    appChange, "getStartAbsBounds", new Object[0]);
+            Object appEndBounds = invokeAnyMethod(
+                    appChange, "getEndAbsBounds", new Object[0]);
+            Object elementEndBounds = invokeAnyMethod(
+                    elementChange, "getEndAbsBounds", new Object[0]);
+            if (!(appStartBounds instanceof Rect)
+                    || !(appEndBounds instanceof Rect)
+                    || !(elementEndBounds instanceof Rect)
+                    || !((Rect) appStartBounds).equals(session.startRect)
+                    || !((Rect) appEndBounds).equals(session.startRect)
+                    || ((Rect) elementEndBounds).isEmpty()
+                    || ((Rect) elementEndBounds).equals(session.startRect)) {
+                return false;
+            }
+            Object stateManager = session.stateManager;
+            Object currentElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            if (currentElement != windowElement
+                    || currentIdentity != session.nativeAnimationIdentity
+                    || !session.nativeAnimationType.equals(currentType)
+                    || !running) {
+                return false;
+            }
+            Object compat = invokeAnyMethod(windowElement,
+                    "getWindowTransitionCompat", new Object[0]);
+            Object helper = invokeAnyMethod(compat,
+                    "getCallbackHelper", new Object[0]);
+            if (compat == null || helper == null
+                    || Boolean.TRUE.equals(invokeAnyMethod(
+                    helper, "hasMainFinishCallback", new Object[0]))
+                    || Boolean.TRUE.equals(invokeAnyMethod(
+                    helper, "isFinishCalled", new Object[0]))) {
+                return false;
+            }
+            invalidateElementTransitionContinuity(
+                    null, "replacement", true);
+            ReturnHomeElementLeashReuseToken reuseToken =
+                    new ReturnHomeElementLeashReuseToken(
+                            session, windowElement,
+                            session.nativeAnimationIdentity, compat, helper,
+                            info, infoDebugId, closingTaskId, appLeash,
+                            elementChange, elementLeash,
+                            session.closingLeash);
+            pendingElementLeashReuse.set(reuseToken);
+            log(Log.INFO, TAG,
+                    "Prepared predictive element leash continuity"
+                            + ", generation=" + session.generation
+                            + ", taskId=" + closingTaskId
+                            + ", transitionDebugId=" + infoDebugId
+                            + ", transitionInfoType=" + infoType
+                            + ", animationType="
+                            + session.nativeAnimationType);
+            return true;
+        }
+
+        void rearmElementLeashAfterNativeClear(Object helper)
+                throws Throwable {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.helper != helper
+                    || !token.phase.compareAndSet(
+                    ReturnHomeElementLeashReuseToken.PHASE_PREPARED,
+                    ReturnHomeElementLeashReuseToken.PHASE_REARMING)) {
+                return;
+            }
+            try {
+                ReturnHomeSession session = token.session;
+                Class<?> animBackgroundThreadClass = Class.forName(
+                        MIUI_HOME_ANIM_BACKGROUND_THREAD, false,
+                        classLoader);
+                Method getHandler = animBackgroundThreadClass.getDeclaredMethod(
+                        "getHandler");
+                getHandler.setAccessible(true);
+                Object animHandlerObject = getHandler.invoke(null);
+                boolean ownerThread = animHandlerObject instanceof Handler
+                        && ((Handler) animHandlerObject).getLooper()
+                        == Looper.myLooper();
+                boolean valid = attached && currentSession == session
+                        && session.finished.get() == 0
+                        && session.nativeWindowElement == token.windowElement
+                        && session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && session.closingLeash == token.closingLeash
+                        && token.closingLeash.isValid()
+                        && token.appLeash.isValid()
+                        && token.elementLeash.isValid()
+                        && readTransitionDebugId(token.transitionInfo)
+                        == token.transitionDebugId
+                        && readIntFieldOrDefault(token.compat,
+                        "mMainTransitionInfoDebugId", -1)
+                        == token.transitionDebugId
+                        && ownerThread;
+                if (!valid) {
+                    throw new IllegalStateException(
+                            "element leash token changed before native clear"
+                                    + ", ownerThread=" + ownerThread);
+                }
+                invokeAnyMethod(helper, "tempSaveOpenLeash",
+                        new Object[]{Integer.valueOf(token.taskId),
+                                token.closingLeash});
+                Object savedLeash = invokeAnyMethod(
+                        helper, "getOpenLeash", new Object[0]);
+                boolean containsTask = Boolean.TRUE.equals(invokeAnyMethod(
+                        helper, "containsTaskId",
+                        new Object[]{Integer.valueOf(token.taskId)}));
+                if (!(savedLeash instanceof SurfaceControl)
+                        || !containsTask || !surfacesAreSame(
+                        (SurfaceControl) savedLeash, token.closingLeash)) {
+                    throw new IllegalStateException(
+                            "Xiaomi helper did not retain predictive leash");
+                }
+                token.phase.set(
+                        ReturnHomeElementLeashReuseToken.PHASE_REARMED);
+                log(Log.INFO, TAG,
+                        "Rearmed predictive leash after Xiaomi native clear"
+                                + ", generation=" + session.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId);
+            } catch (Throwable throwable) {
+                token.phase.set(
+                        ReturnHomeElementLeashReuseToken.PHASE_INVALID);
+                pendingElementLeashReuse.compareAndSet(token, null);
+                try {
+                    Object savedLeash = invokeAnyMethod(
+                            helper, "getOpenLeash", new Object[0]);
+                    boolean containsTask = Boolean.TRUE.equals(
+                            invokeAnyMethod(helper, "containsTaskId",
+                                    new Object[]{Integer.valueOf(
+                                            token.taskId)}));
+                    if (containsTask && savedLeash instanceof SurfaceControl
+                            && surfacesAreSame((SurfaceControl) savedLeash,
+                            token.closingLeash)) {
+                        invokeAnyMethod(helper, "clearTempSaveOpenLeash",
+                                new Object[0]);
+                    }
+                } catch (Throwable rollbackFailure) {
+                    log(Log.WARN, TAG,
+                            "Failed to roll back rejected predictive leash"
+                                    + ", generation=" + token.generation,
+                            rollbackFailure);
+                }
+                throw throwable;
+            }
+        }
+
+        boolean hasEligibleNativeGeometrySession() {
+            ReturnHomeSession session = currentSession;
+            return attached && session != null
+                    && session.finished.get() == 0
+                    && session.nativeHandoffStarted
+                    && session.nativeAnimationStarted
+                    && session.nativeAnimationIdentity != null
+                    && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
+                    || "CLOSE_TO_HOME_CENTER".equals(
+                    session.nativeAnimationType))
+                    && Looper.myLooper() == Looper.getMainLooper();
+        }
+
+        private void logNativeGeometryFailureOnce(
+                ReturnHomeSession session, String stage,
+                long frameTraceId, Throwable throwable) {
+            if (session.nativeGeometryFailureLogged) {
+                return;
+            }
+            session.nativeGeometryFailureLogged = true;
+            log(Log.WARN, TAG,
+                    "Failed Xiaomi native return geometry"
+                            + ", generation=" + session.generation
+                            + ", stage=" + stage
+                            + ", frameTraceId=" + frameTraceId,
+                    throwable);
+        }
+
+        ReturnHomeNativeGeometrySnapshot prepareNativeGeometryBeforeAnimUpdate(
+                Object implementor, Object currentRectObject,
+                Object currentRadii, long frameTraceId) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || Looper.myLooper() != Looper.getMainLooper()) {
+                return null;
+            }
+            try {
+                Object windowElement = readField(
+                        implementor, "windowElement");
+                Object animation = readField(implementor, "mAnim");
+                Object typeObject = invokeAnyMethod(
+                        windowElement, "getCurrentAnimType", new Object[0]);
+                String typeName = typeObject instanceof Enum<?>
+                        ? ((Enum<?>) typeObject).name()
+                        : String.valueOf(typeObject);
+                boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                        animation, "isRunning", new Object[0]));
+                boolean exact = attached && currentSession == session
+                        && session.finished.get() == 0
+                        && session.nativeWindowElement == windowElement
+                        && session.nativeAnimationIdentity == animation
+                        && session.nativeAnimationType.equals(typeName)
+                        && ("CLOSE_TO_HOME".equals(typeName)
+                        || "CLOSE_TO_HOME_CENTER".equals(typeName))
+                        && running && currentRectObject instanceof RectF
+                        && currentRadii != null;
+                if (!exact) {
+                    return null;
+                }
+                RectF currentRect = new RectF((RectF) currentRectObject);
+                Rect fullscreen = session.startRect;
+                if (currentRect.isEmpty() || fullscreen.isEmpty()
+                        || fullscreen.left != 0 || fullscreen.top != 0) {
+                    throw new IllegalStateException(
+                            "native geometry is not fullscreen");
+                }
+                // Xiaomi's vertical-island path crops the source before applying one
+                // uniform matrix. currentRect.height() therefore includes the crop and
+                // cannot be used to infer the matrix's Y scale. Width remains the exact
+                // fullscreen source width on this guarded single-task path.
+                float scale = currentRect.width() / fullscreen.width();
+                if (!Float.isFinite(scale) || scale <= 0.0f
+                        || scale > 1.05f) {
+                    throw new IllegalStateException(
+                            "native geometry scale mismatch: " + scale);
+                }
+                float sourceCropHeight = currentRect.height() / scale;
+                int cropHeight = (int) Math.ceil(sourceCropHeight - 0.01f);
+                if (!Float.isFinite(sourceCropHeight) || cropHeight <= 0
+                        || cropHeight > fullscreen.height()) {
+                    throw new IllegalStateException(
+                            "native geometry crop mismatch: visible="
+                                    + currentRect.height() + ", scale=" + scale
+                                    + ", source=" + sourceCropHeight
+                                    + ", fullscreen=" + fullscreen);
+                }
+                Rect crop = new Rect(0, 0, fullscreen.width(), cropHeight);
+                Matrix matrix = new Matrix();
+                matrix.setScale(scale, scale);
+                matrix.postTranslate(currentRect.left, currentRect.top);
+                float[] matrixValues = new float[9];
+                matrix.getValues(matrixValues);
+                float[] physicalRadii = readNativeCornerRadii(currentRadii);
+                float[] surfaceRadii = new float[physicalRadii.length];
+                for (int index = 0; index < physicalRadii.length; index++) {
+                    surfaceRadii[index] = physicalRadii[index] / scale;
+                }
+                ReturnHomeNativeGeometrySnapshot snapshot =
+                        createNativeGeometrySnapshot(session, animation,
+                                matrixValues, crop, surfaceRadii, frameTraceId,
+                                RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE);
+                publishNativeGeometrySnapshot(session, snapshot);
+                return snapshot;
+            } catch (Throwable throwable) {
+                logNativeGeometryFailureOnce(
+                        session, "animUpdate", frameTraceId, throwable);
+                return null;
+            }
+        }
+
+        ReturnHomeNativeGeometrySnapshot captureNativeGeometryFromSurfaceParams(
+                long frameTraceId, Object surfaceParams) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || Looper.myLooper() != Looper.getMainLooper()
+                    || surfaceParams == null
+                    || !surfaceParams.getClass().isArray()) {
+                return null;
+            }
+            try {
+                boolean exactSession = attached && currentSession == session
+                        && session.finished.get() == 0
+                        && session.nativeAnimationIdentity != null
+                        && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
+                        || "CLOSE_TO_HOME_CENTER".equals(
+                        session.nativeAnimationType))
+                        && session.closingLeash != null
+                        && session.closingLeash.isValid();
+                if (!exactSession) {
+                    return null;
+                }
+                ReturnHomeNativeGeometrySnapshot captured = null;
+                int count = java.lang.reflect.Array.getLength(surfaceParams);
+                for (int index = 0; index < count; index++) {
+                    Object params = java.lang.reflect.Array.get(
+                            surfaceParams, index);
+                    Object surfaceObject = readFieldOrNull(params, "surface");
+                    if (!(surfaceObject instanceof SurfaceControl)
+                            || !((SurfaceControl) surfaceObject).isValid()
+                            || !surfacesAreSame((SurfaceControl) surfaceObject,
+                            session.closingLeash)) {
+                        continue;
+                    }
+                    Object flagsObject = readFieldOrNull(params, "flags");
+                    int flags = flagsObject instanceof Number
+                            ? ((Number) flagsObject).intValue() : 0;
+                    int requiredFlags = MIUI_SURFACE_PARAM_FLAG_MATRIX
+                            | MIUI_SURFACE_PARAM_FLAG_WINDOW_CROP
+                            | MIUI_SURFACE_PARAM_FLAG_CORNER_RADIUS
+                            | MIUI_SURFACE_PARAM_FLAG_SHOW;
+                    Object matrixObject = readFieldOrNull(params, "matrix");
+                    Object cropObject = readFieldOrNull(params, "windowCrop");
+                    Object showObject = readFieldOrNull(params, "isShow");
+                    if ((flags & requiredFlags) != requiredFlags
+                            || !Boolean.TRUE.equals(showObject)
+                            || !(matrixObject instanceof Matrix)
+                            || !(cropObject instanceof Rect)) {
+                        continue;
+                    }
+                    if (captured != null) {
+                        throw new IllegalStateException(
+                                "multiple closing geometry SurfaceParams");
+                    }
+                    float[] matrixValues = new float[9];
+                    ((Matrix) matrixObject).getValues(matrixValues);
+                    float[] surfaceRadii =
+                            readSurfaceParamsCornerRadii(params);
+                    captured = createNativeGeometrySnapshot(
+                            session, session.nativeAnimationIdentity,
+                            matrixValues, (Rect) cropObject, surfaceRadii,
+                            frameTraceId,
+                            RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS);
+                }
+                if (captured == null) {
+                    return null;
+                }
+                publishNativeGeometrySnapshot(session, captured);
+                return captured;
+            } catch (Throwable throwable) {
+                // The anim-update snapshot remains the guarded fallback for this frame.
+                return null;
+            }
+        }
+
+        private void publishNativeGeometrySnapshot(
+                ReturnHomeSession session,
+                ReturnHomeNativeGeometrySnapshot snapshot) {
+            if (session == null || snapshot == null
+                    || currentSession != session
+                    || session.generation != snapshot.generation
+                    || session.nativeAnimationIdentity
+                    != snapshot.animationIdentity
+                    || session.finished.get() != 0
+                    || Looper.myLooper() != Looper.getMainLooper()) {
+                return;
+            }
+            while (true) {
+                ReturnHomeNativeGeometrySnapshot previous =
+                        session.nativeGeometrySnapshot.get();
+                if (previous != null
+                        && (previous.frameTraceId > snapshot.frameTraceId
+                        || (previous.frameTraceId == snapshot.frameTraceId
+                        && previous.sourceKind >= snapshot.sourceKind))) {
+                    return;
+                }
+                if (!session.nativeGeometrySnapshot.compareAndSet(
+                        previous, snapshot)) {
+                    continue;
+                }
+                return;
+            }
+        }
+
+        Object resolveNativeGeometryFrameApplyLock(
+                long frameTraceId, Object applier,
+                ReturnHomeNativeGeometrySnapshot pendingSnapshot,
+                Object surfaceParams) {
+            ReturnHomeSession session = currentSession;
+            boolean exact = applier == null && session != null
+                    && Looper.myLooper() == Looper.getMainLooper()
+                    && attached && session.finished.get() == 0
+                    && session.nativeHandoffStarted
+                    && session.nativeAnimationStarted
+                    && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
+                    || "CLOSE_TO_HOME_CENTER".equals(
+                    session.nativeAnimationType))
+                    && pendingSnapshot != null
+                    && pendingSnapshot.generation == session.generation
+                    && pendingSnapshot.animationIdentity
+                    == session.nativeAnimationIdentity
+                    && pendingSnapshot.frameTraceId == frameTraceId;
+            if (!exact || surfaceParams == null
+                    || !surfaceParams.getClass().isArray()) {
+                return null;
+            }
+            try {
+                int count = java.lang.reflect.Array.getLength(
+                        surfaceParams);
+                for (int index = 0; index < count; index++) {
+                    Object params = java.lang.reflect.Array.get(
+                            surfaceParams, index);
+                    Object surface = readFieldOrNull(params, "surface");
+                    if (!(surface instanceof SurfaceControl)
+                            || !((SurfaceControl) surface).isValid()
+                            || !surfacesAreSame(
+                            (SurfaceControl) surface,
+                            session.closingLeash)) {
+                        continue;
+                    }
+                    if (nativeGeometryMatchesSurfaceParams(
+                            pendingSnapshot, params)) {
+                        return session.nativeGeometryApplyLock;
+                    }
+                }
+            } catch (Throwable throwable) {
+                logNativeGeometryFailureOnce(
+                        session, "surfaceParams", frameTraceId, throwable);
+            }
+            return null;
+        }
+
+        private ReturnHomeNativeGeometrySnapshot createNativeGeometrySnapshot(
+                ReturnHomeSession session, Object animationIdentity,
+                float[] matrixValues, Rect crop, float[] surfaceRadii,
+                long frameTraceId, int sourceKind) {
+            if (session == null || animationIdentity == null
+                    || matrixValues == null || matrixValues.length != 9
+                    || crop == null || crop.isEmpty()
+                    || surfaceRadii == null || surfaceRadii.length != 4) {
+                throw new IllegalStateException(
+                        "incomplete native geometry snapshot");
+            }
+            for (float value : matrixValues) {
+                if (!Float.isFinite(value)) {
+                    throw new IllegalStateException(
+                            "non-finite native matrix value");
+                }
+            }
+            float scaleX = matrixValues[Matrix.MSCALE_X];
+            float scaleY = matrixValues[Matrix.MSCALE_Y];
+            if (scaleX <= 0.0f || scaleX > 1.05f
+                    || scaleY <= 0.0f || scaleY > 1.05f
+                    || Math.abs(scaleX - scaleY) > 0.002f
+                    || Math.abs(matrixValues[Matrix.MSKEW_X]) > 0.002f
+                    || Math.abs(matrixValues[Matrix.MSKEW_Y]) > 0.002f
+                    || Math.abs(matrixValues[Matrix.MPERSP_0]) > 0.0001f
+                    || Math.abs(matrixValues[Matrix.MPERSP_1]) > 0.0001f
+                    || Math.abs(matrixValues[Matrix.MPERSP_2] - 1.0f)
+                    > 0.0001f) {
+                throw new IllegalStateException(
+                        "unsupported native matrix: "
+                                + java.util.Arrays.toString(matrixValues));
+            }
+            Rect fullscreen = session.startRect;
+            if (fullscreen.isEmpty() || fullscreen.left != 0
+                    || fullscreen.top != 0 || crop.left != 0
+                    || crop.top != 0
+                    || Math.abs(crop.width() - fullscreen.width()) > 1
+                    || crop.height() > fullscreen.height()) {
+                throw new IllegalStateException(
+                        "unsupported native crop: fullscreen="
+                                + fullscreen + ", crop=" + crop);
+            }
+            for (float radius : surfaceRadii) {
+                if (!Float.isFinite(radius) || radius < 0.0f) {
+                    throw new IllegalStateException(
+                            "invalid native surface radius: " + radius);
+                }
+            }
+            return new ReturnHomeNativeGeometrySnapshot(
+                    session.generation, animationIdentity,
+                    matrixValues, crop, surfaceRadii, frameTraceId,
+                    sourceKind);
+        }
+
+        private boolean nativeGeometryMatchesSurfaceParams(
+                ReturnHomeNativeGeometrySnapshot snapshot, Object params)
+                throws Throwable {
+            if (snapshot == null || params == null) {
+                return false;
+            }
+            Object flagsObject = readFieldOrNull(params, "flags");
+            int flags = flagsObject instanceof Number
+                    ? ((Number) flagsObject).intValue() : 0;
+            int requiredFlags = MIUI_SURFACE_PARAM_FLAG_MATRIX
+                    | MIUI_SURFACE_PARAM_FLAG_WINDOW_CROP
+                    | MIUI_SURFACE_PARAM_FLAG_CORNER_RADIUS
+                    | MIUI_SURFACE_PARAM_FLAG_SHOW;
+            Object matrixObject = readFieldOrNull(params, "matrix");
+            Object cropObject = readFieldOrNull(params, "windowCrop");
+            if ((flags & requiredFlags) != requiredFlags
+                    || !Boolean.TRUE.equals(
+                    readFieldOrNull(params, "isShow"))
+                    || !(matrixObject instanceof Matrix)
+                    || !(cropObject instanceof Rect)
+                    || !snapshot.copyWindowCrop().equals(cropObject)) {
+                return false;
+            }
+            float[] expectedMatrix = snapshot.copyMatrixValues();
+            float[] actualMatrix = new float[9];
+            ((Matrix) matrixObject).getValues(actualMatrix);
+            for (int index = 0; index < expectedMatrix.length; index++) {
+                if (Math.abs(expectedMatrix[index] - actualMatrix[index])
+                        > 0.002f) {
+                    return false;
+                }
+            }
+            float[] expectedRadii = snapshot.copySurfaceCornerRadii();
+            float[] actualRadii = readSurfaceParamsCornerRadii(params);
+            for (int index = 0; index < expectedRadii.length; index++) {
+                if (Math.abs(expectedRadii[index] - actualRadii[index])
+                        > 0.02f) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private float[] readSurfaceParamsCornerRadii(Object params)
+                throws Throwable {
+            Object radii = readFieldOrNull(params, "radii");
+            if (radii != null) {
+                return readNativeCornerRadii(radii);
+            }
+            Object cornerRadius = readFieldOrNull(params, "cornerRadius");
+            if (!(cornerRadius instanceof Number)) {
+                throw new IllegalStateException(
+                        "SurfaceParams corner radius is missing");
+            }
+            float radius = ((Number) cornerRadius).floatValue();
+            if (!Float.isFinite(radius) || radius < 0.0f) {
+                throw new IllegalStateException(
+                        "invalid SurfaceParams corner radius: " + radius);
+            }
+            return new float[]{radius, radius, radius, radius};
+        }
+
+        private float[] readNativeCornerRadii(Object radii)
+                throws Throwable {
+            String[] getters = new String[]{
+                    "getRadiusTL", "getRadiusTR",
+                    "getRadiusBR", "getRadiusBL"};
+            float[] result = new float[getters.length];
+            for (int index = 0; index < getters.length; index++) {
+                String getter = getters[index];
+                Object value = invokeAnyMethod(
+                        radii, getter, new Object[0]);
+                if (!(value instanceof Number)) {
+                    throw new IllegalStateException(
+                            "corner radius is not numeric: " + getter);
+                }
+                float radius = ((Number) value).floatValue();
+                if (!Float.isFinite(radius) || radius < 0.0f) {
+                    throw new IllegalStateException(
+                            "invalid corner radius: " + radius);
+                }
+                result[index] = radius;
+            }
+            return result;
+        }
+
+        void armElementAndClosingLeashStartGeometry(
+                Object leashObject, Object change, Object transitionInfo,
+                Object transactionObject) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.elementChange != change
+                    || token.transitionInfo != transitionInfo
+                    || !(leashObject instanceof SurfaceControl)
+                    || !(transactionObject
+                    instanceof SurfaceControl.Transaction)) {
+                return;
+            }
+            try {
+                if (!surfacesAreSame((SurfaceControl) leashObject,
+                        token.elementLeash)) {
+                    return;
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed element leash identity check before geometry seed",
+                        throwable);
+                return;
+            }
+            if (!token.startGeometrySeed.compareAndSet(
+                    ReturnHomeElementLeashReuseToken.SEED_PENDING,
+                    ReturnHomeElementLeashReuseToken.SEEDING)) {
+                return;
+            }
+            try {
+                ReturnHomeSession session = token.session;
+                Class<?> animBackgroundThreadClass = Class.forName(
+                        MIUI_HOME_ANIM_BACKGROUND_THREAD, false,
+                        classLoader);
+                Method getHandler = animBackgroundThreadClass
+                        .getDeclaredMethod("getHandler");
+                getHandler.setAccessible(true);
+                Object handlerObject = getHandler.invoke(null);
+                boolean ownerThread = handlerObject instanceof Handler
+                        && ((Handler) handlerObject).getLooper()
+                        == Looper.myLooper();
+                Object startBoundsObject = invokeAnyMethod(
+                        change, "getStartAbsBounds", new Object[0]);
+                boolean exact = ownerThread && attached
+                        && pendingElementLeashReuse.get() == token
+                        && currentSession == session
+                        && session.finished.get() == 0
+                        && token.phase.get()
+                        == ReturnHomeElementLeashReuseToken.PHASE_REARMED
+                        && session.nativeWindowElement
+                        == token.windowElement
+                        && session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && token.elementLeash.isValid()
+                        && token.closingLeash.isValid()
+                        && session.closingLeash == token.closingLeash
+                        && readTransitionDebugId(transitionInfo)
+                        == token.transitionDebugId
+                        && startBoundsObject instanceof Rect
+                        && ((Rect) startBoundsObject).equals(
+                        session.startRect);
+                if (!exact) {
+                    throw new IllegalStateException(
+                            "element/closing geometry arm ownership changed"
+                                    + ", ownerThread=" + ownerThread
+                                    + ", tokenPhase=" + token.phase.get()
+                                    + ", startBounds=" + startBoundsObject);
+                }
+                Object savedLeash = invokeAnyMethod(
+                        token.helper, "getOpenLeash", new Object[0]);
+                boolean containsTask = Boolean.TRUE.equals(invokeAnyMethod(
+                        token.helper, "containsTaskId",
+                        new Object[]{Integer.valueOf(token.taskId)}));
+                if (!(savedLeash instanceof SurfaceControl)
+                        || !containsTask
+                        || !surfacesAreSame((SurfaceControl) savedLeash,
+                        token.closingLeash)) {
+                    throw new IllegalStateException(
+                            "Xiaomi helper no longer owns predictive closing leash");
+                }
+                SurfaceControl.Transaction startTransaction =
+                        (SurfaceControl.Transaction) transactionObject;
+                synchronized (token) {
+                    boolean stillOwned = attached
+                            && pendingElementLeashReuse.get() == token
+                            && currentSession == session
+                            && session.finished.get() == 0
+                            && token.phase.get()
+                            == ReturnHomeElementLeashReuseToken
+                            .PHASE_REARMED
+                            && token.startGeometrySeed.get()
+                            == ReturnHomeElementLeashReuseToken.SEEDING;
+                    if (!stillOwned) {
+                        throw new IllegalStateException(
+                                "element/closing geometry arm invalidated");
+                    }
+                    if (token.startTransaction != null
+                            && token.startTransaction
+                            != startTransaction) {
+                        throw new IllegalStateException(
+                                "element/closing geometry start transaction changed");
+                    }
+                    token.startTransaction = startTransaction;
+                    token.startGeometrySeed.set(
+                            ReturnHomeElementLeashReuseToken.SEED_APPLIED);
+                }
+                log(Log.INFO, TAG,
+                        "Armed element and predictive closing geometry for transition apply"
+                                + ", generation=" + token.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId);
+            } catch (Throwable throwable) {
+                token.startGeometrySeed.compareAndSet(
+                        ReturnHomeElementLeashReuseToken.SEEDING,
+                        ReturnHomeElementLeashReuseToken.SEED_INVALID);
+                log(Log.WARN, TAG,
+                        "Rejected element/closing transition-start geometry arm"
+                                + ", generation=" + token.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId,
+                        throwable);
+            }
+        }
+
+        Object resolveStartGeometryApplyLock(
+                Object transaction, List<?> arguments) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.startTransaction != transaction
+                    || token.startGeometrySeed.get()
+                    != ReturnHomeElementLeashReuseToken.SEED_APPLIED
+                    || arguments == null || arguments.size() != 1
+                    || !Boolean.TRUE.equals(arguments.get(0))) {
+                return null;
+            }
+            try {
+                Class<?> animBackgroundThreadClass = Class.forName(
+                        MIUI_HOME_ANIM_BACKGROUND_THREAD, false,
+                        classLoader);
+                Method getHandler = animBackgroundThreadClass
+                        .getDeclaredMethod("getHandler");
+                getHandler.setAccessible(true);
+                Object handlerObject = getHandler.invoke(null);
+                boolean ownerThread = handlerObject instanceof Handler
+                        && ((Handler) handlerObject).getLooper()
+                        == Looper.myLooper();
+                ReturnHomeSession session = token.session;
+                boolean exact = ownerThread && attached
+                        && pendingElementLeashReuse.get() == token
+                        && currentSession == session
+                        && session.finished.get() == 0
+                        && token.phase.get()
+                        == ReturnHomeElementLeashReuseToken.PHASE_REARMED
+                        && session.nativeWindowElement
+                        == token.windowElement
+                        && session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && session.closingLeash == token.closingLeash
+                        && token.elementLeash.isValid()
+                        && token.closingLeash.isValid();
+                return exact ? session.nativeGeometryApplyLock : null;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to resolve return-home start transaction apply lock"
+                                + ", generation=" + token.generation
+                                + ", taskId=" + token.taskId,
+                        throwable);
+                return null;
+            }
+        }
+
+        void refreshStartGeometryAtApply(Object transaction) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.startTransaction != transaction
+                    || !token.startGeometrySeed.compareAndSet(
+                    ReturnHomeElementLeashReuseToken.SEED_APPLIED,
+                    ReturnHomeElementLeashReuseToken.SEED_REFRESHING)) {
+                return;
+            }
+            try {
+                ReturnHomeSession session = token.session;
+                ReturnHomeNativeGeometrySnapshot snapshot =
+                        session.nativeGeometrySnapshot.get();
+                long snapshotAgeNanos = snapshot == null ? Long.MAX_VALUE
+                        : SystemClock.elapsedRealtimeNanos()
+                        - snapshot.capturedElapsedRealtimeNanos;
+                boolean exact = attached
+                        && pendingElementLeashReuse.get() == token
+                        && currentSession == session
+                        && session.finished.get() == 0
+                        && token.phase.get()
+                        == ReturnHomeElementLeashReuseToken.PHASE_REARMED
+                        && session.nativeWindowElement
+                        == token.windowElement
+                        && session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && session.closingLeash == token.closingLeash
+                        && token.elementLeash.isValid()
+                        && token.closingLeash.isValid()
+                        && readTransitionDebugId(token.transitionInfo)
+                        == token.transitionDebugId
+                        && snapshot != null
+                        && snapshotAgeNanos >= 0L
+                        && snapshotAgeNanos
+                        <= RETURN_HOME_NATIVE_GEOMETRY_MAX_AGE_NS
+                        && session.nativeGeometrySnapshot.get() == snapshot
+                        && snapshot.generation == token.generation
+                        && snapshot.animationIdentity
+                        == token.animationIdentity;
+                if (!exact) {
+                    throw new IllegalStateException(
+                            "start geometry apply ownership changed"
+                                    + ", tokenPhase=" + token.phase.get()
+                                    + ", snapshot=" + shortObject(snapshot)
+                                    + ", snapshotAgeNanos="
+                                    + snapshotAgeNanos);
+                }
+                Object savedLeash = invokeAnyMethod(
+                        token.helper, "getOpenLeash", new Object[0]);
+                boolean containsTask = Boolean.TRUE.equals(invokeAnyMethod(
+                        token.helper, "containsTaskId",
+                        new Object[]{Integer.valueOf(token.taskId)}));
+                if (!(savedLeash instanceof SurfaceControl)
+                        || !containsTask
+                        || !surfacesAreSame((SurfaceControl) savedLeash,
+                        token.closingLeash)) {
+                    throw new IllegalStateException(
+                            "Xiaomi helper lost the predictive closing leash before apply");
+                }
+                float[] matrixValues = snapshot.copyMatrixValues();
+                Rect crop = snapshot.copyWindowCrop();
+                float[] surfaceRadii =
+                        snapshot.copySurfaceCornerRadii();
+                try (SurfaceControl.Transaction refreshTransaction =
+                             new SurfaceControl.Transaction()) {
+                    Matrix refreshMatrix = new Matrix();
+                    refreshMatrix.setValues(matrixValues);
+                    SurfaceControl[] geometryLeashes =
+                            new SurfaceControl[]{token.elementLeash,
+                                    token.closingLeash};
+                    for (SurfaceControl geometryLeash
+                            : geometryLeashes) {
+                        invokeAnyMethod(refreshTransaction, "setMatrix",
+                                new Object[]{geometryLeash,
+                                        refreshMatrix, new float[9]});
+                        invokeAnyMethod(refreshTransaction,
+                                "setWindowCrop",
+                                new Object[]{geometryLeash, crop});
+                        applyNativeSurfaceCornerRadii(
+                                refreshTransaction, geometryLeash,
+                                surfaceRadii);
+                    }
+                    if (pendingElementLeashReuse.get() != token
+                            || currentSession != session
+                            || session.finished.get() != 0
+                            || token.startGeometrySeed.get()
+                            != ReturnHomeElementLeashReuseToken
+                            .SEED_REFRESHING) {
+                        throw new IllegalStateException(
+                                "start geometry changed during apply refresh");
+                    }
+                    ((SurfaceControl.Transaction) transaction).merge(
+                            refreshTransaction);
+                }
+                log(Log.INFO, TAG,
+                        "Refreshed return-home start geometry at apply boundary"
+                                + ", generation=" + token.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId
+                                + ", frameTraceId="
+                                + snapshot.frameTraceId);
+            } catch (Throwable throwable) {
+                token.startGeometrySeed.set(
+                        ReturnHomeElementLeashReuseToken.SEED_INVALID);
+                log(Log.WARN, TAG,
+                        "Failed to refresh return-home start geometry at apply boundary"
+                                + ", generation=" + token.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId,
+                        throwable);
+            }
+        }
+
+        private void applyNativeSurfaceCornerRadii(
+                SurfaceControl.Transaction transaction,
+                SurfaceControl surface, float[] radii) throws Throwable {
+            if (transaction == null || surface == null || radii == null
+                    || radii.length != 4) {
+                throw new IllegalStateException(
+                        "incomplete native corner-radii apply");
+            }
+            boolean uniform = Math.abs(radii[0] - radii[1]) <= 0.01f
+                    && Math.abs(radii[1] - radii[2]) <= 0.01f
+                    && Math.abs(radii[2] - radii[3]) <= 0.01f;
+            if (uniform) {
+                invokeAnyMethod(transaction, "setCornerRadius",
+                        new Object[]{surface, Float.valueOf(radii[0])});
+                return;
+            }
+            float[] miRadii = new float[]{
+                    radii[0], radii[0], radii[1], radii[1],
+                    radii[2], radii[2], radii[3], radii[3]};
+            invokeAnyMethod(transaction, "setMiCornerRadii",
+                    new Object[]{surface, miRadii});
+        }
+
+        void finishStartGeometryApply(
+                Object transaction, boolean applied) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.startTransaction != transaction) {
+                return;
+            }
+            int expected = ReturnHomeElementLeashReuseToken.SEED_REFRESHING;
+            int result = applied
+                    ? ReturnHomeElementLeashReuseToken.SEED_COMMITTED
+                    : ReturnHomeElementLeashReuseToken.SEED_INVALID;
+            boolean changed = token.startGeometrySeed.compareAndSet(
+                    expected, result);
+            log(applied && changed ? Log.INFO : Log.WARN, TAG,
+                    "Finished return-home start geometry apply"
+                            + ", generation=" + token.generation
+                            + ", taskId=" + token.taskId
+                            + ", transitionDebugId="
+                            + token.transitionDebugId
+                            + ", applied=" + applied
+                            + ", phaseChanged=" + changed
+                            + ", phase="
+                            + token.startGeometrySeed.get());
+        }
+
+        void adoptElementTransitionIfStarted(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            if (token == null || token.windowElement != windowElement
+                    || token.phase.get()
+                    != ReturnHomeElementLeashReuseToken.PHASE_REARMED
+                    || Looper.myLooper() != Looper.getMainLooper()
+                    || params == null) {
+                return;
+            }
+            Object typeObject = invokeAnyMethod(
+                    params, "getAnimType", new Object[0]);
+            String typeName = typeObject instanceof Enum<?>
+                    ? ((Enum<?>) typeObject).name()
+                    : String.valueOf(typeObject);
+            if (!"CLOSE_TO_ELEMENT".equals(typeName)) {
+                return;
+            }
+            ReturnHomeSession session = token.session;
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            Object targetSet = invokeAnyMethod(
+                    params, "getTargetApps", new Object[0]);
+            Object firstTarget = targetSet == null ? null
+                    : invokeAnyMethod(targetSet,
+                    "getFirstTarget", new Object[0]);
+            Object leashCompat = firstTarget == null ? null
+                    : readField(firstTarget, "leash");
+            Object adoptedLeash = leashCompat == null ? null
+                    : readField(leashCompat, "mSurfaceControl");
+            boolean valid = currentSession == session
+                    && session.finished.get() == 0
+                    && session.nativeWindowElement == windowElement
+                    && currentIdentity == token.animationIdentity
+                    && "CLOSE_TO_ELEMENT".equals(currentType)
+                    && running
+                    && adoptedLeash instanceof SurfaceControl
+                    && ((SurfaceControl) adoptedLeash).isValid()
+                    && surfacesAreSame((SurfaceControl) adoptedLeash,
+                    token.closingLeash);
+            if (!valid) {
+                log(Log.WARN, TAG,
+                        "Rejected predictive element leash adoption"
+                                + ", generation=" + session.generation
+                                + ", currentType=" + currentType
+                                + ", running=" + running);
+                return;
+            }
+            if (!token.phase.compareAndSet(
+                    ReturnHomeElementLeashReuseToken.PHASE_REARMED,
+                    ReturnHomeElementLeashReuseToken.PHASE_ADOPTED)) {
+                return;
+            }
+            session.nativeAnimationType = "CLOSE_TO_ELEMENT";
+            log(Log.INFO, TAG,
+                    "Adopted predictive leash for Xiaomi CLOSE_TO_ELEMENT"
+                            + ", generation=" + session.generation
+                            + ", taskId=" + token.taskId
+                            + ", transitionDebugId="
+                            + token.transitionDebugId);
+        }
+
+        void invalidateElementTransitionContinuity(
+                ReturnHomeSession session, String reason,
+                boolean clearHelper) {
+            while (true) {
+                ReturnHomeElementLeashReuseToken token =
+                        pendingElementLeashReuse.get();
+                if (token == null || (session != null
+                        && token.session != session)) {
+                    return;
+                }
+                synchronized (token.session.nativeGeometryApplyLock) {
+                    synchronized (token) {
+                        if (pendingElementLeashReuse.get() != token) {
+                            continue;
+                        }
+                        if (!pendingElementLeashReuse.compareAndSet(
+                                token, null)) {
+                            continue;
+                        }
+                        token.phase.set(
+                                ReturnHomeElementLeashReuseToken.PHASE_INVALID);
+                        int seedPhase = token.startGeometrySeed.get();
+                        if (seedPhase != ReturnHomeElementLeashReuseToken
+                                .SEED_COMMITTED) {
+                            token.startGeometrySeed.set(
+                                    ReturnHomeElementLeashReuseToken.SEED_INVALID);
+                        }
+                    }
+                }
+                // The token is unreachable and the apply lock is released before
+                // touching Xiaomi's helper lock below.
+                if (clearHelper) {
+                    try {
+                        Object savedLeash = invokeAnyMethod(
+                                token.helper, "getOpenLeash", new Object[0]);
+                        boolean containsTask = Boolean.TRUE.equals(
+                                invokeAnyMethod(token.helper,
+                                        "containsTaskId",
+                                        new Object[]{Integer.valueOf(
+                                                token.taskId)}));
+                        if (containsTask
+                                && savedLeash instanceof SurfaceControl
+                                && surfacesAreSame(
+                                (SurfaceControl) savedLeash,
+                                token.closingLeash)) {
+                            invokeAnyMethod(token.helper,
+                                    "clearTempSaveOpenLeash",
+                                    new Object[0]);
+                        }
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to clear predictive element leash token"
+                                        + ", generation="
+                                        + token.generation
+                                        + ", reason=" + reason,
+                                throwable);
+                    }
+                }
+                return;
+            }
+        }
+
         private boolean isStandardSingleTaskReturnHome(ReturnHomeSession session) {
             if (session.apps == null || session.apps.length != 2
                     || session.closingTarget == null
@@ -9687,6 +12266,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             invalidatePendingCloseInterruption(session, "finish:" + reason);
             invalidatePendingDirectCancel(
                     session, "finish:" + reason, false);
+            invalidateElementTransitionContinuity(
+                    session, "finish:" + reason, true);
             if (Looper.myLooper() != Looper.getMainLooper()) {
                 notifyRemoteAnimationFinished(session.finishedCallback, reason);
                 handler.post(() -> cleanupFinishedSession(
@@ -9756,6 +12337,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             session.nativeStatusPublished = false;
             session.nativePublishedStatus = null;
+            session.nativeGeometrySnapshot.set(null);
             session.nativeWindowAnimContext = null;
             session.localHandoffToken = null;
             try {
@@ -10016,6 +12598,60 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        private final class ReturnHomeElementLeashReuseToken {
+            static final int PHASE_PREPARED = 0;
+            static final int PHASE_REARMING = 1;
+            static final int PHASE_REARMED = 2;
+            static final int PHASE_ADOPTED = 3;
+            static final int PHASE_INVALID = 4;
+            static final int SEED_PENDING = 0;
+            static final int SEEDING = 1;
+            static final int SEED_APPLIED = 2;
+            static final int SEED_REFRESHING = 3;
+            static final int SEED_COMMITTED = 4;
+            static final int SEED_INVALID = 5;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object compat;
+            final Object helper;
+            final Object transitionInfo;
+            final int transitionDebugId;
+            final int taskId;
+            final SurfaceControl appLeash;
+            final Object elementChange;
+            final SurfaceControl elementLeash;
+            final SurfaceControl closingLeash;
+            final AtomicInteger phase = new AtomicInteger(PHASE_PREPARED);
+            final AtomicInteger startGeometrySeed =
+                    new AtomicInteger(SEED_PENDING);
+            volatile SurfaceControl.Transaction startTransaction;
+
+            ReturnHomeElementLeashReuseToken(
+                    ReturnHomeSession session, Object windowElement,
+                    Object animationIdentity, Object compat, Object helper,
+                    Object transitionInfo, int transitionDebugId, int taskId,
+                    SurfaceControl appLeash, Object elementChange,
+                    SurfaceControl elementLeash,
+                    SurfaceControl closingLeash) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+                this.compat = compat;
+                this.helper = helper;
+                this.transitionInfo = transitionInfo;
+                this.transitionDebugId = transitionDebugId;
+                this.taskId = taskId;
+                this.appLeash = appLeash;
+                this.elementChange = elementChange;
+                this.elementLeash = elementLeash;
+                this.closingLeash = closingLeash;
+            }
+        }
+
         private final class ReturnHomeCloseInterruptionToken {
             final long generation;
             final ReturnHomeSession session;
@@ -10081,6 +12717,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     new SurfaceControl.Transaction();
             final BackProgressAnimator progressAnimator;
             final AtomicInteger progressReset = new AtomicInteger();
+            final AtomicReference<ReturnHomeNativeGeometrySnapshot>
+                    nativeGeometrySnapshot = new AtomicReference<>();
+            final Object nativeGeometryApplyLock = new Object();
             Object closingTarget;
             Object openingTarget;
             SurfaceControl closingLeash;
@@ -10108,6 +12747,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean nativeStatusPublished;
             boolean nativeAnimationStarted;
             boolean nativeContinuationVerified;
+            boolean nativeGeometryFailureLogged;
             Object stateManager;
             Object nativeWindowElement;
             Object nativeWindowAnimContext;
