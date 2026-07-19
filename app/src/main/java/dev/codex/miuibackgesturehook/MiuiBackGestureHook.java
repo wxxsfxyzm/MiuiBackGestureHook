@@ -22227,12 +22227,23 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (tracker != null) {
                     applyProgressThresholds(tracker);
                     ((BackTouchTracker) tracker).update(rawX, rawY);
+                } else {
+                    finishShellReleaseWithoutTracker(releaseController,
+                            recentsCallback, drawerCallback, editingCallback);
+                    return;
                 }
-                // BackPanelController and the module driver can both have queued threshold
-                // changes. Make this release's requested value authoritative on the same
-                // executor, then read the tracker's actual value back.
-                invokeAnyMethod(releaseController, "setTriggerBack",
-                        new Object[]{Boolean.valueOf(requestedTrigger)});
+                // BackPanelController posts its terminal ACTIVE/INACTIVE decision through
+                // BackAnimationImpl before this release transaction. Preserve that ordered
+                // decision: an INACTIVE panel has already supplied trigger=false even when the
+                // finger remains beyond the module's fixed 48dp threshold. The fixed threshold
+                // is still a necessary condition and may veto a native trigger, but it must not
+                // turn a native cancellation back into a commit.
+                boolean nativeTriggerBeforeThresholdVeto = Boolean.TRUE.equals(
+                        invokeAnyMethod(tracker, "getTriggerBack", new Object[0]));
+                if (!requestedTrigger && nativeTriggerBeforeThresholdVeto) {
+                    invokeAnyMethod(releaseController, "setTriggerBack",
+                            new Object[]{Boolean.FALSE});
+                }
                 tracker = invokeAnyMethod(releaseController,
                         "getActiveTracker", new Object[0]);
                 if (tracker == null) {
@@ -22242,6 +22253,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 boolean actualTrigger = Boolean.TRUE.equals(invokeAnyMethod(
                         tracker, "getTriggerBack", new Object[0]));
+                log(Log.INFO, TAG, "Resolved Shell release trigger"
+                        + ", fixedThresholdEligible=" + requestedTrigger
+                        + ", nativeTriggerBeforeThresholdVeto="
+                        + nativeTriggerBeforeThresholdVeto
+                        + ", actualTrigger=" + actualTrigger);
                 if (dispatchFinalProgress) {
                     dispatchExplicitProgressOnShell(releaseController, tracker,
                             releaseDistance);
