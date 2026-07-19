@@ -27,8 +27,9 @@ then restore the AOSP SystemUI/WM Shell back gesture pipeline.
 
 Preserve the working `TYPE_CALLBACK`, `TYPE_CROSS_ACTIVITY`, `TYPE_CROSS_TASK`, and
 `TYPE_RETURN_TO_HOME` paths. `TYPE_RETURN_TO_HOME` uses the standard Shell-to-launcher
-callback/runner for predictive preview, then hands post-commit ownership to Xiaomi's
-native CLOSE animation.
+callback/runner. MiuiHome binds its closing target to one native
+`WindowElement`/`RectFSpringAnim` that owns both predictive preview and Xiaomi's
+post-commit CLOSE animation.
 
 Preserve the Xiaomi-native in-app Activity OPEN interruption path alongside the AOSP
 predictive-back path.
@@ -210,9 +211,10 @@ Return-to-home rules:
   them even when its targets are invalid.
 - Follow the platform `removeDepartTargetFromMotion()` split: use the `BackMotionEvent`
   departing target when the flag is false and the runner closing target when it is true.
-  Show and transform only that closing leash through the platform `BackProgressAnimator`;
-  leave the opening Home target, alpha, and layer order untouched. Drive Xiaomi preview
-  blur from the same smoothed progress rather than a separate or release-time snap.
+  Use the platform `BackProgressAnimator` for smoothed progress and drive the same Xiaomi
+  `WindowElement` against only that closing leash; leave the opening Home target, alpha,
+  and layer order untouched. Drive Xiaomi preview blur from the same smoothed progress
+  rather than a separate or release-time snap.
 - Correct Xiaomi's prepared/commit composition only for the exact single fullscreen
   standard task-to-Home shape. After stock prepare accepts it, keep Home and wallpaper
   roles unchanged, reparent the departing task under the existing closing leash, and
@@ -222,9 +224,16 @@ Return-to-home rules:
   the exact current geometry and corner radius through Xiaomi's own handoff status.
   Application pixels remain on the real closing task Surface; do not introduce a screenshot
   replacement, module-owned icon/window crossfade, forced alpha, or layer manipulation.
+- Keep the preview `WindowElement` and its `RectFSpringAnim` running across commit. Enter
+  Xiaomi's complete native closing provider with the original runner targets, then allow
+  Xiaomi's native `CLOSE_TO_HOME -> CLOSE_TO_ELEMENT` retarget on that same animation;
+  do not stop, replace, or restart the spring at the commit boundary.
 - Once the exact Xiaomi CLOSE starts, retain the Shell runner and remote targets until its
   matching native end or a verified launcher-interruption boundary. Do not restore or
   release the preview Surface over a captured native animation.
+- For one animation and `animTo` epoch, preserve the first exact pre-clear finish snapshot.
+  A duplicate `StateManager` end callback after element/target cleanup must not overwrite
+  that terminal identity or keep the Shell runner alive.
 - Preserve Xiaomi's parallel CLOSE-to-OPEN path when an icon is clicked before CLOSE ends.
   Finish the old Shell runner only after Xiaomi cancels the old application Surface and
   accepts its `setToOld` boundary, before the new OPEN starts; do not cancel or wait for the
@@ -387,6 +396,19 @@ Build debug only unless the user explicitly requests a release artifact:
 
 ```powershell
 .\gradlew.bat assembleDebug
+```
+
+Before handing an APK to the user, use a clean build for the requested variant so
+incremental packaging cannot leave stale ZIP slack in the artifact:
+
+```powershell
+.\gradlew.bat clean assembleDebug
+```
+
+When the user explicitly requests release, use:
+
+```powershell
+.\gradlew.bat clean assembleRelease
 ```
 
 Check debug APK metadata:
