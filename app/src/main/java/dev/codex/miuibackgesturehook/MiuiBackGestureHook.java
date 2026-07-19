@@ -21885,13 +21885,20 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private boolean finishLegacyInterruptGesture(MotionEvent event, boolean allowTrigger)
                 throws Exception {
-            dispatchToEdgePlugin(event, activeEdge);
+            String panelStateBeforeRelease = readNativePanelState();
+            boolean panelReleaseDelivered =
+                    dispatchToEdgePlugin(event, activeEdge);
+            String panelStateAfterRelease = readNativePanelState();
             float releaseDistance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            boolean trigger = allowTrigger
+            boolean fixedThresholdEligible = allowTrigger
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
+            Boolean nativePanelTrigger = resolveNativePanelReleaseTrigger(
+                    panelStateAfterRelease, panelReleaseDelivered);
+            boolean trigger = fixedThresholdEligible
+                    && Boolean.TRUE.equals(nativePanelTrigger);
             updateTriggerBack(trigger);
             if (trigger) {
                 // A normal BACK creates the incoming CLOSE/TO_BACK transition. Xiaomi's
@@ -21900,7 +21907,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                 dispatchLegacyInterruptBack();
             }
             log(Log.INFO, TAG, "Finished MIUI in-app interrupt gesture"
-                    + ", trigger=" + trigger + ", edge=" + activeEdge);
+                    + ", fixedThresholdEligible=" + fixedThresholdEligible
+                    + ", nativePanelTrigger=" + nativePanelTrigger
+                    + ", panelStateBeforeRelease="
+                    + panelStateBeforeRelease
+                    + ", panelStateAfterRelease="
+                    + panelStateAfterRelease
+                    + ", trigger=" + trigger
+                    + ", releaseDistance=" + releaseDistance
+                    + ", edge=" + activeEdge);
             clearLocalGestureState();
             return true;
         }
@@ -21919,13 +21934,20 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean finishLauncherOpenBreakGesture(MotionEvent event,
                                                        boolean allowTrigger)
                 throws Exception {
-            dispatchToEdgePlugin(event, activeEdge);
+            String panelStateBeforeRelease = readNativePanelState();
+            boolean panelReleaseDelivered =
+                    dispatchToEdgePlugin(event, activeEdge);
+            String panelStateAfterRelease = readNativePanelState();
             float releaseDistance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            boolean trigger = allowTrigger
+            boolean fixedThresholdEligible = allowTrigger
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
+            Boolean nativePanelTrigger = resolveNativePanelReleaseTrigger(
+                    panelStateAfterRelease, panelReleaseDelivered);
+            boolean trigger = fixedThresholdEligible
+                    && Boolean.TRUE.equals(nativePanelTrigger);
             updateTriggerBack(trigger);
             // This gesture never starts a Shell tracker. Clear any trigger value posted by
             // BackPanelController after its release event, then hand a committed gesture to
@@ -21952,6 +21974,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", generation=" + launcherOpenBreakGeneration
                     + ", attempt=" + launcherOpenBreakAttemptId
                     + ", releaseDistance=" + releaseDistance
+                    + ", fixedThresholdEligible="
+                    + fixedThresholdEligible
+                    + ", nativePanelTrigger=" + nativePanelTrigger
+                    + ", panelStateBeforeRelease="
+                    + panelStateBeforeRelease
+                    + ", panelStateAfterRelease="
+                    + panelStateAfterRelease
                     + ", edge=" + activeEdge);
             clearLocalGestureState();
             return true;
@@ -22845,12 +22874,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void dispatchToEdgePlugin(MotionEvent event, int edge) {
+        private boolean dispatchToEdgePlugin(MotionEvent event, int edge) {
             try {
                 Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
                 if (plugin == null) {
                     log(Log.WARN, TAG, "NavigationEdgeBackPlugin is null; native panel unavailable");
-                    return;
+                    return false;
                 }
                 if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
                     prepareNativeBackPanel(plugin);
@@ -22863,9 +22892,50 @@ public final class MiuiBackGestureHook extends XposedModule {
                 invokeMethod(plugin, "onMotionEvent",
                         new Class<?>[]{MotionEvent.class}, new Object[]{screenEvent});
                 screenEvent.recycle();
+                return true;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to dispatch event to NavigationEdgeBackPlugin",
                         throwable);
+                return false;
+            }
+        }
+
+        private String readNativePanelState() {
+            try {
+                Object plugin = readField(
+                        edgeBackGestureHandler, "mEdgeBackPlugin");
+                Object state = plugin == null ? null
+                        : readField(plugin, "currentState");
+                return state instanceof Enum<?>
+                        ? ((Enum<?>) state).name() : null;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to read native BackPanelController state",
+                        throwable);
+                return null;
+            }
+        }
+
+        private Boolean resolveNativePanelReleaseTrigger(
+                String stateAfterRelease, boolean releaseDelivered) {
+            if (!releaseDelivered || stateAfterRelease == null) {
+                return null;
+            }
+            switch (stateAfterRelease) {
+                case "CANCELLED":
+                case "GONE":
+                    return Boolean.FALSE;
+                case "ENTRY":
+                case "ACTIVE":
+                case "INACTIVE":
+                case "FLUNG":
+                case "COMMITTED":
+                    // On Xiaomi's native panel an UP that remains ENTRY/ACTIVE/INACTIVE is
+                    // the delayed/fling commit branch. A non-committing release changes to
+                    // CANCELLED synchronously before onMotionEvent() returns.
+                    return Boolean.TRUE;
+                default:
+                    return null;
             }
         }
 
