@@ -134,14 +134,22 @@ Same-activity and input rules:
 - Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
   deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
   `BackPanelController` dispatch, and release-time invoke/cancel.
+- When system bars are hidden at `ACTION_DOWN`, continue normal AOSP/Shell back arbitration.
+  Yield only if native display policy actually shows the navigation bar transiently during that
+  same stream; cancel any module-started Shell gesture and do not also commit BACK. Do not blanket
+  turn immersive application callbacks into a two-gesture path.
 - Preserve MiuiHome's native redirect decision for disabled, non-touchable, and application
   exclusion states: a redirected stream never reaches the processor and therefore never emits
   an accepted token. When SystemUI does not claim a stream, do not synthesize, replay, or
   transfer it. An accepted stream with no ready SystemUI arbiter fails closed rather than
   reviving MiuiHome's deprecated gesture processor.
 - Use display width for callback progress. Do not restore the old fixed `220dp` distance.
-- Do not move trigger ownership to the native panel or intercept
-  `setTriggerBack(false)`.
+- Treat `48dp` as a necessary commit condition, never as permission to overwrite cancellation.
+  On a Shell path, preserve the active tracker's ordered trigger after `BackPanelController`
+  callbacks; distance may veto native `true` but must never turn native `false` back to `true`.
+  On an OPEN-interruption path with no Shell tracker, accept only a proven terminal native-panel
+  commit after release; missing or unknown panel state fails closed.
+- Do not intercept `setTriggerBack(false)` or recompute a cancelled release from pointer distance.
 
 Recents ownership rules:
 
@@ -216,10 +224,18 @@ Return-to-home rules:
   and layer order untouched. Drive Xiaomi preview blur from the same smoothed progress
   rather than a separate or release-time snap.
 - Correct Xiaomi's prepared/commit composition only for the exact single fullscreen
-  standard task-to-Home shape. After stock prepare accepts it, keep Home and wallpaper
-  roles unchanged, reparent the departing task under the existing closing leash, and
-  normalize only its prepared role to `CHANGE`. After an accepted commit merge, reparent
-  only the matching closing change to that leash. Fail closed for every other shape.
+  standard task-to-Home shape. A valid prepared transition contains exactly the application
+  and Home changes, optionally plus one taskless wallpaper change when Shell already represents
+  the visible wallpaper. Use this same two-or-three-change definition everywhere prepared
+  identity or composition is revalidated. After stock prepare accepts it, keep Home and wallpaper
+  roles unchanged, reparent the departing task under the existing closing leash, and normalize
+  only its prepared role to `CHANGE`. Fail closed for every other shape.
+- Keep both commit handoffs compositor-atomic. For an accepted standard `CLOSE` or `TO_BACK`
+  merge, append only the matching closing-change reparent to the original still-unapplied start
+  transaction at the accepted finish-callback boundary. For the exact rejected element-close
+  shape, merge the matching prepared finish transaction into Xiaomi's existing native start
+  transaction before its donor is applied and released. Never expose a prepared fullscreen
+  restore in a separate transaction ahead of Xiaomi's task reparent and start geometry.
 - Pass the original runner targets into Xiaomi's native closing provider and publish only
   the exact current geometry and corner radius through Xiaomi's own handoff status.
   Application pixels remain on the real closing task Surface; do not introduce a screenshot
@@ -389,6 +405,9 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
   `reports/NNN-short-topic/README.md`, starting at `001`. Once assigned, do not renumber or
   reuse a number; later work on the same experiment updates its existing report.
 - Keep behavior, diagnostics, and documentation changes in atomic commits.
+- Preserve the shared signing configuration: when complete local or environment credentials are
+  available, debug and release must use the same configured key. Keep keystores and credentials
+  ignored and never hard-code them in Gradle or source.
 
 ## Useful Commands
 
@@ -404,6 +423,9 @@ incremental packaging cannot leave stale ZIP slack in the artifact:
 ```powershell
 .\gradlew.bat clean assembleDebug
 ```
+
+`versionCode` is derived from the Git commit count. After committing the final source, rebuild the
+artifact before handoff; do not reuse an APK produced from the same source before that commit.
 
 When the user explicitly requests release, use:
 
