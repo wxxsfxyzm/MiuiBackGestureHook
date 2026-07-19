@@ -69,6 +69,13 @@ launcher interruption path.
 - When a reusable `CLOSE_TO_HOME` animation is retargeted in place to `OPEN_FROM_HOME`,
   adopt that running animation under a fresh generation only after verifying the native
   reused-close/open state. Preserve command-time validation and normal end cleanup.
+- Preserve a PermissionController merge only under the exact current immutable launcher-OPEN
+  snapshot. The normal sequence is main OPEN `N`, Permission ActivityRecord OPEN `N+1`, then
+  its matching CLOSE `N+2`; when WM collapses the permission OPEN, accept only the isolated
+  Permission CLOSE `N+1` with no container or parent.
+- If Xiaomi handler 0 accepts a Permission OPEN while its launcher-OPEN snapshot is being
+  published, synchronously re-read the current snapshot once after the native handler returns.
+  Do not add a delayed retry or broadly reroute handler-99 transitions.
 
 Primary target process:
 
@@ -229,7 +236,9 @@ Return-to-home rules:
   the visible wallpaper. Use this same two-or-three-change definition everywhere prepared
   identity or composition is revalidated. After stock prepare accepts it, keep Home and wallpaper
   roles unchanged, reparent the departing task under the existing closing leash, and normalize
-  only its prepared role to `CHANGE`. Fail closed for every other shape.
+  only its prepared role to `CHANGE`. Require Home flags `0x28001` for the three-change shape
+  with wallpaper and `0x28000` for the two-change shape without it; the application flags do not
+  vary with wallpaper presence. Fail closed for every other shape.
 - Keep both commit handoffs compositor-atomic. For an accepted standard `CLOSE` or `TO_BACK`
   merge, append only the matching closing-change reparent to the original still-unapplied start
   transaction at the accepted finish-callback boundary. For the exact rejected element-close
