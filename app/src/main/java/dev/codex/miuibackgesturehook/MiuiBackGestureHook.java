@@ -20755,6 +20755,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean launcherEditingCandidate;
         private boolean miuiHomeInputAccepted;
         private boolean pilfered;
+        private boolean immersiveBarsHiddenAtDown;
         private boolean arbiterAttached;
         private int activeEdge;
         private int downEventId;
@@ -20901,6 +20902,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     acceptMiuiHomeInput(token);
                 }
                 return pilfered;
+            }
+            if (nativeTransientBarsClaimedGesture()) {
+                return yieldToNativeTransientBars(event, "move");
             }
             float distance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
@@ -21057,6 +21061,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 resetCandidate();
                 return false;
             }
+            if (nativeTransientBarsClaimedGesture()) {
+                return yieldToNativeTransientBars(event, "release");
+            }
             if (driver.isRecentsVisualOnlyGesture()) {
                 // Let BackPanelController finish its local animation. No Shell navigation is
                 // active, and the monitor must not claim this input stream.
@@ -21076,6 +21083,35 @@ public final class MiuiBackGestureHook extends XposedModule {
                 cancel.recycle();
             }
             boolean handled = pilfered;
+            resetCandidate();
+            return handled;
+        }
+
+        private boolean nativeTransientBarsClaimedGesture() {
+            return immersiveBarsHiddenAtDown && isNavBarShownTransiently();
+        }
+
+        private boolean yieldToNativeTransientBars(MotionEvent event, String phase) {
+            boolean handled = pilfered;
+            try {
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherEditingCandidate);
+                cancel.recycle();
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to cancel Shell back after native transient-bars claim",
+                        throwable);
+            }
+            log(Log.INFO, TAG, "Yielded immersive side gesture to native transient bars"
+                    + ", phase=" + phase
+                    + ", inputPilfered=" + handled
+                    + ", downTime=" + downTime
+                    + ", edge=" + activeEdge
+                    + ", x=" + event.getRawX()
+                    + ", y=" + event.getRawY());
             resetCandidate();
             return handled;
         }
@@ -21180,11 +21216,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", displayId=" + displayId
                         + ", edge=" + edge);
             }
-            if (areSystemBarsHidden() && !isNavBarShownTransiently()) {
-                log(Log.INFO, TAG, "Deferred native back to immersive transient bars"
+            boolean systemBarsHidden = areSystemBarsHidden();
+            boolean navBarShownTransiently = isNavBarShownTransiently();
+            immersiveBarsHiddenAtDown = systemBarsHidden && !navBarShownTransiently;
+            if (immersiveBarsHiddenAtDown) {
+                log(Log.INFO, TAG, "Continuing AOSP back arbitration with immersive bars hidden"
                         + ", edge=" + edge + ", x=" + event.getRawX()
                         + ", y=" + event.getRawY());
-                return false;
             }
             if (!isBackGestureAllowedBySystemUiState()) {
                 log(Log.INFO, TAG, "Ignored native back while SystemUI state disallows back");
@@ -21489,6 +21527,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherEditingCandidate = false;
             miuiHomeInputAccepted = false;
             pilfered = false;
+            immersiveBarsHiddenAtDown = false;
             activeEdge = EDGE_LEFT;
             downEventId = 0;
             downDeviceId = Integer.MIN_VALUE;
