@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.6-optional-wallpaper-prepare";
+            "systemui-aosp-back-0.6.7-optional-wallpaper-finish-transfer";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -7690,14 +7690,19 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         Object preparedChangesObject = invokeAnyMethod(
                 preparedOpenInfo, "getChanges", new Object[0]);
-        if (!(preparedChangesObject instanceof List<?>)
-                || ((List<?>) preparedChangesObject).size() != 3) {
+        if (!(preparedChangesObject instanceof List<?>)) {
             return null;
         }
+        List<?> preparedChanges = (List<?>) preparedChangesObject;
+        int preparedChangeCount = preparedChanges.size();
+        if (preparedChangeCount != 2 && preparedChangeCount != 3) {
+            return null;
+        }
+        boolean preparedWallpaperExpected = preparedChangeCount == 3;
         SurfaceControl preparedAppLeash = null;
         SurfaceControl preparedHomeLeash = null;
         SurfaceControl preparedWallpaperLeash = null;
-        for (Object change : (List<?>) preparedChangesObject) {
+        for (Object change : preparedChanges) {
             Object modeObject = invokeAnyMethod(
                     change, "getMode", new Object[0]);
             Object flagsObject = invokeAnyMethod(
@@ -7784,13 +7789,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             return null;
         }
+        boolean preparedWallpaperMatches = preparedWallpaperExpected
+                ? preparedWallpaperLeash != null
+                && !surfacesAreSame(preparedWallpaperLeash, appLeash)
+                && !surfacesAreSame(preparedWallpaperLeash, homeLeash)
+                && !surfacesAreSame(preparedWallpaperLeash, elementLeash)
+                : preparedWallpaperLeash == null;
         if (preparedAppLeash == null || preparedHomeLeash == null
-                || preparedWallpaperLeash == null
+                || !preparedWallpaperMatches
                 || !surfacesAreSame(preparedAppLeash, appLeash)
-                || !surfacesAreSame(preparedHomeLeash, homeLeash)
-                || surfacesAreSame(preparedWallpaperLeash, appLeash)
-                || surfacesAreSame(preparedWallpaperLeash, homeLeash)
-                || surfacesAreSame(preparedWallpaperLeash, elementLeash)) {
+                || !surfacesAreSame(preparedHomeLeash, homeLeash)) {
             return null;
         }
 
