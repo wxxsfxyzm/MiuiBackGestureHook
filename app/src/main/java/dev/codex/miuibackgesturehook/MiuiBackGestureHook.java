@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.7-optional-wallpaper-finish-transfer";
+            "systemui-aosp-back-0.6.11-return-home-handoff-fixes";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -231,6 +231,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int FLAG_DISPLAY_CHANGE = 1 << 27;
     private static final int FLAG_IS_ELEMENT = Integer.MIN_VALUE;
     private static final int XIAOMI_PREPARED_HOME_CHANGE_FLAGS = 0x00028001;
+    private static final int XIAOMI_PREPARED_HOME_NO_WALLPAPER_CHANGE_FLAGS =
+            0x00028000;
     private static final int XIAOMI_ELEMENT_HOME_CHANGE_FLAGS = 0x00120001;
     private static final int FLAG_ONLY_ACTIVITY_RECORD = 1 << 26;
     private static final int EDGE_LEFT = 0;
@@ -3026,7 +3028,41 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        PermissionActivityTransition adjacentPermissionClose = null;
+        if (handlerType == 99 && onlyActivityRecord && snapshot != null) {
+            try {
+                adjacentPermissionClose =
+                        resolveAdjacentPermissionActivityClose(
+                                chain.getThisObject(), chain.getArg(0),
+                                snapshot);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect adjacent PermissionController CLOSE merge",
+                        throwable);
+            }
+        }
+        if (adjacentPermissionClose != null) {
+            Object[] routedArgs = chain.getArgs().toArray();
+            // A permission Activity may open and finish before WM dispatches either merge.
+            // In that case Shell emits only the CLOSE immediately after the launcher OPEN.
+            // Reuse Xiaomi's ActivityRecord branch so this merge finishes without cancelling
+            // the still-running launcher animation.
+            routedArgs[1] = Integer.valueOf(0);
+            log(Log.INFO, TAG,
+                    "Preserved Xiaomi launcher OPEN across adjacent PermissionController CLOSE"
+                            + ", launcherGeneration=" + snapshot.generation
+                            + ", taskId=" + snapshot.mainTask.taskId
+                            + ", mainDebugId="
+                            + snapshot.mainTransitionDebugId
+                            + ", closeDebugId="
+                            + adjacentPermissionClose.debugId
+                            + ", animationType=" + snapshot.animationType);
+            return chain.proceed(routedArgs);
+        }
+
         PermissionActivityTransition permissionOpen = null;
+        MiuiHomeLauncherOpenSnapshot permissionOpenSnapshot = snapshot;
+        String permissionOpenSource = "none";
         if (handlerType == 0 && onlyActivityRecord && snapshot != null) {
             try {
                 if (isMiuiHomeLauncherOpenSnapshotCurrent(
@@ -3035,6 +3071,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                             chain.getArg(0), TRANSIT_OPEN,
                             FLAG_TRANSLUCENT | FLAG_FILLS_TASK,
                             FLAG_ONLY_ACTIVITY_RECORD, snapshot);
+                    if (permissionOpen != null) {
+                        permissionOpenSource = "preProceed";
+                    }
                 }
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
@@ -3044,14 +3083,53 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         Object result = chain.proceed();
+        if (Boolean.TRUE.equals(result)
+                && handlerType == 0 && onlyActivityRecord
+                && permissionOpen == null) {
+            try {
+                MiuiHomeLauncherOpenSnapshot latestSnapshot =
+                        miuiHomeLauncherOpenSnapshot.get();
+                boolean latestSnapshotCurrent = latestSnapshot != null
+                        && isMiuiHomeLauncherOpenSnapshotCurrent(
+                        chain.getThisObject(), latestSnapshot);
+                PermissionActivityTransition latestPermissionOpen =
+                        latestSnapshotCurrent
+                                ? resolvePermissionActivityTransition(
+                                chain.getArg(0), TRANSIT_OPEN,
+                                FLAG_TRANSLUCENT | FLAG_FILLS_TASK,
+                                FLAG_ONLY_ACTIVITY_RECORD,
+                                latestSnapshot)
+                                : null;
+                log(Log.INFO, TAG,
+                        "Rechecked PermissionController OPEN merge after native handler"
+                                + ", transitionDebugId="
+                                + readTransitionDebugId(chain.getArg(0))
+                                + ", snapshotPresent="
+                                + (latestSnapshot != null)
+                                + ", snapshotCurrent="
+                                + latestSnapshotCurrent
+                                + ", resolved="
+                                + (latestPermissionOpen != null));
+                if (latestPermissionOpen != null) {
+                    permissionOpenSnapshot = latestSnapshot;
+                    permissionOpen = latestPermissionOpen;
+                    permissionOpenSource = "postProceedRecheck";
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to recheck PermissionController OPEN merge after native handler",
+                        throwable);
+            }
+        }
         if (permissionOpen != null && Boolean.TRUE.equals(result)) {
             try {
-                if (miuiHomeLauncherOpenSnapshot.get() == snapshot
+                if (miuiHomeLauncherOpenSnapshot.get()
+                        == permissionOpenSnapshot
                         && isMiuiHomeLauncherOpenSnapshotCurrent(
-                        chain.getThisObject(), snapshot)) {
+                        chain.getThisObject(), permissionOpenSnapshot)) {
                     MiuiHomePermissionMergeToken token =
                             new MiuiHomePermissionMergeToken(
-                                    snapshot, permissionOpen);
+                                    permissionOpenSnapshot, permissionOpen);
                     MiuiHomePermissionMergeToken replaced =
                             miuiHomePermissionMergeToken.getAndSet(token);
                     if (replaced != null) {
@@ -3060,11 +3138,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                     log(Log.INFO, TAG,
                             "Captured PermissionController ActivityRecord OPEN merge"
                                     + ", launcherGeneration="
-                                    + snapshot.generation
-                                    + ", taskId=" + snapshot.mainTask.taskId
+                                    + permissionOpenSnapshot.generation
+                                    + ", taskId="
+                                    + permissionOpenSnapshot.mainTask.taskId
                                     + ", debugId=" + permissionOpen.debugId
                                     + ", animationType="
-                                    + snapshot.animationType);
+                                    + permissionOpenSnapshot.animationType
+                                    + ", source="
+                                    + permissionOpenSource);
                 }
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
@@ -3418,6 +3499,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                 || ((Number) typeObject).intValue() != expectedMode) {
             return null;
         }
+        int debugId = readTransitionDebugId(transitionInfo);
+        if (expectedMode == TRANSIT_OPEN
+                && (snapshot.mainTransitionDebugId < 0
+                || debugId != snapshot.mainTransitionDebugId + 1)) {
+            return null;
+        }
         Object changesObject = invokeAnyMethod(
                 infoExpose, "getChanges", new Object[0]);
         if (!(changesObject instanceof List<?>)
@@ -3486,7 +3573,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 infoExpose, transitionInfo, changeExpose, change,
                 container, parent, (SurfaceControl) leashObject,
                 (ComponentName) componentObject, startBounds, endBounds,
-                readTransitionDebugId(transitionInfo),
+                debugId,
                 backgroundObject instanceof Number
                         ? ((Number) backgroundObject).intValue() : 0,
                 startDisplay, endDisplay);
@@ -3528,6 +3615,25 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         return open.leash.isValid() && close.leash.isValid()
                 && surfacesAreSame(open.leash, close.leash) ? close : null;
+    }
+
+    private PermissionActivityTransition resolveAdjacentPermissionActivityClose(
+            Object compat, Object infoExpose,
+            MiuiHomeLauncherOpenSnapshot snapshot) throws Exception {
+        if (!isMiuiHomeLauncherOpenSnapshotCurrent(compat, snapshot)
+                || snapshot.mainTransitionDebugId < 0) {
+            return null;
+        }
+        PermissionActivityTransition close =
+                resolvePermissionActivityTransition(
+                        infoExpose, TRANSIT_CLOSE,
+                        FLAG_TRANSLUCENT | FLAG_FILLS_TASK
+                                | FLAG_IS_OCCLUDED,
+                        0, snapshot);
+        return close != null
+                && close.debugId == snapshot.mainTransitionDebugId + 1
+                && close.container == null
+                && close.parent == null ? close : null;
     }
 
     private int readTransitionDebugId(Object infoOrExpose) {
@@ -7699,6 +7805,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             return null;
         }
         boolean preparedWallpaperExpected = preparedChangeCount == 3;
+        // The exact two-change prepared shape omits SHOW_WALLPAPER on Home.
+        int expectedPreparedHomeFlags = preparedWallpaperExpected
+                ? XIAOMI_PREPARED_HOME_CHANGE_FLAGS
+                : XIAOMI_PREPARED_HOME_NO_WALLPAPER_CHANGE_FLAGS;
         SurfaceControl preparedAppLeash = null;
         SurfaceControl preparedHomeLeash = null;
         SurfaceControl preparedWallpaperLeash = null;
@@ -7762,7 +7872,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (taskId == composition.openingTaskId
                     && preparedHomeLeash == null) {
                 if (mode != TRANSIT_TO_FRONT
-                        || flags != XIAOMI_PREPARED_HOME_CHANGE_FLAGS
+                        || flags != expectedPreparedHomeFlags
                         || resolveTaskInfoActivityType(taskInfo)
                         != ACTIVITY_TYPE_HOME
                         || resolveTaskInfoWindowingMode(taskInfo)
