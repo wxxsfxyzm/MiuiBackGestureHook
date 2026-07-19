@@ -52,6 +52,7 @@ import android.window.BackProgressAnimator;
 import android.window.BackTouchTracker;
 
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -65,9 +66,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -82,9 +85,12 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.5.18-atomic-handoff-recents-cleanup";
+            "systemui-aosp-back-0.6.3-unified-owner-native-provider";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
+    private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
+    private static final int UNIFIED_CONFIG_HOOK_RUNNING = 1;
+    private static final int UNIFIED_CONFIG_HOOK_COMPLETED = 2;
 
     private static final String EDGE_BACK_GESTURE_HANDLER =
             "com.android.systemui.navigationbar.gestural.EdgeBackGestureHandler";
@@ -132,6 +138,20 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.OverviewProxyImpl";
     private static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT =
             "com.android.systemui.shared.recents.system.RemoteAnimationTargetCompat";
+    private static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_SET =
+            "com.miui.home.recents.util.RemoteAnimationTargetSet";
+    private static final String MIUI_HOME_WINDOW_ANIM_PARAMS =
+            "com.miui.home.recents.util.WindowAnimParams";
+    private static final String MIUI_HOME_RECTF_PARAMS =
+            "com.miui.home.recents.anim.RectFParams";
+    private static final String MIUI_HOME_RECTF_SPRING_ANIM =
+            "com.miui.home.recents.util.RectFSpringAnim";
+    private static final String MIUI_HOME_RECTF_SPRING_ANIM_TYPE =
+            MIUI_HOME_RECTF_SPRING_ANIM + "$AnimType";
+    private static final String MIUI_HOME_WINDOW_ANIM_LISTENER =
+            "com.miui.home.recents.anim.windowanim.WindowAnimListener";
+    private static final String MIUI_HOME_GESTURE_HOME_CALCULATOR =
+            "com.miui.home.recents.GestureHomeCalculator";
     private static final String MIUI_HOME_ANIM_STATUS_PARAM =
             "com.miui.home.recents.anim.windowanim.sfanim.AnimStatusParam";
     private static final String MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR =
@@ -240,6 +260,12 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
             "launcher_open_break_attempt";
     private static final String EXTRA_LAUNCHER_EDITING = "launcher_editing";
+    private static final String EXTRA_RETURN_HOME_COMMIT_TASK_ID =
+            "return_home_commit_task_id";
+    private static final String EXTRA_RETURN_HOME_COMMIT_DEBUG_ID =
+            "return_home_commit_debug_id";
+    private static final String EXTRA_RETURN_HOME_COMMIT_ATTEMPT =
+            "return_home_commit_attempt";
     private static final int LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER = 0;
     private static final int LAUNCHER_OPEN_BREAK_RESULT_REJECTED = 1;
     private static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
@@ -273,8 +299,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final long RETURN_HOME_CANCEL_FINISH_GUARD_MS = 350L;
     private static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
     private static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
-    private static final long RETURN_HOME_NATIVE_GEOMETRY_MAX_AGE_NS =
-            TimeUnit.MILLISECONDS.toNanos(100L);
     private static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
     private static final int RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS = 2;
     private static final int MIUI_SURFACE_PARAM_FLAG_MATRIX = 2;
@@ -340,6 +364,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private final AtomicLong miuiHomeLauncherOpenSnapshotIds =
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicLong miuiHomeNativeGeometryFrameIds = new AtomicLong();
+    private final AtomicLong systemUiReturnHomeCommitAttemptIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final ThreadLocal<ReturnHomeNativeGeometrySnapshot>
             miuiHomePendingNativeGeometry = new ThreadLocal<>();
     private final ThreadLocal<ReturnHomeFinishTransferCandidate>
@@ -349,6 +375,10 @@ public final class MiuiBackGestureHook extends XposedModule {
     private volatile boolean backFinishOpenCallerDeoptimized;
     private final AtomicReference<MiuiHomeAcceptedInputToken> acceptedInputToken =
             new AtomicReference<>();
+    private final AtomicReference<MiuiHomeAcceptedInputToken>
+            miuiHomeAcceptedInputIdentity = new AtomicReference<>();
+    private final AtomicReference<SystemUiReturnHomeCommitIdentity>
+            systemUiReturnHomeCommitIdentity = new AtomicReference<>();
     private final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
             new AtomicReference<>();
     private final AtomicReference<MiuiHomeLauncherOpenSnapshot>
@@ -382,6 +412,10 @@ public final class MiuiBackGestureHook extends XposedModule {
     private BroadcastReceiver miuiHomeInputArbiterReceiver;
     private volatile MiuiHomeReturnHomeController miuiHomeReturnHomeController;
     private volatile IBinder miuiHomeReturnHomeBinder;
+    private volatile IBinder pendingMiuiHomeReturnHomeBinder;
+    private volatile ClassLoader pendingMiuiHomeReturnHomeClassLoader;
+    private volatile Context pendingMiuiHomeReturnHomeContext;
+    private volatile String pendingMiuiHomeReturnHomeReason;
     private volatile boolean miuiHomeSystemUiInputArbiterReady;
     private volatile long miuiHomeSystemUiInputArbiterGeneration;
     private String processName;
@@ -408,7 +442,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         final Object animationIdentity;
         final long frameTraceId;
         final int sourceKind;
-        final long capturedElapsedRealtimeNanos;
         private final float[] matrixValues;
         private final int cropLeft;
         private final int cropTop;
@@ -431,8 +464,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.cropRight = windowCrop.right;
             this.cropBottom = windowCrop.bottom;
             this.surfaceCornerRadii = surfaceCornerRadii.clone();
-            this.capturedElapsedRealtimeNanos =
-                    SystemClock.elapsedRealtimeNanos();
         }
 
         float[] copyMatrixValues() {
@@ -584,6 +615,7 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private static final class MiuiHomeLauncherOpenSnapshot {
         final long generation;
+        final long nativeGeneration;
         final long callbackEpoch;
         final Object stateManager;
         final Object windowElement;
@@ -597,13 +629,15 @@ public final class MiuiBackGestureHook extends XposedModule {
         final LauncherOpenMainTask mainTask;
 
         MiuiHomeLauncherOpenSnapshot(
-                long generation, long callbackEpoch, Object stateManager,
+                long generation, long nativeGeneration, long callbackEpoch,
+                Object stateManager,
                 Object windowElement, Object animationIdentity,
                 String animationType, Object windowTransitionCompat,
                 Object helper, Object mainTransitionToken,
                 Object mainTransitionInfo, int mainTransitionDebugId,
                 LauncherOpenMainTask mainTask) {
             this.generation = generation;
+            this.nativeGeneration = nativeGeneration;
             this.callbackEpoch = callbackEpoch;
             this.stateManager = stateManager;
             this.windowElement = windowElement;
@@ -749,6 +783,83 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
+    private static final class StandardReturnHomeCommitSignal {
+        final long attempt;
+        final long arbiterGeneration;
+        final int taskId;
+        final int transitionDebugId;
+        final int eventId;
+        final long downTime;
+        final int deviceId;
+        final int source;
+        final int displayId;
+        final int edge;
+        final long launcherSessionGeneration;
+
+        StandardReturnHomeCommitSignal(long attempt, long arbiterGeneration,
+                                       int taskId, int transitionDebugId,
+                                       int eventId, long downTime,
+                                       int deviceId, int source,
+                                       int displayId, int edge) {
+            this(attempt, arbiterGeneration, taskId, transitionDebugId,
+                    eventId, downTime, deviceId, source, displayId, edge,
+                    0L);
+        }
+
+        private StandardReturnHomeCommitSignal(
+                long attempt, long arbiterGeneration,
+                int taskId, int transitionDebugId,
+                int eventId, long downTime,
+                int deviceId, int source, int displayId, int edge,
+                long launcherSessionGeneration) {
+            this.attempt = attempt;
+            this.arbiterGeneration = arbiterGeneration;
+            this.taskId = taskId;
+            this.transitionDebugId = transitionDebugId;
+            this.eventId = eventId;
+            this.downTime = downTime;
+            this.deviceId = deviceId;
+            this.source = source;
+            this.displayId = displayId;
+            this.edge = edge;
+            this.launcherSessionGeneration = launcherSessionGeneration;
+        }
+
+        StandardReturnHomeCommitSignal bindToLauncherSession(
+                long sessionGeneration) {
+            return new StandardReturnHomeCommitSignal(
+                    attempt, arbiterGeneration, taskId,
+                    transitionDebugId, eventId, downTime,
+                    deviceId, source, displayId, edge,
+                    sessionGeneration);
+        }
+
+        boolean matchesInput(MiuiHomeAcceptedInputToken token) {
+            return token != null
+                    && token.generation == arbiterGeneration
+                    && token.eventId == eventId
+                    && token.downTime == downTime
+                    && token.deviceId == deviceId
+                    && token.source == source
+                    && token.displayId == displayId
+                    && token.edge == edge;
+        }
+    }
+
+    private static final class SystemUiReturnHomeCommitIdentity {
+        final Object controller;
+        final int taskId;
+        final MiuiHomeAcceptedInputToken input;
+
+        SystemUiReturnHomeCommitIdentity(
+                Object controller, int taskId,
+                MiuiHomeAcceptedInputToken input) {
+            this.controller = controller;
+            this.taskId = taskId;
+            this.input = input;
+        }
+    }
+
     private static final class EdgeWidthSnapshot {
         final int leftSensitivity;
         final int rightSensitivity;
@@ -800,6 +911,27 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
+    private static final class ObjectIdentityKey {
+        final Object object;
+        final int identityHash;
+
+        ObjectIdentityKey(Object object) {
+            this.object = object;
+            this.identityHash = System.identityHashCode(object);
+        }
+
+        @Override
+        public boolean equals(Object candidate) {
+            return candidate instanceof ObjectIdentityKey
+                    && object == ((ObjectIdentityKey) candidate).object;
+        }
+
+        @Override
+        public int hashCode() {
+            return identityHash;
+        }
+    }
+
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
         processName = param.getProcessName();
@@ -810,6 +942,17 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     @Override
     public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        MiuiHomeReturnHomeController activeReturnHomeController =
+                miuiHomeReturnHomeController;
+        if (activeReturnHomeController != null
+                && activeReturnHomeController.blocksHotReload()) {
+            log(Log.WARN, TAG,
+                    "Deferred hot reload while Xiaomi owns predictive return-home"
+                            + ", process=" + processName
+                            + ", state="
+                            + activeReturnHomeController.describeUnifiedOwner());
+            return false;
+        }
         log(Log.INFO, TAG, "Hot reloading, build=" + BUILD_MARK
                 + ", process=" + processName
                 + ", hooks=" + hookHandles.size());
@@ -850,6 +993,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         miuiLauncherOpenBreakAvailable = false;
         miuiLauncherOpenBreakGeneration = 0L;
         acceptedInputToken.set(null);
+        miuiHomeAcceptedInputIdentity.set(null);
+        systemUiReturnHomeCommitIdentity.set(null);
         unregisterMiuiOverviewStateReceiver();
         unregisterMiuiHomeOpenBreakCommandReceiver();
         unregisterMiuiHomeInputArbiterReceiver();
@@ -904,10 +1049,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomeOpenBreakEnableHook = false;
         boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
         boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
+        boolean hadMiuiHomeOpenSnapshotTargetsHook = false;
         boolean hadMiuiHomeReusedCloseOpenHook = false;
         boolean hadMiuiHomeElementTransitionHook = false;
         boolean hadMiuiHomeElementLeashRearmHook = false;
         boolean hadMiuiHomeElementAnimTypeHook = false;
+        boolean hadMiuiHomeAnimToConfigHook = false;
+        boolean hadMiuiHomeFinishDispatchSourceHook = false;
+        boolean hadMiuiHomeFinishDispatchApplyHook = false;
         boolean hadMiuiHomeTraceOnAnimUpdateHook = false;
         boolean hadMiuiHomeTraceApplySurfaceParamsHook = false;
         boolean hadMiuiHomeTraceSetupLeashHook = false;
@@ -980,6 +1129,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("miui_home_open_break_animation_end".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeOpenBreakAnimationEndHook = true;
+                } else if ("miui_home_open_snapshot_targets".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeOpenSnapshotTargetsHook = true;
                 } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
                     hadMiuiHomeReusedCloseOpenHook = true;
                 } else if ("miui_home_return_home_element_transition".equals(
@@ -991,6 +1143,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("miui_home_return_home_element_anim_type".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeElementAnimTypeHook = true;
+                } else if ("miui_home_return_home_anim_to_config".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeAnimToConfigHook = true;
+                } else if ("miui_home_return_home_finish_dispatch_source".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeFinishDispatchSourceHook = true;
+                } else if ("miui_home_return_home_finish_dispatch_apply".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeFinishDispatchApplyHook = true;
                 } else if ("miui_home_trace_on_anim_update".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeTraceOnAnimUpdateHook = true;
@@ -1186,6 +1347,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                         hookMiuiHomeOpenBreakAnimationEnd(listenerClass);
                     }
                 }
+                if (!hadMiuiHomeOpenSnapshotTargetsHook) {
+                    try {
+                        hookMiuiHomeLauncherOpenSnapshotTargets(
+                                hotReloadClassLoader);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to backfill Xiaomi OPEN target binding",
+                                throwable);
+                    }
+                }
                 if (!hadMiuiHomeReusedCloseOpenHook) {
                     hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
                 }
@@ -1201,6 +1372,21 @@ public final class MiuiBackGestureHook extends XposedModule {
                     } catch (Throwable throwable) {
                         log(Log.WARN, TAG,
                                 "Failed to backfill MiuiHome element continuity",
+                                throwable);
+                    }
+                }
+                if (!hadMiuiHomeAnimToConfigHook
+                        || !hadMiuiHomeFinishDispatchSourceHook
+                        || !hadMiuiHomeFinishDispatchApplyHook) {
+                    try {
+                        hookMiuiHomeUnifiedFinishEpoch(
+                                hotReloadClassLoader,
+                                !hadMiuiHomeAnimToConfigHook,
+                                !hadMiuiHomeFinishDispatchSourceHook,
+                                !hadMiuiHomeFinishDispatchApplyHook);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to backfill MiuiHome finish-epoch hooks",
                                 throwable);
                     }
                 }
@@ -1346,6 +1532,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         if ("miui_home_open_break_animation_end".equals(hookId)) {
             return this::mirrorMiuiHomeOpenBreakAnimationEnd;
         }
+        if ("miui_home_open_snapshot_targets".equals(hookId)) {
+            return this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound;
+        }
         if ("miui_home_reused_close_open".equals(hookId)) {
             return this::restoreMiuiHomeReusedCloseOpen;
         }
@@ -1357,6 +1546,15 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("miui_home_return_home_element_anim_type".equals(hookId)) {
             return this::observeMiuiHomeElementAnimType;
+        }
+        if ("miui_home_return_home_anim_to_config".equals(hookId)) {
+            return this::observeMiuiHomeUnifiedAnimToConfigured;
+        }
+        if ("miui_home_return_home_finish_dispatch_source".equals(hookId)) {
+            return this::captureMiuiHomeUnifiedFinishDispatch;
+        }
+        if ("miui_home_return_home_finish_dispatch_apply".equals(hookId)) {
+            return this::guardMiuiHomeUnifiedFinishDispatch;
         }
         if ("miui_home_return_home_element_retarget".equals(hookId)) {
             return XposedInterface.Chain::proceed;
@@ -1393,6 +1591,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("miui_home_trace_transition_setup_leash".equals(hookId)) {
             return this::armMiuiHomeTransitionStartGeometry;
+        }
+        if (hookId.startsWith(
+                "miui_home_trace_island_protocol_")) {
+            return XposedInterface.Chain::proceed;
         }
         if (hookId.startsWith(
                 "miui_home_trace_surface_transaction_")) {
@@ -1636,6 +1838,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                     MIUI_HOME_WINDOW_ELEMENT_ANIM_LISTENER, false, classLoader);
             hookMiuiHomeOpenBreakAnimationStart(windowElementAnimListenerClass);
             hookMiuiHomeOpenBreakAnimationEnd(windowElementAnimListenerClass);
+            try {
+                hookMiuiHomeLauncherOpenSnapshotTargets(classLoader);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to install Xiaomi OPEN target binding",
+                        throwable);
+            }
             hookMiuiHomeReusedCloseOpen(classLoader);
             try {
                 hookMiuiHomeTransitionContinuity(
@@ -1643,6 +1852,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
                         "Failed to install MiuiHome element continuity",
+                        throwable);
+            }
+            try {
+                hookMiuiHomeUnifiedFinishEpoch(
+                        classLoader, true, true, true);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to install MiuiHome finish-epoch hooks",
                         throwable);
             }
             try {
@@ -1824,6 +2041,31 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::mirrorMiuiHomeOpenBreakAnimationEnd));
     }
 
+    private void hookMiuiHomeLauncherOpenSnapshotTargets(
+            ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        Class<?> remoteTargetClass = Class.forName(
+                MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT, false,
+                classLoader);
+        Class<?> remoteTargetArrayClass =
+                Array.newInstance(remoteTargetClass, 0).getClass();
+        Class<?> helperClass = Class.forName(
+                MIUI_HOME_WINDOW_TRANSITION_CALLBACK_HELPER, false,
+                classLoader);
+        Method method = windowElementClass.getDeclaredMethod(
+                "refreshTransitionCallbackHelper", remoteTargetArrayClass,
+                helperClass, remoteTargetArrayClass);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("miui_home_open_snapshot_targets")
+                .intercept(
+                        this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound));
+        log(Log.INFO, TAG,
+                "Hooked Xiaomi launcher OPEN remote-target binding");
+    }
+
     private void hookMiuiHomeReusedCloseOpen(ClassLoader classLoader)
             throws ClassNotFoundException, NoSuchMethodException {
         Class<?> stateManagerClass = Class.forName(MIUI_HOME_STATE_MANAGER, false,
@@ -1884,6 +2126,47 @@ public final class MiuiBackGestureHook extends XposedModule {
                 + ", elementTransition=" + hookElementTransition
                 + ", elementLeashRearm=" + hookElementLeashRearm
                 + ", elementAnimType=" + hookElementAnimType);
+    }
+
+    private void hookMiuiHomeUnifiedFinishEpoch(
+            ClassLoader classLoader, boolean hookAnimToConfig,
+            boolean hookFinishSource, boolean hookFinishApply)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        if (hookAnimToConfig) {
+            Class<?> implementorClass = Class.forName(
+                    MIUI_HOME_LOCAL_WINDOW_ANIM_IMPLEMENTOR, false,
+                    classLoader);
+            Class<?> rectFParamsClass = Class.forName(
+                    MIUI_HOME_RECTF_PARAMS, false, classLoader);
+            Method config = requireExactDeclaredMethod(
+                    implementorClass, "animTo$lambda$3", "void",
+                    rectFParamsClass.getName(), implementorClass.getName());
+            recordHookHandle(hook(config)
+                    .setId("miui_home_return_home_anim_to_config")
+                    .intercept(this::observeMiuiHomeUnifiedAnimToConfigured));
+        }
+        if (hookFinishSource) {
+            Method source = requireExactDeclaredMethod(
+                    windowElementClass, "onFinishCompleted", "void");
+            recordHookHandle(hook(source)
+                    .setId("miui_home_return_home_finish_dispatch_source")
+                    .intercept(this::captureMiuiHomeUnifiedFinishDispatch));
+        }
+        if (hookFinishApply) {
+            Method apply = requireExactDeclaredMethod(
+                    windowElementClass,
+                    "onFinishCompleted$lambda$39", "void",
+                    windowElementClass.getName());
+            recordHookHandle(hook(apply)
+                    .setId("miui_home_return_home_finish_dispatch_apply")
+                    .intercept(this::guardMiuiHomeUnifiedFinishDispatch));
+        }
+        log(Log.INFO, TAG, "Hooked MiuiHome unified finish epochs"
+                + ", animToConfig=" + hookAnimToConfig
+                + ", finishSource=" + hookFinishSource
+                + ", finishApply=" + hookFinishApply);
     }
 
     private void hookMiuiHomePermissionMerge(ClassLoader classLoader)
@@ -1982,7 +2265,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 hookMiuiHomeNativeGeometryUpdate(classLoader);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG,
-                        "Failed to hook MiuiHome onAnimUpdate trace", throwable);
+                        "Failed to hook MiuiHome native geometry update", throwable);
             }
         }
         if (hookApplySurfaceParams) {
@@ -1990,7 +2273,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 hookMiuiHomeNativeGeometryApply(classLoader);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG,
-                        "Failed to hook MiuiHome applySurfaceParams trace",
+                        "Failed to hook MiuiHome native geometry apply",
                         throwable);
             }
         }
@@ -2265,13 +2548,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         Object result = chain.proceed();
         Object animationListener = chain.getThisObject();
         Object animationIdentity = chain.getArg(0);
-        invalidateMiuiHomeLauncherOpenSnapshot(null, "animationStart");
         MiuiHomeReturnHomeController returnHomeController =
                 miuiHomeReturnHomeController;
-        if (returnHomeController != null) {
-            returnHomeController.onNativeAnimationStart(
-                    animationListener, animationIdentity);
+        if (returnHomeController != null
+                && returnHomeController.onNativeAnimationStart(
+                animationListener, animationIdentity)) {
+            return result;
         }
+        invalidateMiuiHomeLauncherOpenSnapshot(null, "animationStart");
         if (!miuiHomeOpenBreakGenerationPrepared
                 || miuiHomeOpenBreakGeneration == 0L) {
             miuiHomeOpenBreakGeneration = nextMiuiHomeOpenBreakGeneration();
@@ -2302,20 +2586,25 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Object mirrorMiuiHomeOpenBreakAnimationEnd(XposedInterface.Chain chain)
             throws Throwable {
-        Object result = chain.proceed();
         Object endedAnimationIdentity = chain.getArg(0);
         MiuiHomeReturnHomeController returnHomeController =
                 miuiHomeReturnHomeController;
         if (returnHomeController != null) {
-            returnHomeController.onNativeAnimationEnd(
+            returnHomeController.captureNativeAnimationEndBeforeListener(
                     chain.getThisObject(), endedAnimationIdentity);
+        }
+        Object result = chain.proceed();
+        if (returnHomeController != null
+                && returnHomeController.onNativeAnimationEnd(
+                chain.getThisObject(), endedAnimationIdentity)) {
+            return result;
         }
         invalidateMiuiHomeLauncherOpenSnapshot(
                 endedAnimationIdentity, "animationEnd");
         long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
-        // Xiaomi's listener posts its actual StateManager cleanup to the main executor.
-        // Queue behind it so isOpenAnimRunning() observes the final state. If another OPEN
-        // has already replaced this one, the native availability query keeps the new state.
+        // StateManager cleanup executes inline when this callback is already on main. Queue
+        // behind the completed listener so isOpenAnimRunning() observes the final state. If
+        // another OPEN has replaced this one, the native query keeps the replacement state.
         new Handler(Looper.getMainLooper()).post(() -> {
             if (miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch) {
                 return;
@@ -2330,12 +2619,56 @@ public final class MiuiBackGestureHook extends XposedModule {
         return result;
     }
 
+    private Object captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            log(Log.WARN, TAG,
+                    "Ignored Xiaomi launcher OPEN targets off main Looper"
+                            + ", windowElement="
+                            + shortObject(chain.getThisObject()));
+            return result;
+        }
+        long nativeGeneration = miuiHomeOpenBreakGeneration;
+        long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
+        Object animationIdentity = miuiHomeOpenBreakAnimationIdentity;
+        if (nativeGeneration == 0L || animationIdentity == null
+                || !miuiHomeOpenBreakAnimationActive) {
+            return result;
+        }
+        try {
+            Object firstTarget = invokeAnyMethod(
+                    result, "getFirstTarget", new Object[0]);
+            if (firstTarget == null) {
+                return result;
+            }
+            int boundTaskId = readIntFieldOrDefault(
+                    firstTarget, "taskId", -1);
+            Object windowElement = chain.getThisObject();
+            Object stateManagerListener = readField(
+                    windowElement, "stateManagerListener");
+            Object stateManager = readField(
+                    stateManagerListener, "this$0");
+            captureMiuiHomeLauncherOpenSnapshot(
+                    stateManager, windowElement, chain.getArg(1),
+                    animationIdentity, nativeGeneration, callbackEpoch,
+                    boundTaskId, "remoteTargetsBound");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to capture Xiaomi launcher OPEN bound targets",
+                    throwable);
+        }
+        return result;
+    }
+
     private Object prepareMiuiHomeElementTransitionContinuity(
             XposedInterface.Chain chain) throws Throwable {
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
         boolean prepared = false;
         if (controller != null) {
             try {
+                controller.observeUnifiedCommitTransition(
+                        chain.getThisObject(), chain.getArg(0));
                 prepared = controller.prepareElementTransitionContinuity(
                         chain.getThisObject(), chain.getArg(0));
             } catch (Throwable throwable) {
@@ -2344,12 +2677,24 @@ public final class MiuiBackGestureHook extends XposedModule {
                         throwable);
             }
         }
+        if (controller != null && !prepared
+                && controller.invalidateUnifiedCommitTransition(
+                chain.getThisObject(), chain.getArg(0),
+                "unsupportedElementShape")) {
+            controller.invalidateElementTransitionContinuity(
+                    null, "unsupportedElementShape", true);
+        }
         try {
             return chain.proceed();
         } catch (Throwable throwable) {
-            if (prepared && controller != null) {
-                controller.invalidateElementTransitionContinuity(
-                        null, "injectRemoteTransitionThrew", true);
+            if (controller != null) {
+                controller.invalidateUnifiedCommitTransition(
+                        chain.getThisObject(), chain.getArg(0),
+                        "injectRemoteTransitionThrew");
+                if (prepared) {
+                    controller.invalidateElementTransitionContinuity(
+                            null, "injectRemoteTransitionThrew", true);
+                }
             }
             throw throwable;
         }
@@ -2376,8 +2721,39 @@ public final class MiuiBackGestureHook extends XposedModule {
             throws Throwable {
         Object params = chain.getArg(0);
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller != null) {
+            try {
+                controller.markUnifiedCommitAnimToEntering(
+                        chain.getThisObject(), params);
+            } catch (Throwable throwable) {
+                boolean terminalQueued =
+                        controller.onUnifiedCommitAnimToEntryFailed(
+                                chain.getThisObject(), params,
+                                throwable);
+                log(Log.ERROR, TAG,
+                        "Failed Xiaomi final animTo entry gating"
+                                + ", terminalQueued="
+                                + terminalQueued,
+                        throwable);
+                if (terminalQueued) {
+                    // The exact native owner is now being cancelled on main. Do not let the
+                    // failed entry configure a final spring without finish-epoch protection.
+                    return null;
+                }
+            }
+            try {
+                controller.prepareUnifiedHandoffBeforeAnimTo(
+                        chain.getThisObject(), params);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to prepare Xiaomi predictive handoff status",
+                        throwable);
+            }
+        }
         Object result = chain.proceed();
         if (controller != null) {
+            controller.markUnifiedCommitAnimToReturned(
+                    chain.getThisObject(), params);
             try {
                 controller.adoptElementTransitionIfStarted(
                         chain.getThisObject(), params);
@@ -2388,6 +2764,101 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
         return result;
+    }
+
+    private Object observeMiuiHomeUnifiedAnimToConfigured(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        Object configLock = controller == null ? null
+                : controller.resolveUnifiedAnimToConfigLock(
+                chain.getArg(0));
+        if (configLock != null) {
+            synchronized (configLock) {
+                return observeMiuiHomeUnifiedAnimToConfiguredLocked(
+                        chain, controller);
+            }
+        }
+        return observeMiuiHomeUnifiedAnimToConfiguredLocked(
+                chain, controller);
+    }
+
+    private Object observeMiuiHomeUnifiedAnimToConfiguredLocked(
+            XposedInterface.Chain chain,
+            MiuiHomeReturnHomeController controller) throws Throwable {
+        Object ownerToken = controller == null ? null
+                : controller.beginUnifiedNativeAnimToConfigHook(
+                chain.getArg(0));
+        Throwable hookFailure = null;
+        String completionReason = "beforeOriginal";
+        try {
+            if (controller != null
+                    && controller.shouldSkipInterruptedUnifiedAnimToConfig(
+                    chain.getArg(1), chain.getArg(0))) {
+                completionReason = "skippedInterruptedConfig";
+                return null;
+            }
+            completionReason = "originalRunning";
+            Object result = chain.proceed();
+            completionReason = "originalReturned";
+            if (controller != null) {
+                controller.onUnifiedNativeAnimToConfigured(
+                        chain.getArg(1), chain.getArg(0));
+                completionReason = "configuredReturned";
+            }
+            return result;
+        } catch (Throwable throwable) {
+            hookFailure = throwable;
+            completionReason += ":threw";
+            throw throwable;
+        } finally {
+            if (controller != null) {
+                try {
+                    controller.onUnifiedNativeAnimToConfigHookCompleted(
+                            chain.getArg(1), chain.getArg(0),
+                            completionReason, hookFailure);
+                } finally {
+                    controller.finishUnifiedNativeAnimToConfigHook(
+                            ownerToken, chain.getArg(0),
+                            completionReason, hookFailure);
+                }
+            }
+        }
+    }
+
+    private Object captureMiuiHomeUnifiedFinishDispatch(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        MiuiHomeReturnHomeController.UnifiedNativeFinishDispatchToken token =
+                controller == null
+                ? null : controller.beginUnifiedNativeFinishDispatch(
+                chain.getThisObject());
+        if (token != null && !token.allowed) {
+            return null;
+        }
+        try {
+            return chain.proceed();
+        } catch (Throwable throwable) {
+            if (controller != null && token != null) {
+                controller.abortUnifiedNativeFinishDispatch(
+                        token, "sourceThrew");
+            }
+            throw throwable;
+        }
+    }
+
+    private Object guardMiuiHomeUnifiedFinishDispatch(
+            XposedInterface.Chain chain) throws Throwable {
+        MiuiHomeReturnHomeController controller =
+                miuiHomeReturnHomeController;
+        Boolean proceed = controller == null ? null
+                : controller.consumeUnifiedNativeFinishDispatch(
+                chain.getArg(0));
+        if (Boolean.FALSE.equals(proceed)) {
+            return null;
+        }
+        return chain.proceed();
     }
 
     private Object captureMiuiHomeNativeGeometry(XposedInterface.Chain chain)
@@ -2605,71 +3076,151 @@ public final class MiuiBackGestureHook extends XposedModule {
     private void captureMiuiHomeLauncherOpenSnapshot(
             Object animationListener, Object animationIdentity,
             long nativeGeneration, long callbackEpoch) {
-        if (Looper.myLooper() != Looper.getMainLooper()
-                || miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch
-                || miuiHomeOpenBreakAnimationIdentity != animationIdentity
-                || !miuiHomeOpenBreakAnimationActive) {
-            return;
-        }
         try {
             Object stateManager = readField(animationListener, "this$0");
             Object windowElement = invokeAnyMethod(
                     stateManager, "getCurrentWindowElement", new Object[0]);
-            if (windowElement == null) {
-                return;
-            }
-            Object currentIdentity = invokeAnyMethod(
-                    windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
-            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
-                    windowElement, "isAnimRunning", new Object[0]));
-            if (currentIdentity != animationIdentity || !running
-                    || !isMiuiHomeLauncherOpenType(currentType)) {
-                return;
-            }
-            Object compat = invokeAnyMethod(windowElement,
-                    "getWindowTransitionCompat", new Object[0]);
-            Object helper = invokeAnyMethod(compat,
-                    "getCallbackHelper", new Object[0]);
-            Object mainInfo = readField(helper,
-                    "mRecentsMergeTransitionInfo");
-            Object mainToken = readField(helper, "mRecentsMergeAnimToken");
-            int mainDebugId = readTransitionDebugId(mainInfo);
-            int compatDebugId = readIntFieldOrDefault(
-                    compat, "mMainTransitionInfoDebugId", -1);
-            LauncherOpenMainTask mainTask =
-                    resolveLauncherOpenMainTask(mainInfo);
-            if (mainToken == null || mainDebugId < 0
-                    || compatDebugId != mainDebugId || mainTask == null) {
-                return;
-            }
-            MiuiHomeLauncherOpenSnapshot snapshot =
-                    new MiuiHomeLauncherOpenSnapshot(
-                            miuiHomeLauncherOpenSnapshotIds.incrementAndGet(),
-                            callbackEpoch, stateManager, windowElement,
-                            animationIdentity, currentType, compat, helper,
-                            mainToken, mainInfo, mainDebugId, mainTask);
-            miuiHomePermissionMergeToken.set(null);
-            miuiHomeLauncherOpenSnapshot.set(snapshot);
-            log(Log.INFO, TAG, "Published Xiaomi launcher OPEN snapshot"
-                    + ", generation=" + snapshot.generation
-                    + ", nativeGeneration=" + nativeGeneration
-                    + ", taskId=" + mainTask.taskId
-                    + ", displayId=" + mainTask.displayId
-                    + ", component=" + mainTask.component
-                    + ", transitionDebugId=" + mainDebugId
-                    + ", animationType=" + currentType
-                    + ", animationIdentity="
-                    + shortObject(animationIdentity));
+            captureMiuiHomeLauncherOpenSnapshot(
+                    stateManager, windowElement, null, animationIdentity,
+                    nativeGeneration, callbackEpoch, -1,
+                    "animationStartSettled");
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
                     "Failed to publish Xiaomi launcher OPEN snapshot",
                     throwable);
         }
+    }
+
+    private void captureMiuiHomeLauncherOpenSnapshot(
+            Object stateManager, Object windowElement, Object expectedHelper,
+            Object animationIdentity, long nativeGeneration,
+            long callbackEpoch, int expectedTaskId, String source)
+            throws Exception {
+        if (Looper.myLooper() != Looper.getMainLooper()
+                || stateManager == null || windowElement == null
+                || miuiHomeOpenBreakCallbackEpoch.get() != callbackEpoch
+                || miuiHomeOpenBreakGeneration != nativeGeneration
+                || miuiHomeOpenBreakAnimationIdentity != animationIdentity
+                || !miuiHomeOpenBreakAnimationActive) {
+            return;
+        }
+        Object currentWindowElement = invokeAnyMethod(
+                stateManager, "getCurrentWindowElement", new Object[0]);
+        if (currentWindowElement != windowElement) {
+            return;
+        }
+        Object currentIdentity = invokeAnyMethod(
+                windowElement, "getAnimSymbol", new Object[0]);
+        Object currentTypeObject = invokeAnyMethod(
+                windowElement, "getCurrentAnimType", new Object[0]);
+        String currentType = currentTypeObject instanceof Enum<?>
+                ? ((Enum<?>) currentTypeObject).name()
+                : String.valueOf(currentTypeObject);
+        boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                windowElement, "isAnimRunning", new Object[0]));
+        if (currentIdentity != animationIdentity || !running
+                || !isMiuiHomeLauncherOpenType(currentType)) {
+            return;
+        }
+        Object compat = invokeAnyMethod(windowElement,
+                "getWindowTransitionCompat", new Object[0]);
+        Object helper = invokeAnyMethod(compat,
+                "getCallbackHelper", new Object[0]);
+        if (expectedHelper != null && helper != expectedHelper) {
+            log(Log.WARN, TAG,
+                    "Ignored mismatched Xiaomi launcher OPEN targets"
+                            + ", source=" + source
+                            + ", expectedHelper="
+                            + shortObject(expectedHelper)
+                            + ", currentHelper=" + shortObject(helper));
+            return;
+        }
+        Object mainInfo = readField(helper,
+                "mRecentsMergeTransitionInfo");
+        Object mainToken = readField(helper, "mRecentsMergeAnimToken");
+        int mainDebugId = readTransitionDebugId(mainInfo);
+        int compatDebugId = readIntFieldOrDefault(
+                compat, "mMainTransitionInfoDebugId", -1);
+        LauncherOpenMainTask mainTask =
+                resolveLauncherOpenMainTask(mainInfo);
+        if (mainToken == null || mainDebugId < 0
+                || compatDebugId != mainDebugId || mainTask == null) {
+            log(Log.INFO, TAG,
+                    "Deferred Xiaomi launcher OPEN snapshot"
+                            + ", source=" + source
+                            + ", nativeGeneration=" + nativeGeneration
+                            + ", hasMainToken=" + (mainToken != null)
+                            + ", mainDebugId=" + mainDebugId
+                            + ", compatDebugId=" + compatDebugId
+                            + ", hasMainTask=" + (mainTask != null));
+            return;
+        }
+        if (expectedTaskId >= 0 && mainTask.taskId != expectedTaskId) {
+            log(Log.WARN, TAG,
+                    "Ignored Xiaomi launcher OPEN target/task mismatch"
+                            + ", source=" + source
+                            + ", boundTaskId=" + expectedTaskId
+                            + ", transitionTaskId=" + mainTask.taskId
+                            + ", transitionDebugId=" + mainDebugId);
+            return;
+        }
+
+        MiuiHomeLauncherOpenSnapshot existing =
+                miuiHomeLauncherOpenSnapshot.get();
+        boolean sameOwner = existing != null
+                && existing.nativeGeneration == nativeGeneration
+                && existing.callbackEpoch == callbackEpoch
+                && existing.stateManager == stateManager
+                && existing.windowElement == windowElement
+                && existing.animationIdentity == animationIdentity;
+        boolean sameSnapshot = sameOwner
+                && existing.windowTransitionCompat == compat
+                && existing.helper == helper
+                && existing.mainTransitionToken == mainToken
+                && existing.mainTransitionInfo == mainInfo
+                && existing.mainTransitionDebugId == mainDebugId
+                && existing.mainTask.taskId == mainTask.taskId;
+        if (sameSnapshot) {
+            return;
+        }
+        MiuiHomePermissionMergeToken permissionToken =
+                miuiHomePermissionMergeToken.get();
+        if (sameOwner && permissionToken != null
+                && permissionToken.launcherOpen == existing) {
+            log(Log.WARN, TAG,
+                    "Kept Xiaomi launcher OPEN snapshot with active permission merge"
+                            + ", generation=" + existing.generation
+                            + ", source=" + source
+                            + ", nativeGeneration=" + nativeGeneration);
+            return;
+        }
+
+        MiuiHomeLauncherOpenSnapshot snapshot =
+                new MiuiHomeLauncherOpenSnapshot(
+                        miuiHomeLauncherOpenSnapshotIds.incrementAndGet(),
+                        nativeGeneration, callbackEpoch, stateManager,
+                        windowElement, animationIdentity, currentType, compat,
+                        helper, mainToken, mainInfo, mainDebugId, mainTask);
+        MiuiHomeLauncherOpenSnapshot replaced =
+                miuiHomeLauncherOpenSnapshot.getAndSet(snapshot);
+        MiuiHomePermissionMergeToken stalePermissionToken =
+                miuiHomePermissionMergeToken.getAndSet(null);
+        if (stalePermissionToken != null) {
+            stalePermissionToken.consumed.compareAndSet(0, 1);
+        }
+        log(Log.INFO, TAG, "Published Xiaomi launcher OPEN snapshot"
+                + ", generation=" + snapshot.generation
+                + ", source=" + source
+                + ", nativeGeneration=" + nativeGeneration
+                + ", replacedGeneration="
+                + (replaced == null ? 0L : replaced.generation)
+                + ", taskId=" + mainTask.taskId
+                + ", displayId=" + mainTask.displayId
+                + ", component=" + mainTask.component
+                + ", transitionDebugId=" + mainDebugId
+                + ", animationType=" + currentType
+                + ", animationIdentity="
+                + shortObject(animationIdentity));
     }
 
     private void invalidateMiuiHomeLauncherOpenSnapshot(
@@ -2714,8 +3265,13 @@ public final class MiuiBackGestureHook extends XposedModule {
             throws Exception {
         return snapshot != null
                 && miuiHomeLauncherOpenSnapshot.get() == snapshot
+                && snapshot.nativeGeneration
+                == miuiHomeOpenBreakGeneration
                 && snapshot.callbackEpoch
                 == miuiHomeOpenBreakCallbackEpoch.get()
+                && miuiHomeOpenBreakAnimationIdentity
+                == snapshot.animationIdentity
+                && miuiHomeOpenBreakAnimationActive
                 && snapshot.windowTransitionCompat == compat
                 && readField(compat, "mHelper") == snapshot.helper
                 && readField(snapshot.helper, "mRecentsMergeTransitionInfo")
@@ -2996,13 +3552,26 @@ public final class MiuiBackGestureHook extends XposedModule {
             XposedInterface.Chain chain) throws Throwable {
         Object windowElement = chain.getThisObject();
         Object reasonObject = chain.getArg(0);
-        Object result = chain.proceed();
+        String reason = reasonObject instanceof String
+                ? (String) reasonObject : null;
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
         if (controller != null) {
             try {
+                controller.prepareNativeCloseInterruption(
+                        windowElement, reason);
+            } catch (Throwable throwable) {
+                // This runs before Xiaomi mutates the WindowElement. A failed bookkeeping
+                // adoption must leave the native icon-click path untouched.
+                log(Log.WARN, TAG,
+                        "Failed to adopt return-home CLOSE before native interruption",
+                        throwable);
+            }
+        }
+        Object result = chain.proceed();
+        if (controller != null) {
+            try {
                 controller.onNativeCloseCancelSurface(
-                        windowElement,
-                        reasonObject instanceof String ? (String) reasonObject : null);
+                        windowElement, reason);
             } catch (Throwable throwable) {
                 // Xiaomi has already queued its native cancellation. Module bookkeeping must
                 // never turn an icon click into a launcher exception.
@@ -3730,6 +4299,25 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", binder=" + shortObject(shellBackAnimation));
             return;
         }
+        if (existing != null && existing.blocksControllerReplacement()) {
+            pendingMiuiHomeReturnHomeBinder = shellBackAnimation;
+            pendingMiuiHomeReturnHomeClassLoader = classLoader;
+            pendingMiuiHomeReturnHomeContext = context == null ? null
+                    : context.getApplicationContext();
+            pendingMiuiHomeReturnHomeReason = reason;
+            existing.beginDeferredControllerReplacement(
+                    "replace:" + reason);
+            log(Log.WARN, TAG,
+                    "Deferred Shell return-to-home controller replacement"
+                            + ", reason=" + reason
+                            + ", oldBinder="
+                            + shortObject(existing.shellBackAnimation)
+                            + ", newBinder="
+                            + shortObject(shellBackAnimation)
+                            + ", owner="
+                            + existing.describeUnifiedOwner());
+            return;
+        }
         if (existing != null) {
             existing.detach(true, "replace:" + reason);
         }
@@ -3746,6 +4334,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         miuiHomeReturnHomeController = replacement;
         miuiHomeReturnHomeBinder = shellBackAnimation;
+        clearPendingMiuiHomeReturnHomeAttachmentLocked();
         log(Log.INFO, TAG, "Registered standard Shell return-to-home callback/runner"
                 + ", reason=" + reason
                 + ", type=" + TYPE_RETURN_TO_HOME
@@ -3759,11 +4348,69 @@ public final class MiuiBackGestureHook extends XposedModule {
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
         miuiHomeReturnHomeController = null;
         miuiHomeReturnHomeBinder = null;
+        clearPendingMiuiHomeReturnHomeAttachmentLocked();
         if (controller != null) {
             binder = controller.shellBackAnimation;
             controller.detach(clearShell, reason);
         }
         return binder;
+    }
+
+    private synchronized void handleMiuiHomeReturnHomeBinderDeath(
+            MiuiHomeReturnHomeController controller) {
+        if (controller == null || miuiHomeReturnHomeController != controller) {
+            return;
+        }
+        miuiHomeReturnHomeBinder = null;
+        controller.onShellBinderDied();
+        if (miuiHomeReturnHomeController != controller) {
+            return;
+        }
+        if (!controller.blocksControllerReplacement()) {
+            miuiHomeReturnHomeController = null;
+            controller.detach(false, "shellBinderDied");
+        }
+    }
+
+    private synchronized void finishDeferredMiuiHomeReturnHomeController(
+            MiuiHomeReturnHomeController retiredController, String reason) {
+        if (retiredController == null
+                || miuiHomeReturnHomeController != retiredController
+                || !retiredController.isDeferredControllerReplacement()
+                || retiredController.currentSession != null
+                || !retiredController
+                .pendingUnifiedInterruptedAnimToConfigs.isEmpty()) {
+            return;
+        }
+        miuiHomeReturnHomeController = null;
+        miuiHomeReturnHomeBinder = null;
+        IBinder pendingBinder = pendingMiuiHomeReturnHomeBinder;
+        ClassLoader pendingClassLoader =
+                pendingMiuiHomeReturnHomeClassLoader;
+        Context pendingContext = pendingMiuiHomeReturnHomeContext;
+        String pendingReason = pendingMiuiHomeReturnHomeReason;
+        clearPendingMiuiHomeReturnHomeAttachmentLocked();
+        retiredController.detach(true,
+                "deferredOwnerCleaned:" + reason);
+        if (pendingBinder != null && pendingClassLoader != null) {
+            attachMiuiHomeReturnHome(pendingBinder, pendingClassLoader,
+                    pendingContext,
+                    "deferred:" + (pendingReason == null
+                            ? reason : pendingReason));
+        } else {
+            log(Log.INFO, TAG,
+                    "Retired Shell return-to-home controller without replacement"
+                            + ", reason=" + reason
+                            + ", oldBinder="
+                            + shortObject(retiredController.shellBackAnimation));
+        }
+    }
+
+    private void clearPendingMiuiHomeReturnHomeAttachmentLocked() {
+        pendingMiuiHomeReturnHomeBinder = null;
+        pendingMiuiHomeReturnHomeClassLoader = null;
+        pendingMiuiHomeReturnHomeContext = null;
+        pendingMiuiHomeReturnHomeReason = null;
     }
 
     private void restoreMiuiHomeReturnHomeAfterHotReload(ClassLoader classLoader) {
@@ -3885,6 +4532,20 @@ public final class MiuiBackGestureHook extends XposedModule {
                 acceptedIntent.putExtra(EXTRA_INPUT_EDGE, edge);
                 acceptedIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
                         miuiHomeSystemUiInputArbiterGeneration);
+                MiuiHomeAcceptedInputToken inputIdentity =
+                        new MiuiHomeAcceptedInputToken(
+                                eventId, event.getDownTime(),
+                                event.getDeviceId(), event.getSource(),
+                                displayId, edge,
+                                miuiHomeSystemUiInputArbiterGeneration);
+                miuiHomeAcceptedInputIdentity.set(inputIdentity);
+                MiuiHomeReturnHomeController returnHomeController =
+                        miuiHomeReturnHomeController;
+                if (returnHomeController != null) {
+                    returnHomeController
+                            .onMiuiHomeAcceptedInputIdentityChanged(
+                                    inputIdentity);
+                }
                 sendAuthenticatedMiuiHomeState(stub.getContext(), acceptedIntent);
                 log(Log.INFO, TAG, "Published MiuiHome accepted input token"
                         + ", eventId=" + eventId
@@ -3956,9 +4617,68 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + miuiHomeSystemUiInputArbiterGeneration
                         + ", senderGeneration=" + generation);
                 if (newGeneration) {
+                    miuiHomeAcceptedInputIdentity.set(null);
                     miuiHomeEditingStatePublished = false;
                     refreshMiuiHomeEditingState(
                             receiverContext.getClassLoader(), "systemUiArbiterGeneration");
+                }
+                if (intent.hasExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT)) {
+                    long attempt = intent.getLongExtra(
+                            EXTRA_RETURN_HOME_COMMIT_ATTEMPT, 0L);
+                    int taskId = intent.getIntExtra(
+                            EXTRA_RETURN_HOME_COMMIT_TASK_ID, -1);
+                    int transitionDebugId = intent.getIntExtra(
+                            EXTRA_RETURN_HOME_COMMIT_DEBUG_ID, -1);
+                    int eventId = intent.getIntExtra(
+                            EXTRA_INPUT_EVENT_ID, 0);
+                    long downTime = intent.getLongExtra(
+                            EXTRA_INPUT_DOWN_TIME, Long.MIN_VALUE);
+                    int deviceId = intent.getIntExtra(
+                            EXTRA_INPUT_DEVICE_ID, Integer.MIN_VALUE);
+                    int source = intent.getIntExtra(
+                            EXTRA_INPUT_SOURCE, 0);
+                    int displayId = intent.getIntExtra(
+                            EXTRA_INPUT_DISPLAY_ID, Integer.MIN_VALUE);
+                    int edge = intent.getIntExtra(
+                            EXTRA_INPUT_EDGE, -1);
+                    MiuiHomeReturnHomeController controller =
+                            miuiHomeReturnHomeController;
+                    if (attempt <= 0L || taskId < 0
+                            || transitionDebugId < 0
+                            || !intent.hasExtra(EXTRA_INPUT_EVENT_ID)
+                            || downTime == Long.MIN_VALUE
+                            || deviceId == Integer.MIN_VALUE
+                            || displayId == Integer.MIN_VALUE
+                            || (edge != EDGE_LEFT && edge != EDGE_RIGHT)
+                            || generation
+                            != miuiHomeSystemUiInputArbiterGeneration
+                            || !miuiHomeSystemUiInputArbiterReady
+                            || controller == null) {
+                        log(Log.WARN, TAG,
+                                "Rejected stale standard return-home commit signal"
+                                        + ", attempt=" + attempt
+                                        + ", taskId=" + taskId
+                                        + ", transitionDebugId="
+                                        + transitionDebugId
+                                        + ", senderGeneration=" + generation
+                                        + ", currentGeneration="
+                                        + miuiHomeSystemUiInputArbiterGeneration
+                                        + ", arbiterReady="
+                                        + miuiHomeSystemUiInputArbiterReady
+                                        + ", controller="
+                                        + shortObject(controller)
+                                        + ", eventId=" + eventId
+                                        + ", downTime=" + downTime
+                                        + ", displayId=" + displayId
+                                        + ", edge=" + edge);
+                        return;
+                    }
+                    controller.onStandardShellReturnHomeCommit(
+                            new StandardReturnHomeCommitSignal(
+                                    attempt, generation, taskId,
+                                    transitionDebugId, eventId,
+                                    downTime, deviceId, source,
+                                    displayId, edge));
                 }
             }
         };
@@ -3984,6 +4704,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         miuiHomeInputArbiterReceiverContext = null;
         miuiHomeSystemUiInputArbiterReady = false;
         miuiHomeSystemUiInputArbiterGeneration = 0L;
+        miuiHomeAcceptedInputIdentity.set(null);
         if (receiver == null || receiverContext == null) {
             return;
         }
@@ -4033,6 +4754,113 @@ public final class MiuiBackGestureHook extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to publish SystemUI input-arbiter state"
                     + ", reason=" + reason, throwable);
+        }
+    }
+
+    private void publishStandardReturnHomeCommit(
+            int taskId, int transitionDebugId,
+            Object compositionController) {
+        Context context = miuiOverviewReceiverContext;
+        long attempt = systemUiReturnHomeCommitAttemptIds.incrementAndGet();
+        SystemUiReturnHomeCommitIdentity identity =
+                systemUiReturnHomeCommitIdentity.get();
+        MiuiHomeAcceptedInputToken input = identity == null
+                ? null : identity.input;
+        if (context == null || taskId < 0 || transitionDebugId < 0
+                || systemUiInputArbiterMonitorCount.get() <= 0
+                || identity == null || input == null
+                || identity.taskId != taskId
+                || identity.controller != compositionController
+                || input.generation
+                != systemUiInputArbiterGeneration) {
+            log(Log.ERROR, TAG,
+                    "Could not publish standard return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", context=" + shortObject(context)
+                            + ", monitors="
+                            + systemUiInputArbiterMonitorCount.get()
+                            + ", identityTaskId="
+                            + (identity == null ? -1 : identity.taskId)
+                            + ", sameController="
+                            + (identity != null
+                            && identity.controller
+                            == compositionController)
+                            + ", eventId="
+                            + (input == null ? 0 : input.eventId)
+                            + ", inputGeneration="
+                            + (input == null ? 0L : input.generation));
+            return;
+        }
+        if (!systemUiReturnHomeCommitIdentity.compareAndSet(
+                identity, null)) {
+            log(Log.ERROR, TAG,
+                    "Lost committed return-home input identity before publish"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", eventId=" + input.eventId);
+            return;
+        }
+        try {
+            Intent intent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+            intent.setPackage(MIUI_HOME);
+            intent.putExtra(EXTRA_INPUT_ARBITER_READY, true);
+            intent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
+                    systemUiInputArbiterGeneration);
+            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT, attempt);
+            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_TASK_ID, taskId);
+            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_DEBUG_ID,
+                    transitionDebugId);
+            intent.putExtra(EXTRA_INPUT_EVENT_ID, input.eventId);
+            intent.putExtra(EXTRA_INPUT_DOWN_TIME, input.downTime);
+            intent.putExtra(EXTRA_INPUT_DEVICE_ID, input.deviceId);
+            intent.putExtra(EXTRA_INPUT_SOURCE, input.source);
+            intent.putExtra(EXTRA_INPUT_DISPLAY_ID, input.displayId);
+            intent.putExtra(EXTRA_INPUT_EDGE, input.edge);
+            Bundle options = BroadcastOptions.makeBasic()
+                    .setShareIdentityEnabled(true)
+                    .toBundle();
+            context.sendBroadcast(intent, null, options);
+            log(Log.INFO, TAG,
+                    "Published standard predictive return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", eventId=" + input.eventId
+                            + ", downTime=" + input.downTime
+                            + ", arbiterGeneration="
+                            + systemUiInputArbiterGeneration);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to publish standard return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId,
+                    throwable);
+        }
+    }
+
+    private void clearSystemUiReturnHomeCommitIdentity(
+            Object controller, String reason) {
+        while (true) {
+            SystemUiReturnHomeCommitIdentity identity =
+                    systemUiReturnHomeCommitIdentity.get();
+            if (identity == null
+                    || (controller != null
+                    && identity.controller != controller)) {
+                return;
+            }
+            if (systemUiReturnHomeCommitIdentity.compareAndSet(
+                    identity, null)) {
+                log(Log.INFO, TAG,
+                        "Cleared committed return-home input identity"
+                                + ", taskId=" + identity.taskId
+                                + ", eventId="
+                                + identity.input.eventId
+                                + ", reason=" + reason);
+                return;
+            }
         }
     }
 
@@ -6328,6 +7156,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", changeLeash=" + candidate.changeLeash
                                 + ", closingLeash="
                                 + composition.closingLeash);
+                publishStandardReturnHomeCommit(
+                        composition.closingTaskId,
+                        readTransitionDebugId(candidate.transitionInfo),
+                        candidate.controller);
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
@@ -6406,8 +7238,16 @@ public final class MiuiBackGestureHook extends XposedModule {
         Object matchingChange = null;
         int matchingMode = -1;
         boolean backGestureAnimated = false;
+        boolean elementChangePresent = false;
         int matchCount = 0;
         for (Object change : (List<?>) changesObject) {
+            Object flagsObject = invokeAnyMethod(
+                    change, "getFlags", new Object[0]);
+            int flags = flagsObject instanceof Number
+                    ? ((Number) flagsObject).intValue() : 0;
+            if (flags == FLAG_IS_ELEMENT) {
+                elementChangePresent = true;
+            }
             Object taskInfo = invokeAnyMethod(change, "getTaskInfo", new Object[0]);
             if (readIntFieldOrDefault(taskInfo, "taskId", -1)
                     != composition.closingTaskId) {
@@ -6424,7 +7264,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if (matchCount != 1 || matchingChange == null
                 || matchingMode != TRANSIT_TO_BACK
-                || !backGestureAnimated) {
+                || !backGestureAnimated || elementChangePresent) {
             log(Log.INFO, TAG,
                     "Skipped predictive return-home commit composition: "
                             + "closing change mismatch"
@@ -6432,7 +7272,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", transitionType=" + transitionType
                             + ", matches=" + matchCount
                             + ", mode=" + matchingMode
-                            + ", backGestureAnimated=" + backGestureAnimated);
+                            + ", backGestureAnimated=" + backGestureAnimated
+                            + ", elementChangePresent="
+                            + elementChangePresent);
             return null;
         }
         Object changeLeashObject = invokeAnyMethod(
@@ -8030,12 +8872,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private final ClassLoader classLoader;
         private final Handler handler = new Handler(Looper.getMainLooper());
         private final IBinder.DeathRecipient shellDeathRecipient = () ->
-                handler.post(() -> {
-                    if (miuiHomeReturnHomeController ==
-                            MiuiHomeReturnHomeController.this) {
-                        detachMiuiHomeReturnHome("shellBinderDied", false);
-                    }
-                });
+                handler.post(() -> handleMiuiHomeReturnHomeBinderDeath(
+                        MiuiHomeReturnHomeController.this));
         private final PathInterpolator backGestureInterpolator =
                 new PathInterpolator(0.1f, 0.1f, 0.0f, 1.0f);
         private final boolean removeDepartTargetFromMotion;
@@ -8048,13 +8886,36 @@ public final class MiuiBackGestureHook extends XposedModule {
                 pendingDirectCancel = new AtomicReference<>();
         private final AtomicReference<ReturnHomeElementLeashReuseToken>
                 pendingElementLeashReuse = new AtomicReference<>();
+        private final AtomicReference<StandardReturnHomeCommitSignal>
+                pendingStandardCommitSignal = new AtomicReference<>();
+        private final ConcurrentHashMap<Object,
+                ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken>>
+                pendingUnifiedNativeFinishDispatches =
+                new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<ObjectIdentityKey,
+                UnifiedNativePendingInterruptionSnapshot>
+                pendingUnifiedInterruptedAnimToConfigs =
+                new ConcurrentHashMap<>();
+        private final AtomicLong unifiedNativeFinishDispatchIds =
+                new AtomicLong();
         private volatile Context context;
         private volatile boolean attached;
         private volatile boolean deathLinked;
+        private volatile boolean deferredControllerReplacement;
+        private volatile boolean shellBinderDead;
         private volatile ReturnHomeSession currentSession;
+        private long lastStandardCommitSignalAttempt;
         private BackMotionEvent pendingStartEvent;
         private BackMotionEvent pendingProgressEvent;
         private int pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+        private Constructor<?> nativeTargetSetConstructor;
+        private Constructor<?> nativeWindowAnimParamsConstructor;
+        private Constructor<?> nativeRectFParamsConstructor;
+        private Constructor<?> nativeCornerRadiiConstructor;
+        private Constructor<?> nativeClipAnimationHelperConstructor;
+        private Method nativeGestureAnimExecutorMethod;
+        private Object nativeCloseToDragType;
+        private Object nativeAppToAppType;
 
         MiuiHomeReturnHomeController(IBinder shellBackAnimation,
                                     ClassLoader classLoader, Context context) {
@@ -8103,6 +8964,71 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        boolean blocksHotReload() {
+            return blocksControllerReplacement();
+        }
+
+        boolean blocksControllerReplacement() {
+            ReturnHomeSession session = currentSession;
+            return (session != null && session.cleaned.get() == 0)
+                    || !pendingUnifiedInterruptedAnimToConfigs.isEmpty();
+        }
+
+        boolean isDeferredControllerReplacement() {
+            return deferredControllerReplacement;
+        }
+
+        void beginDeferredControllerReplacement(String reason) {
+            if (!deferredControllerReplacement) {
+                deferredControllerReplacement = true;
+                attached = false;
+                discardPendingStartEvent();
+                pendingProgressEvent = null;
+                pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+                pendingStandardCommitSignal.set(null);
+                pendingUnifiedNativeFinishDispatches.clear();
+            }
+            ReturnHomeSession session = currentSession;
+            if (session != null && session.finished.get() == 0
+                    && requestUnifiedPendingCommitTermination(
+                    session, "deferredControllerReplacement:" + reason)) {
+                return;
+            }
+            if (session != null && session.finished.get() == 0
+                    && !session.nativeHandoffStarted
+                    && !session.nativeAnimationStarted) {
+                finishSession(session,
+                        "deferredControllerReplacement:" + reason,
+                        shouldRestorePreview(session));
+            }
+        }
+
+        void onShellBinderDied() {
+            shellBinderDead = true;
+            deathLinked = false;
+            beginDeferredControllerReplacement("shellBinderDied");
+        }
+
+        String describeUnifiedOwner() {
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                return "session=none, interruptedConfigTombstones="
+                        + pendingUnifiedInterruptedAnimToConfigs.size();
+            }
+            return "generation=" + session.generation
+                    + ", attached=" + attached
+                    + ", deferred=" + deferredControllerReplacement
+                    + ", finished=" + session.finished.get()
+                    + ", cleaned=" + session.cleaned.get()
+                    + ", commitPending="
+                    + session.unifiedNativeCommitPending
+                    + ", cancelPending="
+                    + session.unifiedNativeCancelPending
+                    + ", nativeStarted=" + session.nativeAnimationStarted
+                    + ", interruptedConfigTombstones="
+                    + pendingUnifiedInterruptedAnimToConfigs.size();
+        }
+
         void detach(boolean clearShell, String reason) {
             attached = false;
             invalidatePendingCloseInterruption(null, "detach:" + reason);
@@ -8126,7 +9052,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             discardPendingStartEvent();
             pendingProgressEvent = null;
             pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
-            if (clearShell && shellBackAnimation.isBinderAlive()) {
+            pendingStandardCommitSignal.set(null);
+            pendingUnifiedNativeFinishDispatches.clear();
+            if (clearShell && !shellBinderDead
+                    && shellBackAnimation.isBinderAlive()) {
                 Parcel data = Parcel.obtain();
                 Parcel reply = Parcel.obtain();
                 try {
@@ -8216,6 +9145,39 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             ReturnHomeSession previous = currentSession;
             if (previous != null) {
+                boolean retainedNativeOwner = previous.finished.get() == 0
+                        && previous.nativeHandoffStarted
+                        && previous.nativeAnimationStarted
+                        && isReturnHomeNativeCloseType(
+                        previous.nativeAnimationType);
+                if ((previous.unifiedNativePreviewOwned
+                        && !previous.unifiedNativeCleanupVerified
+                        && previous.finished.get() == 0)
+                        || retainedNativeOwner) {
+                    if (previous.unifiedNativePreviewOwned
+                        && previous.finished.get() == 0) {
+                        startUnifiedNativeCancel(
+                                previous, "supersededRunner");
+                    }
+                    discardPendingStartEvent();
+                    pendingProgressEvent = null;
+                    pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+                    discardMatchingUnboundStandardSignal(
+                            miuiHomeAcceptedInputIdentity.get(),
+                            "overlappingRunnerRejected");
+                    notifyRemoteAnimationFinished(
+                            finishedCallback, "previousNativeOwnerActive");
+                    releaseTargets(apps);
+                    releaseTargets(wallpapers);
+                    releaseTargets(nonApps);
+                    log(Log.WARN, TAG,
+                            "Rejected overlapping return-home runner"
+                                    + ", activeGeneration="
+                                    + previous.generation
+                                    + ", nativeStarted="
+                                    + previous.nativeAnimationStarted);
+                    return;
+                }
                 invalidatePendingDirectCancel(
                         previous, "superseded", true);
                 finishSession(previous, "superseded",
@@ -8232,16 +9194,21 @@ public final class MiuiBackGestureHook extends XposedModule {
             pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
             ReturnHomeSession session = new ReturnHomeSession(
                     miuiHomeReturnHomeGenerationIds.incrementAndGet(), transit,
-                    apps, wallpapers, nonApps, finishedCallback);
+                    apps, wallpapers, nonApps, finishedCallback,
+                    miuiHomeAcceptedInputIdentity.get());
             currentSession = session;
             if (!session.resolveTargets()) {
                 log(Log.WARN, TAG, "Invalid return-to-home animation targets"
                         + ", generation=" + session.generation
                         + ", apps=" + (apps == null ? -1 : apps.length));
+                discardMatchingUnboundStandardSignal(
+                        session.acceptedInputIdentity,
+                        "invalidRunnerTargets");
                 releaseBackMotionEventTarget(startEvent);
                 finishSession(session, "invalidTargets", false);
                 return;
             }
+            bindPendingStandardCommitToSession(session);
             if (startEvent != null) {
                 startPreview(session, startEvent);
             }
@@ -8287,7 +9254,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
             ReturnHomeSession session = currentSession;
             if (session != null) {
+                if (requestUnifiedPendingCommitTermination(
+                        session, "runnerCancelled")) {
+                    return;
+                }
                 animateCancel(session, "runnerCancelled");
+            } else {
+                discardMatchingUnboundStandardSignal(
+                        miuiHomeAcceptedInputIdentity.get(),
+                        "runnerCancelledWithoutSession");
             }
         }
 
@@ -8325,8 +9300,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 preparePreviewLeash(session);
                 prepareNativePreviewBackdrop(session);
                 prepareNativePreviewBlur(session);
-                applyPreviewTransform(session, session.currentRect,
-                        session.startCornerRadius, false);
+                if (!prepareUnifiedNativePreview(session)) {
+                    applyPreviewTransform(session, session.currentRect,
+                            session.startCornerRadius, false);
+                }
                 log(Log.INFO, TAG, "Initialized return-to-home preview"
                         + ", generation=" + session.generation
                         + ", startRect=" + session.startRect
@@ -8567,23 +9544,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             session.currentCornerRadius = lerp(session.startCornerRadius,
                     session.endCornerRadius, progress);
             updateNativePreviewBlur(session, rawProgress);
-            applyPreviewTransform(session, session.currentRect,
-                    session.currentCornerRadius, animationFrame);
-            if (session.lastLoggedPreviewProgress < 0.0f
-                    || rawProgress >= session.lastLoggedPreviewProgress + 0.2f
-                    || rawProgress < session.lastLoggedPreviewProgress - 0.2f) {
-                session.lastLoggedPreviewProgress = rawProgress;
-                log(Log.INFO, TAG, "Applied return-to-home preview progress"
-                        + ", generation=" + session.generation
-                        + ", inputProgress=" + session.lastInputProgress
-                        + ", smoothedProgress=" + rawProgress
-                        + ", interpolatedProgress=" + progress
-                        + ", rect=" + session.currentRect
-                        + ", radius=" + session.currentCornerRadius
-                        + ", targetSource=" + session.previewTargetSource
-                        + ", leashValid="
-                        + (session.previewLeash != null
-                        && session.previewLeash.isValid()));
+            if (session.unifiedNativePreviewOwned) {
+                if (!driveUnifiedNativePreviewFrame(session, false)) {
+                    startUnifiedNativeCancel(
+                            session, "previewFrameFailed");
+                    return;
+                }
+            } else {
+                applyPreviewTransform(session, session.currentRect,
+                        session.currentCornerRadius, animationFrame);
             }
         }
 
@@ -8630,6 +9599,19 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             freezePreviewProgress(session, "cancel:" + reason);
+            if (session.unifiedNativePreviewOwned) {
+                if (session.nativeHandoffStarted
+                        || session.unifiedNativeCommitPending
+                        || session.nativeAnimationStarted) {
+                    log(Log.WARN, TAG,
+                            "Ignored return-home cancel after native commit"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason);
+                    return;
+                }
+                startUnifiedNativeCancel(session, reason);
+                return;
+            }
             if (!session.previewInitialized) {
                 finishSession(session, reason, false);
                 return;
@@ -9150,24 +10132,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             float dimming = lerp(session.previewBlurInitialDimming,
                     session.previewBlurTargetDimming, blurFraction);
             publishNativePreviewBlur(session, radius, dimming, "gesture");
-            if (session.previewBlurOwned) {
-                int stage = normalized >= 1.0f ? 2
-                        : (normalized >= 0.5f ? 1 : 0);
-                if (stage > session.previewBlurDiagnosticStage) {
-                    session.previewBlurDiagnosticStage = stage;
-                    log(Log.INFO, TAG,
-                            "Applied progressive Xiaomi predictive blur"
-                                    + ", generation=" + session.generation
-                                    + ", stage=" + stage
-                                    + ", inputProgress=" + session.lastInputProgress
-                                    + ", smoothedProgress=" + smoothedProgress
-                                    + ", triggerProgress=" + triggerProgress
-                                    + ", fraction=" + blurFraction
-                                    + ", value="
-                                    + session.previewBlurPublishedRadius + "/"
-                                    + session.previewBlurPublishedDimming);
-                }
-            }
         }
 
         private void publishNativePreviewBlur(ReturnHomeSession session,
@@ -9507,8 +10471,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                         transferNativePreviewShortcutLayer(session,
                                 "commitOwnershipLost");
                     } else {
-                        invokeAnyMethod(element, "setTo",
-                                new Object[]{appParams});
+                        // The predictive preview established the exact Xiaomi App state.
+                        // Reissuing setTo() at release is numerically redundant but creates a
+                        // separate launcher-View command immediately before native CLOSE starts.
+                        // Keep the proven state in place and let Xiaomi's animTo(Home) acquire it.
+                        log(Log.INFO, TAG,
+                                "Retained predictive launcher App state at commit"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", params="
+                                        + shortObject(appParams));
                     }
                 } catch (Throwable throwable) {
                     recoverNativePreviewShortcutLayer(session,
@@ -9520,13 +10492,25 @@ public final class MiuiBackGestureHook extends XposedModule {
                     if (session.previewWallpaperElement == null
                             || session.previewWallpaperWorkspace == null
                             || session.previewWallpaperAppParams == null
+                            || invokeAnyMethod(
+                            session.previewWallpaperElement,
+                            "getMWorkspace", new Object[0])
+                            != session.previewWallpaperWorkspace
                             || readBackdropWindowToken(
                             session.previewWallpaperWorkspace) == null) {
                         throw new IllegalStateException(
                                 "incomplete wallpaper commit snapshot");
                     }
-                    invokePreviewWallpaperSetTo(session,
-                            session.previewWallpaperAppParams);
+                    // The preview-time setTo(App) command already reached the exact attached
+                    // wallpaper token. Do not reset that Surface command at release; classify
+                    // Xiaomi's following animTo(Home) as continuation of the established state.
+                    session.previewWallpaperNativeAppSetObserved = true;
+                    log(Log.INFO, TAG,
+                            "Retained predictive wallpaper App state at commit"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", zoom="
+                                    + session.previewWallpaperAppZoom);
                 } catch (Throwable throwable) {
                     recoverNativePreviewWallpaper(session,
                             "commitFailure", throwable);
@@ -9880,6 +10864,1838 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        void markUnifiedCommitAnimToEntering(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.unifiedNativeCommitPending
+                    || !session.unifiedNativeCommitReady.get()
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement != windowElement
+                    || params == null) {
+                return;
+            }
+            UnifiedNativeStandardCommitToken standardToken =
+                    session.unifiedNativeStandardCommit;
+            if (standardToken != null
+                    && standardToken == session.unifiedNativeStandardCommit
+                    && standardToken.session == session
+                    && standardToken.generation == session.generation
+                    && standardToken.windowElement == windowElement
+                    && standardToken.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && session.unifiedNativeCommitTransition == null
+                    && standardToken.phase.get()
+                    == UnifiedNativeStandardCommitToken.PHASE_PENDING
+                    && standardToken.animParams.compareAndSet(null, params)
+                    && standardToken.phase.compareAndSet(
+                    UnifiedNativeStandardCommitToken.PHASE_PENDING,
+                    UnifiedNativeStandardCommitToken.PHASE_ENTERING)) {
+                standardToken.animToEpoch = beginUnifiedAnimToEpoch(
+                        session, "standardCommit");
+                verifyUnifiedStateManagerListenerGate(
+                        session, true, "standardCommitEntry");
+                log(Log.INFO, TAG,
+                        "Recorded Xiaomi standard animTo entry"
+                                + ", generation=" + session.generation
+                                + ", signalAttempt="
+                                + standardToken.signal.attempt
+                                + ", animToEpoch="
+                                + standardToken.animToEpoch
+                                + ", animationIdentity="
+                                + shortObject(
+                                standardToken.animationIdentity));
+                return;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (transition == null
+                    || transition != session.unifiedNativeCommitTransition
+                    || transition.session != session
+                    || transition.generation != session.generation
+                    || transition.windowElement != windowElement
+                    || transition.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || transition.phase.get()
+                    != UnifiedNativeCommitTransitionToken.PHASE_PENDING
+                    || !transition.animParams.compareAndSet(null, params)
+                    || !transition.phase.compareAndSet(
+                    UnifiedNativeCommitTransitionToken.PHASE_PENDING,
+                    UnifiedNativeCommitTransitionToken.PHASE_ENTERING)) {
+                return;
+            }
+            transition.animToEpoch = beginUnifiedAnimToEpoch(
+                    session, "transitionCommit");
+            verifyUnifiedStateManagerListenerGate(
+                    session, true, "transitionCommitEntry");
+            log(Log.INFO, TAG,
+                    "Recorded Xiaomi transition animTo entry"
+                            + ", generation=" + session.generation
+                            + ", debugId="
+                            + transition.transitionDebugId
+                            + ", animToEpoch="
+                            + transition.animToEpoch
+                            + ", animationIdentity="
+                            + shortObject(
+                            transition.animationIdentity));
+        }
+
+        boolean onUnifiedCommitAnimToEntryFailed(
+                Object windowElement, Object params,
+                Throwable failure) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || params == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.nativeWindowElement != windowElement) {
+                return false;
+            }
+            Object ownerToken = null;
+            long epoch = 0L;
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null
+                    && standard.animParams.get() == params
+                    && standard.animToEpoch > 0L) {
+                ownerToken = standard;
+                epoch = standard.animToEpoch;
+            } else {
+                UnifiedNativeCommitTransitionToken transition =
+                        session.unifiedNativeCommitTransition;
+                if (transition != null
+                        && transition.animParams.get() == params
+                        && transition.animToEpoch > 0L) {
+                    ownerToken = transition;
+                    epoch = transition.animToEpoch;
+                }
+            }
+            return epoch > 0L
+                    && publishUnifiedNativeTerminalFailure(
+                    session, params, ownerToken, epoch,
+                    false, "animToEntryGateFailure", failure);
+        }
+
+        private void verifyUnifiedStateManagerListenerGate(
+                ReturnHomeSession session, boolean disabled,
+                String reason) throws Throwable {
+            Throwable accessorFailure = null;
+            try {
+                invokeAnyMethod(session.nativeWindowElement,
+                        "setMDisableStateManagerListener",
+                        new Object[]{Boolean.valueOf(disabled)});
+                Object actual = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getMDisableStateManagerListener",
+                        new Object[0]);
+                if (actual instanceof Boolean
+                        && ((Boolean) actual).booleanValue() == disabled) {
+                    return;
+                }
+                accessorFailure = new IllegalStateException(
+                        "Xiaomi listener-gate accessor write did not stick"
+                                + ", requestedDisabled=" + disabled
+                                + ", actual=" + shortObject(actual));
+            } catch (Throwable throwable) {
+                accessorFailure = throwable;
+            }
+            try {
+                writeField(session.nativeWindowElement,
+                        "mDisableStateManagerListener",
+                        Boolean.valueOf(disabled));
+                Object actual = readField(
+                        session.nativeWindowElement,
+                        "mDisableStateManagerListener");
+                if (actual instanceof Boolean
+                        && ((Boolean) actual).booleanValue() == disabled) {
+                    log(Log.WARN, TAG,
+                            "Used exact Xiaomi listener-gate field fallback"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", requestedDisabled="
+                                    + disabled
+                                    + ", reason=" + reason,
+                            accessorFailure);
+                    return;
+                }
+                throw new IllegalStateException(
+                        "Xiaomi listener-gate field write did not stick"
+                                + ", requestedDisabled=" + disabled
+                                + ", actual=" + shortObject(actual));
+            } catch (Throwable fieldFailure) {
+                if (accessorFailure != null) {
+                    fieldFailure.addSuppressed(accessorFailure);
+                }
+                throw new IllegalStateException(
+                        "Could not write Xiaomi StateManager listener gate"
+                                + ", requestedDisabled=" + disabled
+                                + ", reason=" + reason,
+                        fieldFailure);
+            }
+        }
+
+        private boolean publishUnifiedNativeTerminalFailure(
+                ReturnHomeSession session, Object animParams,
+                Object ownerToken, long animToEpoch, boolean cancel,
+                String reason, Throwable failure) {
+            return publishUnifiedNativeTerminalFailure(
+                    session, animParams, ownerToken,
+                    animToEpoch, cancel, false, false,
+                    reason, failure);
+        }
+
+        private boolean publishUnifiedNativeTerminalFailure(
+                ReturnHomeSession session, Object animParams,
+                Object ownerToken, long animToEpoch, boolean cancel,
+                boolean pendingCommitTermination,
+                boolean pendingCommitStateCleared,
+                String reason, Throwable failure) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified) {
+                return false;
+            }
+            UnifiedNativeTerminalFailureSnapshot snapshot =
+                    new UnifiedNativeTerminalFailureSnapshot(
+                            session, animParams, ownerToken,
+                            animToEpoch, cancel,
+                            pendingCommitTermination,
+                            pendingCommitStateCleared,
+                            reason, failure);
+            while (true) {
+                UnifiedNativeTerminalFailureSnapshot existing =
+                        session.unifiedNativeTerminalFailure.get();
+                if (existing != null
+                        && existing.phase.get()
+                        != UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID) {
+                    boolean sameFailure = existing.session == session
+                            && existing.windowElement
+                            == session.nativeWindowElement
+                            && existing.animationIdentity
+                            == session.unifiedNativeAnimationIdentity
+                            && existing.animParams == animParams
+                            && existing.ownerToken == ownerToken
+                            && existing.animToEpoch == animToEpoch
+                            && existing.cancel == cancel
+                            && existing.pendingCommitTermination
+                            == pendingCommitTermination
+                            && existing.pendingCommitStateCleared
+                            == pendingCommitStateCleared;
+                    if (sameFailure) {
+                        return true;
+                    }
+                    if (!existing.phase.compareAndSet(
+                            UnifiedNativeTerminalFailureSnapshot.PHASE_PENDING,
+                            UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID)) {
+                        return false;
+                    }
+                    if (!session.unifiedNativeTerminalFailure
+                            .compareAndSet(existing, snapshot)) {
+                        continue;
+                    }
+                    break;
+                }
+                if (session.unifiedNativeTerminalFailure.compareAndSet(
+                        existing, snapshot)) {
+                    if (existing != null) {
+                        existing.phase.set(
+                                UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID);
+                    }
+                    break;
+                }
+            }
+            handler.post(() -> handleUnifiedNativeTerminalFailure(snapshot));
+            log(Log.ERROR, TAG,
+                    "Published guarded Xiaomi native-owner terminal failure"
+                            + ", generation=" + session.generation
+                            + ", animToEpoch=" + animToEpoch
+                            + ", cancel=" + cancel
+                            + ", reason=" + reason,
+                    failure);
+            return true;
+        }
+
+        private void invalidatePendingUnifiedTerminalFailure(
+                ReturnHomeSession session, String reason) {
+            if (session == null) {
+                return;
+            }
+            while (true) {
+                UnifiedNativeTerminalFailureSnapshot snapshot =
+                        session.unifiedNativeTerminalFailure.get();
+                if (snapshot == null
+                        || snapshot.phase.get()
+                        != UnifiedNativeTerminalFailureSnapshot.PHASE_PENDING) {
+                    return;
+                }
+                if (!snapshot.phase.compareAndSet(
+                        UnifiedNativeTerminalFailureSnapshot.PHASE_PENDING,
+                        UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID)) {
+                    continue;
+                }
+                session.unifiedNativeTerminalFailure.compareAndSet(
+                        snapshot, null);
+                log(Log.INFO, TAG,
+                        "Invalidated queued Xiaomi terminal failure before new owner epoch"
+                                + ", generation="
+                                + session.generation
+                                + ", oldAnimToEpoch="
+                                + snapshot.animToEpoch
+                                + ", reason=" + reason);
+                return;
+            }
+        }
+
+        private boolean isExactUnifiedNativeTerminalFailure(
+                UnifiedNativeTerminalFailureSnapshot snapshot,
+                Object currentElement, Object currentIdentity) {
+            ReturnHomeSession session = snapshot == null
+                    ? null : snapshot.session;
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || snapshot.generation != session.generation
+                    || snapshot.windowElement
+                    != session.nativeWindowElement
+                    || snapshot.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || currentElement != snapshot.windowElement
+                    || currentIdentity != snapshot.animationIdentity
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || session.unifiedNativeTerminalFailure.get()
+                    != snapshot) {
+                return false;
+            }
+            Object targetSet;
+            try {
+                targetSet = invokeAnyMethod(
+                        snapshot.windowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                if (resolveUnifiedNativeClosingTarget(
+                        session, targetSet) == null) {
+                    return false;
+                }
+            } catch (Throwable throwable) {
+                return false;
+            }
+            if (snapshot.animToEpoch == 0L) {
+                boolean idlePreview = !session.nativeHandoffStarted
+                        && !session.unifiedNativeCommitPending
+                        && !session.nativeAnimationStarted;
+                boolean pendingCommitTermination =
+                        snapshot.pendingCommitTermination
+                                && snapshot.cancel
+                                && !session.nativeAnimationStarted
+                                && (snapshot.pendingCommitStateCleared
+                                ? (!session.nativeHandoffStarted
+                                && !session.unifiedNativeCommitPending
+                                && session.unifiedNativeCancelPending)
+                                : (session.nativeHandoffStarted
+                                && session.unifiedNativeCommitPending));
+                return snapshot.animParams == null
+                        && snapshot.ownerToken == null
+                        && (idlePreview
+                        || pendingCommitTermination);
+            }
+            if (snapshot.animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch
+                    || snapshot.animParams == null) {
+                return false;
+            }
+            if (snapshot.cancel) {
+                return session.unifiedNativeCancelPending
+                        && session.unifiedNativeCancelAnimParams
+                        == snapshot.animParams
+                        && session.unifiedNativeCancelAnimToEpoch
+                        == snapshot.animToEpoch
+                        && snapshot.ownerToken == snapshot.animParams;
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeConfiguredAnimToSnapshot) {
+                UnifiedNativeConfiguredAnimToSnapshot configured =
+                        (UnifiedNativeConfiguredAnimToSnapshot)
+                                snapshot.ownerToken;
+                return configured.session == session
+                        && configured
+                        == session.unifiedNativeConfiguredAnimTo.get()
+                        && configured.animParams
+                        == snapshot.animParams
+                        && configured.animToEpoch
+                        == snapshot.animToEpoch
+                        && !configured.cancel
+                        && session.nativeAnimationStarted
+                        && session.nativeContinuationVerified
+                        && session.nativeAnimationIdentity
+                        == snapshot.animationIdentity
+                        && configured.animationType.equals(
+                        session.nativeAnimationType);
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                UnifiedNativeStandardCommitToken token =
+                        (UnifiedNativeStandardCommitToken)
+                                snapshot.ownerToken;
+                return token.session == session
+                        && token == session.unifiedNativeStandardCommit
+                        && token.animParams.get()
+                        == snapshot.animParams
+                        && token.animToEpoch
+                        == snapshot.animToEpoch
+                        && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                        session, token);
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                UnifiedNativeCommitTransitionToken token =
+                        (UnifiedNativeCommitTransitionToken)
+                                snapshot.ownerToken;
+                return token.session == session
+                        && token
+                        == session.unifiedNativeCommitTransition
+                        && token.animParams.get()
+                        == snapshot.animParams
+                        && token.animToEpoch
+                        == snapshot.animToEpoch
+                        && isUnifiedCommitTransitionAtAnimToBoundary(
+                        session, token);
+            }
+            return false;
+        }
+
+        private void handleUnifiedNativeTerminalFailure(
+                UnifiedNativeTerminalFailureSnapshot snapshot) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                handler.post(() ->
+                        handleUnifiedNativeTerminalFailure(snapshot));
+                return;
+            }
+            if (snapshot == null
+                    || !snapshot.phase.compareAndSet(
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_PENDING,
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_CANCELLING)) {
+                return;
+            }
+            ReturnHomeSession session = snapshot.session;
+            Object currentElement = null;
+            Object currentIdentity = null;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                currentIdentity = invokeAnyMethod(
+                        snapshot.windowElement,
+                        "getAnimSymbol", new Object[0]);
+            } catch (Throwable throwable) {
+                snapshot.failure.addSuppressed(throwable);
+            }
+            if (!isExactUnifiedNativeTerminalFailure(
+                    snapshot, currentElement, currentIdentity)) {
+                snapshot.phase.set(
+                        UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID);
+                log(Log.ERROR, TAG,
+                        "Rejected stale Xiaomi native-owner terminal failure"
+                                + ", generation="
+                                + snapshot.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", sameSession="
+                                + (currentSession == session)
+                                + ", sameElement="
+                                + (currentElement
+                                == snapshot.windowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity
+                                == snapshot.animationIdentity)
+                                + ", reason=" + snapshot.reason,
+                        snapshot.failure);
+                return;
+            }
+
+            Runnable nativeTimeout = session.nativeTimeout;
+            if (nativeTimeout != null) {
+                handler.removeCallbacks(nativeTimeout);
+            }
+            Runnable cancelTimeout = session.unifiedNativeCancelTimeout;
+            if (cancelTimeout != null) {
+                handler.removeCallbacks(cancelTimeout);
+            }
+            session.nativeTimeout = null;
+            session.unifiedNativeCancelTimeout = null;
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null) {
+                standard.phase.set(
+                        UnifiedNativeStandardCommitToken.PHASE_INVALID);
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (transition != null) {
+                transition.phase.set(
+                        UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+            }
+            UnifiedNativeProvisionalCommitSnapshot provisional =
+                    session.unifiedNativeProvisionalCommit.getAndSet(null);
+            if (provisional != null) {
+                provisional.phase.set(
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            session.unifiedNativeConfiguredAnimTo.set(null);
+            invalidateUnifiedPendingInterruption(
+                    session, "terminalFailure:" + snapshot.reason);
+            session.unifiedNativeStandardCommit = null;
+            session.unifiedNativeCommitTransition = null;
+            session.unifiedNativeCommitPending = false;
+            session.unifiedNativeCancelPending = false;
+            session.unifiedNativeCancelRetargeted = false;
+            boolean toHome = !snapshot.cancel
+                    && session.nativeHandoffStarted;
+            try {
+                verifyUnifiedStateManagerListenerGate(
+                        session, false,
+                        "terminalFailure:" + snapshot.reason);
+            } catch (Throwable throwable) {
+                snapshot.failure.addSuppressed(throwable);
+            }
+
+            Class<?> callbackClass;
+            Object callback;
+            try {
+                callbackClass = Class.forName(
+                        MIUI_HOME_SHELL_TRANSITION_CALLBACK,
+                        false, classLoader);
+                callback = Proxy.newProxyInstance(
+                        callbackClass.getClassLoader(),
+                        new Class<?>[]{callbackClass},
+                        (proxy, method, args) -> {
+                            if (method.getDeclaringClass() == Object.class) {
+                                return headlessUpdaterResult(
+                                        proxy, method, args);
+                            }
+                            if ("onFinish".equals(method.getName())) {
+                                handler.post(() ->
+                                        completeUnifiedNativeTerminalFailure(
+                                                snapshot,
+                                                "nativeCancelCallback"));
+                            }
+                            return primitiveDefaultValue(
+                                    method.getReturnType());
+                        });
+                invokeAnyMethod(snapshot.windowElement,
+                        "cancelAnim", new Object[]{
+                                "MiuiBackGestureHook:" + snapshot.reason,
+                                Boolean.FALSE, null,
+                                Boolean.valueOf(toHome), callback});
+                Runnable guard = () ->
+                        completeUnifiedNativeTerminalFailure(
+                                snapshot, "nativeCancelGuard");
+                snapshot.cleanupGuard = guard;
+                handler.postDelayed(guard,
+                        RETURN_HOME_NATIVE_TIMEOUT_MS);
+                log(Log.ERROR, TAG,
+                        "Issued exact Xiaomi native cancel for terminal failure"
+                                + ", generation="
+                                + session.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", toHome=" + toHome
+                                + ", reason=" + snapshot.reason,
+                        snapshot.failure);
+            } catch (Throwable throwable) {
+                snapshot.failure.addSuppressed(throwable);
+                try {
+                    invokeAnyMethod(snapshot.windowElement,
+                            "finishTransition", new Object[]{
+                                    Boolean.valueOf(toHome),
+                                    Boolean.FALSE});
+                } catch (Throwable finishFailure) {
+                    snapshot.failure.addSuppressed(finishFailure);
+                }
+                handler.post(() ->
+                        completeUnifiedNativeTerminalFailure(
+                                snapshot,
+                                "nativeCancelInvocationFailed"));
+                log(Log.ERROR, TAG,
+                        "Xiaomi native terminal cancel invocation failed"
+                                + ", generation="
+                                + session.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", reason=" + snapshot.reason,
+                        snapshot.failure);
+            }
+        }
+
+        private void completeUnifiedNativeTerminalFailure(
+                UnifiedNativeTerminalFailureSnapshot snapshot,
+                String completionReason) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                handler.post(() ->
+                        completeUnifiedNativeTerminalFailure(
+                                snapshot, completionReason));
+                return;
+            }
+            if (snapshot == null
+                    || !snapshot.phase.compareAndSet(
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_CANCELLING,
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_COMPLETED)) {
+                return;
+            }
+            Runnable guard = snapshot.cleanupGuard;
+            if (guard != null) {
+                handler.removeCallbacks(guard);
+            }
+            ReturnHomeSession session = snapshot.session;
+            if (currentSession == session
+                    && session.finished.get() == 0
+                    && session.unifiedNativeTerminalFailure.get()
+                    == snapshot) {
+                session.unifiedNativeCleanupVerified = true;
+                log(Log.ERROR, TAG,
+                        "Completed guarded Xiaomi native-owner terminal cleanup"
+                                + ", generation="
+                                + session.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", completion="
+                                + completionReason
+                                + ", reason=" + snapshot.reason,
+                        snapshot.failure);
+                try {
+                    Object currentElement = invokeAnyMethod(
+                            session.stateManager,
+                            "getCurrentWindowElement", new Object[0]);
+                    Object currentIdentity = invokeAnyMethod(
+                            snapshot.windowElement,
+                            "getAnimSymbol", new Object[0]);
+                    if (currentElement == snapshot.windowElement
+                            && currentIdentity
+                            == snapshot.animationIdentity) {
+                        int finishStage = snapshot.finishStage.get();
+                        if (finishStage
+                                == UnifiedNativeTerminalFailureSnapshot
+                                .FINISH_STAGE_SOURCE_SKIPPED) {
+                            // The source invocation was skipped before it could release the
+                            // Home leash or enqueue the native main-thread cleanup.
+                            invokeAnyMethod(snapshot.windowElement,
+                                    "onFinishCompleted",
+                                    new Object[0]);
+                        } else if (finishStage
+                                == UnifiedNativeTerminalFailureSnapshot
+                                .FINISH_STAGE_APPLY_SKIPPED) {
+                            // The source already released the Home leash; replay only its exact
+                            // static apply body, never the outer source a second time.
+                            invokeAnyMethod(snapshot.windowElement,
+                                    "onFinishCompleted$lambda$39",
+                                    new Object[]{snapshot.windowElement});
+                        }
+                    }
+                } catch (Throwable throwable) {
+                    snapshot.failure.addSuppressed(throwable);
+                    log(Log.ERROR, TAG,
+                            "Could not finish skipped Xiaomi terminal cleanup stage"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", reason="
+                                    + snapshot.reason,
+                            snapshot.failure);
+                }
+                handler.post(() -> {
+                    if (currentSession == session
+                            && session.finished.get() == 0
+                            && session.unifiedNativeCleanupVerified) {
+                        finishSession(session,
+                                "unifiedNativeTerminalFailure:"
+                                        + snapshot.reason,
+                                false);
+                    }
+                });
+            }
+        }
+
+        private AtomicInteger unifiedConfigHookState(Object ownerToken) {
+            if (ownerToken instanceof UnifiedNativeStandardCommitToken) {
+                return ((UnifiedNativeStandardCommitToken) ownerToken)
+                        .configHookState;
+            }
+            if (ownerToken instanceof UnifiedNativeCommitTransitionToken) {
+                return ((UnifiedNativeCommitTransitionToken) ownerToken)
+                        .configHookState;
+            }
+            return null;
+        }
+
+        private Object resolveUnifiedAnimToConfigOwnerToken(Object params) {
+            UnifiedNativePendingInterruptionSnapshot interrupted =
+                    findUnifiedInterruptedAnimToConfig(params);
+            if (interrupted != null) {
+                return interrupted.ownerToken;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null || params == null) {
+                return null;
+            }
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null && standard.animParams.get() == params) {
+                return standard;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            return transition != null
+                    && transition.animParams.get() == params
+                    ? transition : null;
+        }
+
+        Object beginUnifiedNativeAnimToConfigHook(Object params) {
+            Object ownerToken = resolveUnifiedAnimToConfigOwnerToken(params);
+            AtomicInteger state = unifiedConfigHookState(ownerToken);
+            if (state == null) {
+                return null;
+            }
+            int previous = state.get();
+            if (previous == UNIFIED_CONFIG_HOOK_PENDING) {
+                state.compareAndSet(UNIFIED_CONFIG_HOOK_PENDING,
+                        UNIFIED_CONFIG_HOOK_RUNNING);
+                previous = state.get();
+            }
+            log(previous == UNIFIED_CONFIG_HOOK_RUNNING
+                            ? Log.INFO : Log.WARN,
+                    TAG,
+                    "Entered Xiaomi animTo config hook"
+                            + ", state=" + previous
+                            + ", params=" + shortObject(params));
+            return ownerToken;
+        }
+
+        void finishUnifiedNativeAnimToConfigHook(
+                Object ownerToken, Object params,
+                String reason, Throwable failure) {
+            AtomicInteger state = unifiedConfigHookState(ownerToken);
+            if (state == null) {
+                return;
+            }
+            boolean paramsExact = ownerToken
+                    instanceof UnifiedNativeStandardCommitToken
+                    ? ((UnifiedNativeStandardCommitToken) ownerToken)
+                    .animParams.get() == params
+                    : ((UnifiedNativeCommitTransitionToken) ownerToken)
+                    .animParams.get() == params;
+            int previous = state.getAndSet(
+                    UNIFIED_CONFIG_HOOK_COMPLETED);
+            log(failure == null && paramsExact ? Log.INFO : Log.ERROR,
+                    TAG,
+                    "Completed Xiaomi animTo config hook"
+                            + ", previousState=" + previous
+                            + ", paramsExact=" + paramsExact
+                            + ", reason=" + reason,
+                    failure);
+        }
+
+        private UnifiedNativePendingInterruptionSnapshot
+        findUnifiedInterruptedAnimToConfig(Object params) {
+            if (params == null) {
+                return null;
+            }
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    pendingUnifiedInterruptedAnimToConfigs.get(
+                            new ObjectIdentityKey(params));
+            return snapshot != null && snapshot.animParams == params
+                    ? snapshot : null;
+        }
+
+        private boolean hasExactUnifiedInterruptedOwnerTuple(
+                UnifiedNativePendingInterruptionSnapshot snapshot) {
+            if (snapshot == null || snapshot.animParams == null
+                    || snapshot.animToEpoch <= 0L
+                    || snapshot.ownerAttempt <= 0L
+                    || snapshot.configLock == null) {
+                return false;
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                UnifiedNativeStandardCommitToken token =
+                        (UnifiedNativeStandardCommitToken)
+                                snapshot.ownerToken;
+                return token.session == snapshot.session
+                        && token.generation == snapshot.generation
+                        && token.windowElement == snapshot.windowElement
+                        && token.animationIdentity
+                        == snapshot.animationIdentity
+                        && token.animParams.get() == snapshot.animParams
+                        && token.animToEpoch == snapshot.animToEpoch
+                        && token.ownerAttempt == snapshot.ownerAttempt
+                        && token.configLock == snapshot.configLock;
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                UnifiedNativeCommitTransitionToken token =
+                        (UnifiedNativeCommitTransitionToken)
+                                snapshot.ownerToken;
+                return token.session == snapshot.session
+                        && token.generation == snapshot.generation
+                        && token.windowElement == snapshot.windowElement
+                        && token.animationIdentity
+                        == snapshot.animationIdentity
+                        && token.animParams.get() == snapshot.animParams
+                        && token.animToEpoch == snapshot.animToEpoch
+                        && token.configLock == snapshot.configLock;
+            }
+            return false;
+        }
+
+        private void maybeFinishDeferredControllerAfterConfigAck(
+                String reason) {
+            if (!deferredControllerReplacement
+                    || currentSession != null
+                    || !pendingUnifiedInterruptedAnimToConfigs.isEmpty()) {
+                return;
+            }
+            handler.post(() -> finishDeferredMiuiHomeReturnHomeController(
+                    MiuiHomeReturnHomeController.this,
+                    "interruptedConfigAck:" + reason));
+        }
+
+        private void scheduleUnifiedInterruptedConfigOwnerDrain(
+                UnifiedNativePendingInterruptionSnapshot snapshot,
+                String reason) {
+            try {
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativePendingInterruptionSnapshot current =
+                            findUnifiedInterruptedAnimToConfig(
+                                    snapshot.animParams);
+                    if (current == snapshot
+                            && snapshot.configDisposition.get()
+                            == UnifiedNativePendingInterruptionSnapshot
+                            .CONFIG_PENDING) {
+                        // This runnable is FIFO behind Xiaomi's already queued animTo lambda.
+                        // Retain the tombstone: removing it without an intercepted config ack
+                        // could admit a later stale invocation after controller replacement.
+                        log(Log.ERROR, TAG,
+                                "Xiaomi animTo owner drain reached without config ack"
+                                        + ", generation="
+                                        + snapshot.generation
+                                        + ", ownerAttempt="
+                                        + snapshot.ownerAttempt
+                                        + ", animToEpoch="
+                                        + snapshot.animToEpoch
+                                        + ", mutation="
+                                        + snapshot.mutation.get()
+                                        + ", reason=" + reason);
+                    }
+                });
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not queue Xiaomi interrupted-config owner drain"
+                                + ", generation=" + snapshot.generation
+                                + ", animToEpoch=" + snapshot.animToEpoch
+                                + ", reason=" + reason,
+                        throwable);
+            }
+        }
+
+        private boolean acknowledgeSkippedUnifiedInterruptedAnimToConfig(
+                UnifiedNativePendingInterruptionSnapshot snapshot,
+                String reason) {
+            int disposition = snapshot.configDisposition.get();
+            if (disposition
+                    == UnifiedNativePendingInterruptionSnapshot
+                    .CONFIG_ACK_SKIPPED) {
+                return true;
+            }
+            if (disposition
+                    != UnifiedNativePendingInterruptionSnapshot
+                    .CONFIG_PENDING
+                    || !snapshot.configDisposition.compareAndSet(
+                    UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING,
+                    UnifiedNativePendingInterruptionSnapshot
+                            .CONFIG_ACK_SKIPPED)) {
+                return snapshot.configDisposition.get()
+                        == UnifiedNativePendingInterruptionSnapshot
+                        .CONFIG_ACK_SKIPPED;
+            }
+            pendingUnifiedInterruptedAnimToConfigs.remove(
+                    new ObjectIdentityKey(snapshot.animParams), snapshot);
+            log(Log.INFO, TAG,
+                    "Acknowledged skipped stale Xiaomi animTo config"
+                            + ", generation=" + snapshot.generation
+                            + ", ownerAttempt=" + snapshot.ownerAttempt
+                            + ", animToEpoch=" + snapshot.animToEpoch
+                            + ", mutation=" + snapshot.mutation.get()
+                            + ", requestedType=" + snapshot.requestedType
+                            + ", reason=" + reason);
+            maybeFinishDeferredControllerAfterConfigAck(reason);
+            return true;
+        }
+
+        private void acknowledgeAppliedUnifiedInterruptedAnimToConfig(
+                ReturnHomeSession session, Object params,
+                Object ownerToken, long animToEpoch, String reason) {
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    findUnifiedInterruptedAnimToConfig(params);
+            if (snapshot == null || snapshot.session != session
+                    || snapshot.ownerToken != ownerToken
+                    || snapshot.animToEpoch != animToEpoch
+                    || snapshot.mutation.get()
+                    != UnifiedNativePendingInterruptionSnapshot.MUTATION_NONE
+                    || !hasExactUnifiedInterruptedOwnerTuple(snapshot)
+                    || !snapshot.configDisposition.compareAndSet(
+                    UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING,
+                    UnifiedNativePendingInterruptionSnapshot
+                            .CONFIG_ACK_APPLIED)) {
+                return;
+            }
+            pendingUnifiedInterruptedAnimToConfigs.remove(
+                    new ObjectIdentityKey(params), snapshot);
+            session.unifiedNativePendingInterruption.compareAndSet(
+                    snapshot, null);
+            snapshot.phase.compareAndSet(
+                    UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING,
+                    UnifiedNativePendingInterruptionSnapshot.PHASE_INVALID);
+            log(Log.INFO, TAG,
+                    "Acknowledged normally applied Xiaomi animTo config"
+                            + ", generation=" + snapshot.generation
+                            + ", ownerAttempt=" + snapshot.ownerAttempt
+                            + ", animToEpoch=" + snapshot.animToEpoch
+                            + ", requestedType=" + snapshot.requestedType
+                            + ", reason=" + reason);
+            maybeFinishDeferredControllerAfterConfigAck(reason);
+        }
+
+        void onUnifiedNativeAnimToConfigHookCompleted(
+                Object implementor, Object params,
+                String reason, Throwable failure) {
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    findUnifiedInterruptedAnimToConfig(params);
+            if (snapshot == null
+                    || snapshot.configDisposition.get()
+                    != UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING
+                    || !snapshot.configDisposition.compareAndSet(
+                    UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING,
+                    UnifiedNativePendingInterruptionSnapshot.CONFIG_INVALID)) {
+                return;
+            }
+            pendingUnifiedInterruptedAnimToConfigs.remove(
+                    new ObjectIdentityKey(params), snapshot);
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                UnifiedNativeStandardCommitToken standard =
+                        (UnifiedNativeStandardCommitToken)
+                                snapshot.ownerToken;
+                standard.phase.set(
+                        UnifiedNativeStandardCommitToken.PHASE_INVALID);
+                if (snapshot.session.unifiedNativeStandardCommit
+                        == standard) {
+                    snapshot.session.unifiedNativeStandardCommit = null;
+                }
+            } else if (snapshot.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                UnifiedNativeCommitTransitionToken transition =
+                        (UnifiedNativeCommitTransitionToken)
+                                snapshot.ownerToken;
+                transition.phase.set(
+                        UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+                if (snapshot.session.unifiedNativeCommitTransition
+                        == transition) {
+                    snapshot.session.unifiedNativeCommitTransition = null;
+                }
+            }
+            snapshot.session.unifiedNativeCommitPending = false;
+            if (snapshot.mutation.get()
+                    == UnifiedNativePendingInterruptionSnapshot.MUTATION_NONE) {
+                snapshot.session.unifiedNativePendingInterruption
+                        .compareAndSet(snapshot, null);
+                snapshot.phase.compareAndSet(
+                        UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING,
+                        UnifiedNativePendingInterruptionSnapshot.PHASE_INVALID);
+            }
+            log(Log.ERROR, TAG,
+                    "Closed unacknowledged Xiaomi animTo config hook"
+                            + ", generation=" + snapshot.generation
+                            + ", ownerAttempt=" + snapshot.ownerAttempt
+                            + ", animToEpoch=" + snapshot.animToEpoch
+                            + ", mutation=" + snapshot.mutation.get()
+                            + ", phase=" + snapshot.phase.get()
+                            + ", sameImplementorElement="
+                            + isUnifiedConfigImplementorElement(
+                            implementor, snapshot.windowElement)
+                            + ", reason=" + reason,
+                    failure == null
+                            ? new IllegalStateException(
+                            "animTo config completed without CONFIG_ACK")
+                            : failure);
+            maybeFinishDeferredControllerAfterConfigAck(reason);
+        }
+
+        private boolean isUnifiedConfigImplementorElement(
+                Object implementor, Object expectedWindowElement) {
+            try {
+                return readField(implementor, "windowElement")
+                        == expectedWindowElement;
+            } catch (Throwable throwable) {
+                return false;
+            }
+        }
+
+        Object resolveUnifiedAnimToConfigLock(Object params) {
+            UnifiedNativePendingInterruptionSnapshot interrupted =
+                    findUnifiedInterruptedAnimToConfig(params);
+            if (interrupted != null
+                    && interrupted.configDisposition.get()
+                    == UnifiedNativePendingInterruptionSnapshot
+                    .CONFIG_PENDING) {
+                return interrupted.configLock;
+            }
+            ReturnHomeSession session = currentSession;
+            if (session == null || params == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified) {
+                return null;
+            }
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null
+                    && standard.animParams.get() == params
+                    && standard.animToEpoch > 0L
+                    && standard.animToEpoch
+                    == session.unifiedNativeActiveAnimToEpoch) {
+                return standard.configLock;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            return transition != null
+                    && transition.animParams.get() == params
+                    && transition.animToEpoch > 0L
+                    && transition.animToEpoch
+                    == session.unifiedNativeActiveAnimToEpoch
+                    ? transition.configLock : null;
+        }
+
+        boolean shouldSkipInterruptedUnifiedAnimToConfig(
+                Object implementor, Object params) {
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    findUnifiedInterruptedAnimToConfig(params);
+            if (snapshot == null
+                    || snapshot.configDisposition.get()
+                    != UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING
+                    || snapshot.mutation.get()
+                    == UnifiedNativePendingInterruptionSnapshot.MUTATION_NONE) {
+                return false;
+            }
+            ReturnHomeSession session = snapshot.session;
+            boolean ownerTupleExact =
+                    hasExactUnifiedInterruptedOwnerTuple(snapshot);
+            boolean implementorExact = false;
+            Throwable verificationFailure = null;
+            try {
+                Object windowElement = readField(
+                        implementor, "windowElement");
+                implementorExact = windowElement == snapshot.windowElement;
+                if (snapshot.mutation.get()
+                        == UnifiedNativePendingInterruptionSnapshot
+                        .MUTATION_CANCEL_SURFACE
+                        && currentSession == session
+                        && session.finished.get() == 0
+                        && !session.unifiedNativeCleanupVerified) {
+                    verifyUnifiedStateManagerListenerGate(
+                            session, true,
+                            "skipInterruptedConfig:"
+                                    + snapshot.animToEpoch);
+                }
+            } catch (Throwable throwable) {
+                verificationFailure = throwable;
+            }
+            if (!ownerTupleExact || !implementorExact
+                    || verificationFailure != null) {
+                log(Log.ERROR, TAG,
+                        "Fail-closed interrupted Xiaomi animTo config verification"
+                                + ", generation="
+                                + snapshot.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", ownerTupleExact="
+                                + ownerTupleExact
+                                + ", implementorExact="
+                                + implementorExact,
+                        verificationFailure == null
+                                ? new IllegalStateException(
+                                "interrupted animTo identity mismatch")
+                                : verificationFailure);
+            }
+            if (!acknowledgeSkippedUnifiedInterruptedAnimToConfig(
+                    snapshot, ownerTupleExact && implementorExact
+                            && verificationFailure == null
+                            ? "configHook"
+                            : "configHookFailClosed")) {
+                return false;
+            }
+            log(Log.INFO, TAG,
+                    "Skipped Xiaomi final animTo config after native interruption began"
+                            + ", generation="
+                            + snapshot.generation
+                            + ", ownerAttempt="
+                            + snapshot.ownerAttempt
+                            + ", animToEpoch="
+                            + snapshot.animToEpoch
+                            + ", phase=" + snapshot.phase.get()
+                            + ", mutation="
+                            + snapshot.mutation.get()
+                            + ", requestedType="
+                            + snapshot.requestedType);
+            return true;
+        }
+
+        void onUnifiedNativeAnimToConfigured(
+                Object implementor, Object params) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || params == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified) {
+                return;
+            }
+            long epoch = 0L;
+            Object ownerToken = null;
+            boolean cancel = false;
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null
+                    && standard.animParams.get() == params
+                    && standard.animToEpoch > 0L
+                    && standard.phase.get()
+                    != UnifiedNativeStandardCommitToken.PHASE_INVALID) {
+                epoch = standard.animToEpoch;
+                ownerToken = standard;
+            } else {
+                UnifiedNativeCommitTransitionToken transition =
+                        session.unifiedNativeCommitTransition;
+                if (transition != null
+                        && transition.animParams.get() == params
+                        && transition.animToEpoch > 0L
+                        && transition.phase.get()
+                        != UnifiedNativeCommitTransitionToken.PHASE_INVALID) {
+                    epoch = transition.animToEpoch;
+                    ownerToken = transition;
+                } else if (session.unifiedNativeCancelPending
+                        && session.unifiedNativeCancelAnimParams == params
+                        && session.unifiedNativeCancelAnimToEpoch > 0L) {
+                    epoch = session.unifiedNativeCancelAnimToEpoch;
+                    ownerToken = params;
+                    cancel = true;
+                }
+            }
+            if (epoch == 0L
+                    || epoch != session.unifiedNativeActiveAnimToEpoch) {
+                return;
+            }
+            UnifiedNativePendingInterruptionSnapshot pendingInterruption =
+                    session.unifiedNativePendingInterruption.get();
+            int pendingMutation = pendingInterruption == null
+                    ? UnifiedNativePendingInterruptionSnapshot.MUTATION_NONE
+                    : pendingInterruption.mutation.get();
+            if (pendingInterruption != null
+                    && pendingInterruption
+                    == session.unifiedNativePendingInterruption.get()
+                    && pendingInterruption.session == session
+                    && pendingInterruption.windowElement
+                    == session.nativeWindowElement
+                    && pendingInterruption.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && pendingInterruption.animParams == params
+                    && pendingInterruption.ownerToken == ownerToken
+                    && pendingInterruption.animToEpoch == epoch
+                    && pendingInterruption.phase.get()
+                    == UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING
+                    && pendingMutation
+                    != UnifiedNativePendingInterruptionSnapshot.MUTATION_NONE) {
+                if (pendingMutation
+                        == UnifiedNativePendingInterruptionSnapshot
+                        .MUTATION_CANCEL_SURFACE) {
+                    try {
+                        verifyUnifiedStateManagerListenerGate(
+                                session, true,
+                                "configuredDuringCancelSurface:"
+                                        + epoch);
+                    } catch (Throwable throwable) {
+                        log(Log.ERROR, TAG,
+                                "Could not retain Xiaomi listener gate during cancel-surface interruption"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", animToEpoch=" + epoch,
+                                throwable);
+                    }
+                }
+                log(Log.INFO, TAG,
+                        "Suppressed final-owner publication after native interruption began"
+                                + ", generation=" + session.generation
+                                + ", animToEpoch=" + epoch
+                                + ", mutation=" + pendingMutation
+                                + ", animationIdentity="
+                                + shortObject(
+                                session.unifiedNativeAnimationIdentity));
+                return;
+            }
+            try {
+                Object windowElement = readField(
+                        implementor, "windowElement");
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object animationIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object requestedTypeObject = invokeAnyMethod(
+                        params, "getAnimType", new Object[0]);
+                Object actualTypeObject = invokeAnyMethod(
+                        animationIdentity, "getLastAminType",
+                        new Object[0]);
+                String requestedType = requestedTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) requestedTypeObject).name()
+                        : String.valueOf(requestedTypeObject);
+                String actualType = actualTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) actualTypeObject).name()
+                        : String.valueOf(actualTypeObject);
+                Object targetSet = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                boolean finalType = cancel
+                        ? "APP_TO_APP".equals(actualType)
+                        : isReturnHomeNativeCloseType(actualType);
+                boolean running = animationIdentity != null
+                        && Boolean.TRUE.equals(invokeAnyMethod(
+                        animationIdentity, "isRunning", new Object[0]));
+                boolean finishComplete = Boolean.TRUE.equals(readField(
+                        session.nativeWindowElement, "mFinishComplete"));
+                if (windowElement != session.nativeWindowElement
+                        || currentElement != session.nativeWindowElement
+                        || animationIdentity
+                        != session.unifiedNativeAnimationIdentity
+                        || !requestedType.equals(actualType)
+                        || !finalType
+                        || resolveUnifiedNativeClosingTarget(
+                        session, targetSet) == null) {
+                    throw new IllegalStateException(
+                            "Xiaomi final animTo owner did not configure exactly"
+                                    + ", requestedType=" + requestedType
+                                    + ", actualType=" + actualType
+                                    + ", sameImplementorElement="
+                                    + (windowElement
+                                    == session.nativeWindowElement)
+                                    + ", sameCurrentElement="
+                                    + (currentElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (animationIdentity
+                                    == session.unifiedNativeAnimationIdentity));
+                }
+                verifyUnifiedStateManagerListenerGate(
+                        session, false,
+                        "configured:" + actualType + ":" + epoch);
+                UnifiedNativeConfiguredAnimToSnapshot configured =
+                        new UnifiedNativeConfiguredAnimToSnapshot(
+                                session, params, ownerToken, epoch,
+                                actualType, cancel, running,
+                                finishComplete);
+                session.unifiedNativeConfiguredAnimTo.set(configured);
+                acknowledgeAppliedUnifiedInterruptedAnimToConfig(
+                        session, params, ownerToken, epoch,
+                        "configured:" + actualType);
+                Object configuredStartAlpha = null;
+                Object configuredEndAlpha = null;
+                Object elementTarget = null;
+                Object homeTarget = null;
+                try {
+                    Object windowAnimParams = invokeAnyMethod(
+                            params, "getWindowAnimParams", new Object[0]);
+                    configuredStartAlpha = windowAnimParams == null
+                            ? null : invokeAnyMethod(windowAnimParams,
+                            "getStartAlpha", new Object[0]);
+                    configuredEndAlpha = windowAnimParams == null
+                            ? null : invokeAnyMethod(windowAnimParams,
+                            "getEndAlpha", new Object[0]);
+                    elementTarget = invokeAnyMethod(
+                            targetSet, "getElementTarget", new Object[0]);
+                    homeTarget = invokeAnyMethod(
+                            targetSet, "getHomeTarget", new Object[0]);
+                } catch (Throwable ignored) {
+                    // Diagnostics must not turn a native accepted animTo into a rejection.
+                }
+                log(Log.INFO, TAG,
+                        "Published configured Xiaomi final animTo epoch"
+                                + ", generation=" + session.generation
+                                + ", animToEpoch=" + epoch
+                                + ", type=" + actualType
+                                + ", cancel=" + cancel
+                                + ", configuredAlpha="
+                                + configuredStartAlpha + "->"
+                                + configuredEndAlpha
+                                + ", springAlpha="
+                                + readFieldOrNull(
+                                animationIdentity, "mStartAlpha")
+                                + "->" + readFieldOrNull(
+                                animationIdentity, "mEndAlpha")
+                                + ", hasElementTarget="
+                                + (elementTarget != null)
+                                + ", hasHomeTarget="
+                                + (homeTarget != null)
+                                + ", animationIdentity="
+                                + shortObject(animationIdentity));
+            } catch (Throwable throwable) {
+                try {
+                    verifyUnifiedStateManagerListenerGate(
+                            session, true,
+                            "configuredFailure:" + epoch);
+                } catch (Throwable gateFailure) {
+                    throwable.addSuppressed(gateFailure);
+                }
+                boolean terminalQueued =
+                        publishUnifiedNativeTerminalFailure(
+                                session, params, ownerToken, epoch,
+                                cancel,
+                                "animToConfiguredFailure",
+                                throwable);
+                log(Log.ERROR, TAG,
+                        "Rejected unverified Xiaomi final animTo configuration"
+                                + ", generation=" + session.generation
+                                + ", animToEpoch=" + epoch
+                                + ", cancel=" + cancel
+                                + ", terminalQueued="
+                                + terminalQueued,
+                        throwable);
+            }
+        }
+
+        private boolean isExactUnifiedConfiguredAnimTo(
+                ReturnHomeSession session,
+                UnifiedNativeConfiguredAnimToSnapshot configured,
+                Object windowElement, Object animationIdentity,
+                String actualType) {
+            if (session == null || configured == null
+                    || configured.session != session
+                    || configured.generation != session.generation
+                    || configured.windowElement != windowElement
+                    || configured.animationIdentity != animationIdentity
+                    || configured.animToEpoch == 0L
+                    || configured.animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch
+                    || !configured.animationType.equals(actualType)) {
+                return false;
+            }
+            if (configured.cancel) {
+                return session.unifiedNativeCancelPending
+                        && session.unifiedNativeCancelAnimParams
+                        == configured.animParams
+                        && session.unifiedNativeCancelAnimToEpoch
+                        == configured.animToEpoch
+                        && "APP_TO_APP".equals(actualType);
+            }
+            if (!isReturnHomeNativeCloseType(actualType)) {
+                return false;
+            }
+            if (configured.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                UnifiedNativeStandardCommitToken token =
+                        (UnifiedNativeStandardCommitToken)
+                                configured.ownerToken;
+                return token.session == session
+                        && token.animParams.get()
+                        == configured.animParams
+                        && token.animToEpoch == configured.animToEpoch
+                        && token.phase.get()
+                        != UnifiedNativeStandardCommitToken.PHASE_INVALID;
+            }
+            if (configured.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                UnifiedNativeCommitTransitionToken token =
+                        (UnifiedNativeCommitTransitionToken)
+                                configured.ownerToken;
+                return token.session == session
+                        && token.animParams.get()
+                        == configured.animParams
+                        && token.animToEpoch == configured.animToEpoch
+                        && token.phase.get()
+                        != UnifiedNativeCommitTransitionToken.PHASE_INVALID;
+            }
+            return false;
+        }
+
+        UnifiedNativeFinishDispatchToken beginUnifiedNativeFinishDispatch(
+                Object windowElement) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || windowElement == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement != windowElement) {
+                return null;
+            }
+            if (session.unifiedNativeProviderCommitAdopted) {
+                // The original runner targets have already entered Xiaomi's complete native
+                // closing provider. From this point the WindowElement follows the same
+                // CLOSE_TO_HOME -> CLOSE_TO_ELEMENT lifecycle as Xiaomi's ordinary launcher
+                // animation, so its own finish dispatch must run without the preview-only
+                // epoch gate.
+                return null;
+            }
+            long dispatchId = unifiedNativeFinishDispatchIds
+                    .incrementAndGet();
+            Object animationIdentity =
+                    session.unifiedNativeAnimationIdentity;
+            UnifiedNativeConfiguredAnimToSnapshot configured =
+                    session.unifiedNativeConfiguredAnimTo.get();
+            boolean allowed = false;
+            String actualType = "unknown";
+            Throwable failure = null;
+            try {
+                Object currentIdentity = invokeAnyMethod(
+                        windowElement, "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        windowElement, "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
+                Object actualTypeObject = invokeAnyMethod(
+                        currentIdentity, "getLastAminType",
+                        new Object[0]);
+                actualType = actualTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) actualTypeObject).name()
+                        : String.valueOf(actualTypeObject);
+                allowed = currentIdentity == animationIdentity
+                        && configured
+                        == session.unifiedNativeConfiguredAnimTo.get()
+                        && isExactUnifiedConfiguredAnimTo(
+                        session, configured, windowElement,
+                        currentIdentity, actualType);
+                verifyUnifiedStateManagerListenerGate(
+                        session, !allowed,
+                        "finishSource:" + dispatchId + ":"
+                                + actualType);
+            } catch (Throwable throwable) {
+                failure = throwable;
+                allowed = false;
+                try {
+                    verifyUnifiedStateManagerListenerGate(
+                            session, true,
+                            "finishSourceFailure:" + dispatchId);
+                } catch (Throwable gateFailure) {
+                    throwable.addSuppressed(gateFailure);
+                }
+                if (configured != null) {
+                    publishUnifiedNativeTerminalFailure(
+                            session, configured.animParams,
+                            configured.cancel
+                                    ? configured.animParams
+                                    : configured,
+                            configured.animToEpoch,
+                            configured.cancel,
+                            "finishSourceFailure:" + dispatchId,
+                            throwable);
+                }
+            }
+            UnifiedNativeFinishDispatchToken token =
+                    new UnifiedNativeFinishDispatchToken(
+                            dispatchId, session, windowElement,
+                            animationIdentity, configured, allowed);
+            if (allowed) {
+                pendingUnifiedNativeFinishDispatches
+                        .computeIfAbsent(windowElement,
+                                ignored -> new ConcurrentLinkedQueue<>())
+                        .offer(token);
+                log(Log.INFO, TAG,
+                        "Admitted Xiaomi final finish source"
+                                + ", generation=" + session.generation
+                                + ", dispatchId=" + dispatchId
+                                + ", animToEpoch="
+                                + configured.animToEpoch
+                                + ", type=" + actualType);
+            } else {
+                UnifiedNativeTerminalFailureSnapshot terminal =
+                        session.unifiedNativeTerminalFailure.get();
+                if (terminal != null
+                        && terminal.session == session
+                        && terminal.windowElement == windowElement
+                        && terminal.animationIdentity
+                        == animationIdentity) {
+                    terminal.markFinishSourceSkipped();
+                }
+                log(Log.WARN, TAG,
+                        "Skipped superseded Xiaomi finish source"
+                                + ", generation=" + session.generation
+                                + ", dispatchId=" + dispatchId
+                                + ", activeAnimToEpoch="
+                                + session.unifiedNativeActiveAnimToEpoch
+                                + ", configuredAnimToEpoch="
+                                + (configured == null ? 0L
+                                : configured.animToEpoch)
+                                + ", type=" + actualType,
+                        failure);
+            }
+            return token;
+        }
+
+        void abortUnifiedNativeFinishDispatch(
+                UnifiedNativeFinishDispatchToken token,
+                String reason) {
+            if (token == null || !token.allowed) {
+                return;
+            }
+            ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken> queue =
+                    pendingUnifiedNativeFinishDispatches.get(
+                            token.windowElement);
+            if (queue != null) {
+                queue.remove(token);
+                if (queue.isEmpty()) {
+                    pendingUnifiedNativeFinishDispatches.remove(
+                            token.windowElement, queue);
+                }
+            }
+            ReturnHomeSession session = token.session;
+            try {
+                if (currentSession == session
+                        && session.finished.get() == 0
+                        && session.nativeWindowElement
+                        == token.windowElement
+                        && session.unifiedNativeConfiguredAnimTo.get()
+                        == token.configured) {
+                    verifyUnifiedStateManagerListenerGate(
+                            session, true,
+                            "finishSourceAbort:" + reason);
+                }
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not close Xiaomi listener gate after finish-source abort"
+                                + ", generation=" + token.generation
+                                + ", dispatchId=" + token.dispatchId
+                                + ", reason=" + reason,
+                        throwable);
+            }
+        }
+
+        Boolean consumeUnifiedNativeFinishDispatch(
+                Object windowElement) {
+            ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken> queue =
+                    pendingUnifiedNativeFinishDispatches.get(windowElement);
+            UnifiedNativeFinishDispatchToken token = queue == null
+                    ? null : queue.poll();
+            if (queue != null && queue.isEmpty()) {
+                pendingUnifiedNativeFinishDispatches.remove(
+                        windowElement, queue);
+            }
+            if (token == null) {
+                ReturnHomeSession session = currentSession;
+                if (session != null
+                        && session.finished.get() == 0
+                        && session.unifiedNativePreviewOwned
+                        && session.unifiedNativeProviderCommitAdopted
+                        && session.nativeWindowElement == windowElement) {
+                    return null;
+                }
+                if (session != null
+                        && session.finished.get() == 0
+                        && session.unifiedNativePreviewOwned
+                        && session.nativeWindowElement == windowElement) {
+                    log(Log.ERROR, TAG,
+                            "Skipped unpaired Xiaomi finish apply"
+                                    + ", generation="
+                                    + session.generation);
+                    return Boolean.FALSE;
+                }
+                return null;
+            }
+            ReturnHomeSession session = token.session;
+            Object currentIdentity = null;
+            String actualType = "unknown";
+            boolean exact = false;
+            Throwable failure = null;
+            try {
+                currentIdentity = invokeAnyMethod(
+                        token.windowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object actualTypeObject = invokeAnyMethod(
+                        currentIdentity, "getLastAminType",
+                        new Object[0]);
+                actualType = actualTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) actualTypeObject).name()
+                        : String.valueOf(actualTypeObject);
+                exact = token.allowed
+                        && token.windowElement == windowElement
+                        && token.animationIdentity == currentIdentity
+                        && currentSession == session
+                        && session.finished.get() == 0
+                        && !session.unifiedNativeCleanupVerified
+                        && session.unifiedNativeConfiguredAnimTo.get()
+                        == token.configured
+                        && isExactUnifiedConfiguredAnimTo(
+                        session, token.configured,
+                        windowElement, currentIdentity, actualType);
+                if (exact) {
+                    verifyUnifiedStateManagerListenerGate(
+                            session, false,
+                            "finishApply:" + token.dispatchId);
+                }
+            } catch (Throwable throwable) {
+                failure = throwable;
+                exact = false;
+                UnifiedNativeConfiguredAnimToSnapshot configured =
+                        token.configured;
+                if (configured != null) {
+                    publishUnifiedNativeTerminalFailure(
+                            session, configured.animParams,
+                            configured.cancel
+                                    ? configured.animParams
+                                    : configured,
+                            configured.animToEpoch,
+                            configured.cancel,
+                            "finishApplyFailure:"
+                                    + token.dispatchId,
+                            throwable);
+                }
+            }
+            if (!exact) {
+                UnifiedNativeTerminalFailureSnapshot terminal =
+                        session.unifiedNativeTerminalFailure.get();
+                if (terminal != null
+                        && terminal.session == session
+                        && terminal.windowElement == windowElement
+                        && terminal.animationIdentity
+                        == token.animationIdentity) {
+                    terminal.markFinishApplySkipped();
+                }
+                log(Log.WARN, TAG,
+                        "Skipped stale Xiaomi finish apply"
+                                + ", generation=" + token.generation
+                                + ", dispatchId=" + token.dispatchId
+                                + ", type=" + actualType
+                                + ", sameSession="
+                                + (currentSession == session)
+                                + ", sameIdentity="
+                                + (currentIdentity
+                                == token.animationIdentity),
+                        failure);
+                return Boolean.FALSE;
+            }
+            log(Log.INFO, TAG,
+                    "Admitted Xiaomi final finish apply"
+                            + ", generation=" + token.generation
+                            + ", dispatchId=" + token.dispatchId
+                            + ", animToEpoch="
+                            + token.configured.animToEpoch
+                            + ", type=" + actualType);
+            return Boolean.TRUE;
+        }
+
+        private long beginUnifiedAnimToEpoch(
+                ReturnHomeSession session, String reason) {
+            invalidateUnifiedPendingInterruption(
+                    session, "newAnimTo:" + reason);
+            invalidatePendingUnifiedTerminalFailure(
+                    session, "newAnimTo:" + reason);
+            long epoch = session.unifiedNativeAnimToEpochs.incrementAndGet();
+            session.unifiedNativeActiveAnimToEpoch = epoch;
+            session.unifiedNativeCommitEndObserved = false;
+            session.unifiedNativeConfiguredAnimTo.set(null);
+            UnifiedNativeProvisionalCommitSnapshot provisional =
+                    session.unifiedNativeProvisionalCommit.getAndSet(null);
+            if (provisional != null
+                    && provisional.phase.get()
+                    != UnifiedNativeProvisionalCommitSnapshot.PHASE_ADOPTED) {
+                provisional.phase.set(
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            UnifiedNativeFinishSnapshot previous =
+                    session.unifiedNativeFinishSnapshot.get();
+            if (previous != null
+                    && previous.phase.compareAndSet(
+                    UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                    UnifiedNativeFinishSnapshot.PHASE_INVALID)) {
+                session.unifiedNativeFinishSnapshot.compareAndSet(
+                        previous, null);
+                log(Log.INFO, TAG,
+                        "Invalidated previous Xiaomi finish snapshot at animTo entry"
+                                + ", generation=" + session.generation
+                                + ", previousEpoch="
+                                + previous.animToEpoch
+                                + ", newEpoch=" + epoch
+                                + ", previousType="
+                                + previous.actualType
+                                + ", reason=" + reason);
+            }
+            return epoch;
+        }
+
+        void markUnifiedCommitAnimToReturned(
+                Object windowElement, Object params) {
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || session.nativeWindowElement != windowElement
+                    || params == null) {
+                return;
+            }
+            long epoch = 0L;
+            UnifiedNativeStandardCommitToken standardToken =
+                    session.unifiedNativeStandardCommit;
+            if (standardToken != null
+                    && standardToken.animParams.get() == params
+                    && standardToken.phase.compareAndSet(
+                    UnifiedNativeStandardCommitToken.PHASE_ENTERING,
+                    UnifiedNativeStandardCommitToken.PHASE_ENTERED)) {
+                epoch = standardToken.animToEpoch;
+            } else {
+                UnifiedNativeCommitTransitionToken transition =
+                        session.unifiedNativeCommitTransition;
+                if (transition != null
+                        && transition.animParams.get() == params
+                        && transition.phase.compareAndSet(
+                        UnifiedNativeCommitTransitionToken.PHASE_ENTERING,
+                        UnifiedNativeCommitTransitionToken.PHASE_ENTERED)) {
+                    epoch = transition.animToEpoch;
+                }
+            }
+            if (epoch == 0L) {
+                return;
+            }
+            UnifiedNativeFinishSnapshot snapshot =
+                    session.unifiedNativeFinishSnapshot.get();
+            if (snapshot != null
+                    && snapshot.animToEpoch == epoch
+                    && "CLOSE_TO_DRAG".equals(snapshot.actualType)
+                    && snapshot.phase.compareAndSet(
+                    UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                    UnifiedNativeFinishSnapshot.PHASE_INVALID)) {
+                session.unifiedNativeFinishSnapshot.compareAndSet(
+                        snapshot, null);
+                session.unifiedNativeCommitEndObserved = false;
+                log(Log.INFO, TAG,
+                        "Discarded previous drag finish from commit animTo call"
+                                + ", generation=" + session.generation
+                                + ", animToEpoch=" + epoch
+                                + ", animationIdentity="
+                                + shortObject(snapshot.animationIdentity));
+            }
+        }
+
+        void prepareUnifiedHandoffBeforeAnimTo(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.unifiedNativeCommitPending
+                    || !session.unifiedNativeCommitReady.get()
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement != windowElement
+                    || params == null) {
+                return;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (!isExactUnifiedCommitTransition(
+                    session, transition, windowElement,
+                    UnifiedNativeCommitTransitionToken.PHASE_ENTERING)) {
+                return;
+            }
+            Object typeObject = invokeAnyMethod(
+                    params, "getAnimType", new Object[0]);
+            String typeName = typeObject instanceof Enum<?>
+                    ? ((Enum<?>) typeObject).name()
+                    : String.valueOf(typeObject);
+            if (!"CLOSE_TO_ELEMENT".equals(typeName)) {
+                return;
+            }
+            Object targetSet = invokeAnyMethod(
+                    params, "getTargetApps", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            if (running
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || resolveUnifiedNativeClosingTarget(
+                    session, targetSet) == null) {
+                return;
+            }
+            armUnifiedLocalHandoffStatus(
+                    session, "idleElementCommit");
+        }
+
+        private void armUnifiedLocalHandoffStatus(
+                ReturnHomeSession session, String reason) throws Throwable {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.nativeWindowElement == null
+                    || session.unifiedNativeAnimationIdentity == null
+                    || session.currentRect.isEmpty()
+                    || !Float.isFinite(session.currentCornerRadius)
+                    || session.currentCornerRadius < 0.0f) {
+                return;
+            }
+            MiuiHomeLocalHandoffToken existing = session.localHandoffToken;
+            if (existing != null
+                    && existing.session == session
+                    && existing.windowElement
+                    == session.nativeWindowElement
+                    && miuiHomeLocalHandoffToken.get() == existing) {
+                return;
+            }
+            Object windowAnimContext = invokeAnyMethod(
+                    session.nativeWindowElement,
+                    "getWindowAnimContext", new Object[0]);
+            if (windowAnimContext == null) {
+                throw new IllegalStateException(
+                        "unified WindowElement has no WindowAnimContext");
+            }
+            Object previousStatus = invokeAnyMethod(windowAnimContext,
+                    "getLocalAnimLastStatus", new Object[0]);
+            Object status = previousStatus;
+            if (status == null) {
+                Class<?> animStatusClass = Class.forName(
+                        MIUI_HOME_ANIM_STATUS_PARAM, false, classLoader);
+                Object companion = readStaticField(
+                        animStatusClass, "Companion");
+                status = invokeAnyMethod(companion,
+                        "getAnimParamFromRect",
+                        new Object[]{new RectF(session.currentRect),
+                                Float.valueOf(session.currentCornerRadius),
+                                Float.valueOf(1.0f)});
+                if (status == null) {
+                    throw new IllegalStateException(
+                            "could not create unified local handoff status");
+                }
+                // Preserve Xiaomi's own handoff state whenever it already exists. Synthesize
+                // one only when the native context has not published any status yet.
+                invokeAnyMethod(windowAnimContext,
+                        "setLocalAnimLastStatus", new Object[]{status});
+            }
+            MiuiHomeLocalHandoffToken token =
+                    new MiuiHomeLocalHandoffToken(
+                            session.generation, session,
+                            session.nativeWindowElement,
+                            windowAnimContext, status);
+            MiuiHomeLocalHandoffToken replaced =
+                    miuiHomeLocalHandoffToken.getAndSet(token);
+            session.nativeWindowAnimContext = windowAnimContext;
+            session.nativePublishedStatus = status;
+            session.nativeStatusPublished = true;
+            session.localHandoffToken = token;
+            log(Log.INFO, TAG,
+                    "Armed stopped unified predictive handoff status"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason
+                            + ", reusedNativeStatus="
+                            + (previousStatus != null)
+                            + ", replacedGeneration="
+                            + (replaced == null ? 0L
+                            : replaced.generation)
+                            + ", rect=" + session.currentRect
+                            + ", radius="
+                            + session.currentCornerRadius);
+        }
+
         Object takeLocalHandoffStatus(Object implementor, Object params) {
             try {
                 MiuiHomeLocalHandoffToken token = matchLocalHandoffToken(
@@ -9970,6 +12786,138 @@ public final class MiuiBackGestureHook extends XposedModule {
             return currentStatus == token.status ? token : null;
         }
 
+        void observeUnifiedCommitTransition(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.unifiedNativeCommitPending
+                    || !session.unifiedNativeCommitReady.get()
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement != windowElement
+                    || params == null
+                    || Boolean.TRUE.equals(invokeAnyMethod(
+                    params, "isMerge", new Object[0]))) {
+                return;
+            }
+            Object transitionTypeObject = invokeAnyMethod(
+                    params, "getTransitionType", new Object[0]);
+            Object info = invokeAnyMethod(
+                    params, "getTransitionInfo", new Object[0]);
+            Object token = invokeAnyMethod(
+                    params, "getToken", new Object[0]);
+            Object startTransaction = invokeAnyMethod(
+                    params, "getT", new Object[0]);
+            Object finishCallback = invokeAnyMethod(
+                    params, "getFinishCallback", new Object[0]);
+            Object mainDebugObject = invokeAnyMethod(
+                    params, "getMainInfoDebugId", new Object[0]);
+            Object infoTypeObject = info == null ? null
+                    : invokeAnyMethod(info, "getType", new Object[0]);
+            int transitionType = transitionTypeObject instanceof Number
+                    ? ((Number) transitionTypeObject).intValue() : -1;
+            int mainDebugId = mainDebugObject instanceof Number
+                    ? ((Number) mainDebugObject).intValue() : -1;
+            int infoType = infoTypeObject instanceof Number
+                    ? ((Number) infoTypeObject).intValue() : -1;
+            int infoDebugId = readTransitionDebugId(info);
+            Object currentElement = invokeAnyMethod(
+                    session.stateManager, "getCurrentWindowElement",
+                    new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isAnimRunning", new Object[0]));
+            Object compat = invokeAnyMethod(windowElement,
+                    "getWindowTransitionCompat", new Object[0]);
+            Object helper = compat == null ? null : invokeAnyMethod(
+                    compat, "getCallbackHelper", new Object[0]);
+            int compatDebugIdBeforeStart = readIntFieldOrDefault(
+                    compat, "mMainTransitionInfoDebugId", -1);
+            if (transitionType != TYPE_RETURN_TO_HOME || token == null
+                    || startTransaction == null || finishCallback == null
+                    || (infoType != TRANSIT_CLOSE
+                    && infoType != TRANSIT_TO_BACK)
+                    || infoDebugId < 0 || mainDebugId != infoDebugId
+                    || compat == null || helper == null
+                    || currentElement != windowElement
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || !"CLOSE_TO_DRAG".equals(currentType)) {
+                return;
+            }
+            UnifiedNativeCommitTransitionToken previous =
+                    session.unifiedNativeCommitTransition;
+            if (previous != null
+                    && previous.remoteTransitionParams == params
+                    && previous.phase.get()
+                    != UnifiedNativeCommitTransitionToken.PHASE_INVALID) {
+                return;
+            }
+            if (previous != null) {
+                previous.phase.set(
+                        UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+                session.unifiedNativeCommitAttempt = 0L;
+                log(Log.INFO, TAG,
+                        "Invalidated superseded Xiaomi commit transition"
+                                + ", generation=" + session.generation
+                                + ", oldDebugId="
+                                + previous.transitionDebugId
+                                + ", newDebugId=" + infoDebugId);
+            }
+            UnifiedNativeCommitTransitionToken accepted =
+                    new UnifiedNativeCommitTransitionToken(
+                            session, windowElement, currentIdentity,
+                            params, compat, helper, token, info,
+                            infoDebugId);
+            session.unifiedNativeCommitTransition = accepted;
+            log(Log.INFO, TAG,
+                    "Accepted real Xiaomi return-home transition"
+                            + ", generation=" + session.generation
+                            + ", debugId=" + infoDebugId
+                            + ", infoType=" + infoType
+                            + ", compatDebugIdBeforeStart="
+                            + compatDebugIdBeforeStart
+                            + ", running=" + running
+                            + ", animationIdentity="
+                            + shortObject(currentIdentity));
+        }
+
+        boolean invalidateUnifiedCommitTransition(
+                Object windowElement, Object params, String reason) {
+            ReturnHomeSession session = currentSession;
+            UnifiedNativeCommitTransitionToken transition = session == null
+                    ? null : session.unifiedNativeCommitTransition;
+            if (session == null || transition == null
+                    || transition.session != session
+                    || transition.windowElement != windowElement
+                    || transition.remoteTransitionParams != params
+                    || !transition.phase.compareAndSet(
+                    UnifiedNativeCommitTransitionToken.PHASE_PENDING,
+                    UnifiedNativeCommitTransitionToken.PHASE_INVALID)) {
+                return false;
+            }
+            if (session.unifiedNativeCommitTransition == transition) {
+                session.unifiedNativeCommitTransition = null;
+                session.unifiedNativeCommitAttempt = 0L;
+                session.unifiedNativeCommitRequestedType = null;
+            }
+            log(Log.WARN, TAG,
+                    "Invalidated failed Xiaomi commit transition injection"
+                            + ", generation=" + session.generation
+                            + ", debugId="
+                            + transition.transitionDebugId
+                            + ", reason=" + reason);
+            return true;
+        }
+
         boolean prepareElementTransitionContinuity(
                 Object windowElement, Object params) throws Throwable {
             ReturnHomeSession session = currentSession;
@@ -9978,14 +12926,26 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             boolean merge = params != null && Boolean.TRUE.equals(
                     invokeAnyMethod(params, "isMerge", new Object[0]));
-            if (!attached || session == null || session.finished.get() != 0
+            boolean verifiedCandidate = session != null
+                    && session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && session.nativeAnimationIdentity != null
+                    && isReturnHomeNativeCloseType(
+                    session.nativeAnimationType);
+            boolean provisionalCandidate = session != null
+                    && session.unifiedNativePreviewOwned
+                    && session.unifiedNativeCommitPending
+                    && session.unifiedNativeCommitReady.get()
+                    && !session.unifiedNativeCleanupVerified
+                    && session.unifiedNativeAnimationIdentity != null
+                    && session.nativeAnimationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && "CLOSE_TO_DRAG".equals(
+                    session.nativeAnimationType);
+            if (session == null || session.finished.get() != 0
                     || !session.nativeHandoffStarted
-                    || !session.nativeAnimationStarted
-                    || !session.nativeContinuationVerified
+                    || (!verifiedCandidate && !provisionalCandidate)
                     || session.nativeWindowElement != windowElement
-                    || session.nativeAnimationIdentity == null
-                    || !isReturnHomeNativeCloseType(
-                    session.nativeAnimationType)
                     || params == null
                     || merge) {
                 return false;
@@ -10131,10 +13091,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                     : String.valueOf(currentTypeObject);
             boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                     windowElement, "isAnimRunning", new Object[0]));
+            Object expectedAnimationIdentity = provisionalCandidate
+                    ? session.unifiedNativeAnimationIdentity
+                    : session.nativeAnimationIdentity;
             if (currentElement != windowElement
-                    || currentIdentity != session.nativeAnimationIdentity
+                    || currentIdentity != expectedAnimationIdentity
                     || !session.nativeAnimationType.equals(currentType)
-                    || !running) {
+                    || (!running && !provisionalCandidate)) {
                 return false;
             }
             Object compat = invokeAnyMethod(windowElement,
@@ -10153,7 +13116,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             ReturnHomeElementLeashReuseToken reuseToken =
                     new ReturnHomeElementLeashReuseToken(
                             session, windowElement,
-                            session.nativeAnimationIdentity, compat, helper,
+                            expectedAnimationIdentity, compat, helper,
                             info, infoDebugId, closingTaskId, appLeash,
                             elementChange, elementLeash,
                             session.closingLeash);
@@ -10165,7 +13128,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", transitionDebugId=" + infoDebugId
                             + ", transitionInfoType=" + infoType
                             + ", animationType="
-                            + session.nativeAnimationType);
+                            + session.nativeAnimationType
+                            + ", provisional=" + provisionalCandidate);
             return true;
         }
 
@@ -10191,7 +13155,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 boolean ownerThread = animHandlerObject instanceof Handler
                         && ((Handler) animHandlerObject).getLooper()
                         == Looper.myLooper();
-                boolean valid = attached && currentSession == session
+                boolean valid = currentSession == session
                         && session.finished.get() == 0
                         && session.nativeWindowElement == token.windowElement
                         && session.nativeAnimationIdentity
@@ -10262,14 +13226,22 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         boolean hasEligibleNativeGeometrySession() {
             ReturnHomeSession session = currentSession;
-            return attached && session != null
-                    && session.finished.get() == 0
+            boolean unifiedPreview = session != null
+                    && session.unifiedNativePreviewOwned
+                    && !session.unifiedNativeCleanupVerified
+                    && session.nativeAnimationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && "CLOSE_TO_DRAG".equals(
+                    session.nativeAnimationType);
+            boolean nativeClose = session != null
                     && session.nativeHandoffStarted
                     && session.nativeAnimationStarted
                     && session.nativeAnimationIdentity != null
-                    && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
-                    || "CLOSE_TO_HOME_CENTER".equals(
-                    session.nativeAnimationType))
+                    && isReturnHomeNativeCloseType(
+                    session.nativeAnimationType);
+            return session != null
+                    && session.finished.get() == 0
+                    && (unifiedPreview || nativeClose)
                     && Looper.myLooper() == Looper.getMainLooper();
         }
 
@@ -10288,13 +13260,31 @@ public final class MiuiBackGestureHook extends XposedModule {
                     throwable);
         }
 
+        private SurfaceControl surfaceFromNativeTarget(Object target)
+                throws Throwable {
+            Object leashCompat = target == null ? null
+                    : readFieldOrNull(target, "leash");
+            Object surface = leashCompat == null ? null
+                    : readFieldOrNull(leashCompat, "mSurfaceControl");
+            return surface instanceof SurfaceControl
+                    ? (SurfaceControl) surface : null;
+        }
+
         ReturnHomeNativeGeometrySnapshot prepareNativeGeometryBeforeAnimUpdate(
                 Object implementor, Object currentRectObject,
                 Object currentRadii, long frameTraceId) {
             ReturnHomeSession session = currentSession;
+            boolean unifiedPreview = session != null
+                    && session.unifiedNativePreviewOwned
+                    && !session.unifiedNativeCleanupVerified
+                    && session.nativeAnimationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && "CLOSE_TO_DRAG".equals(
+                    session.nativeAnimationType);
             if (session == null || session.finished.get() != 0
-                    || !session.nativeHandoffStarted
-                    || !session.nativeAnimationStarted
+                    || (!unifiedPreview
+                    && (!session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted))
                     || Looper.myLooper() != Looper.getMainLooper()) {
                 return null;
             }
@@ -10309,13 +13299,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                         : String.valueOf(typeObject);
                 boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                         animation, "isRunning", new Object[0]));
-                boolean exact = attached && currentSession == session
+                boolean exact = currentSession == session
                         && session.finished.get() == 0
                         && session.nativeWindowElement == windowElement
                         && session.nativeAnimationIdentity == animation
                         && session.nativeAnimationType.equals(typeName)
-                        && ("CLOSE_TO_HOME".equals(typeName)
-                        || "CLOSE_TO_HOME_CENTER".equals(typeName))
+                        && ("CLOSE_TO_DRAG".equals(typeName)
+                        || isReturnHomeNativeCloseType(typeName))
                         && running && currentRectObject instanceof RectF
                         && currentRadii != null;
                 if (!exact) {
@@ -10375,20 +13365,29 @@ public final class MiuiBackGestureHook extends XposedModule {
         ReturnHomeNativeGeometrySnapshot captureNativeGeometryFromSurfaceParams(
                 long frameTraceId, Object surfaceParams) {
             ReturnHomeSession session = currentSession;
+            boolean unifiedPreview = session != null
+                    && session.unifiedNativePreviewOwned
+                    && !session.unifiedNativeCleanupVerified
+                    && session.nativeAnimationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && "CLOSE_TO_DRAG".equals(
+                    session.nativeAnimationType);
             if (session == null || session.finished.get() != 0
-                    || !session.nativeHandoffStarted
-                    || !session.nativeAnimationStarted
+                    || (!unifiedPreview
+                    && (!session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted))
                     || Looper.myLooper() != Looper.getMainLooper()
                     || surfaceParams == null
                     || !surfaceParams.getClass().isArray()) {
                 return null;
             }
             try {
-                boolean exactSession = attached && currentSession == session
+                boolean exactSession = currentSession == session
                         && session.finished.get() == 0
                         && session.nativeAnimationIdentity != null
-                        && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
-                        || "CLOSE_TO_HOME_CENTER".equals(
+                        && ("CLOSE_TO_DRAG".equals(
+                        session.nativeAnimationType)
+                        || isReturnHomeNativeCloseType(
                         session.nativeAnimationType))
                         && session.closingLeash != null
                         && session.closingLeash.isValid();
@@ -10484,7 +13483,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             ReturnHomeSession session = currentSession;
             boolean exact = applier == null && session != null
                     && Looper.myLooper() == Looper.getMainLooper()
-                    && attached && session.finished.get() == 0
+                    && session.finished.get() == 0
                     && session.nativeHandoffStarted
                     && session.nativeAnimationStarted
                     && ("CLOSE_TO_HOME".equals(session.nativeAnimationType)
@@ -10707,7 +13706,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         == Looper.myLooper();
                 Object startBoundsObject = invokeAnyMethod(
                         change, "getStartAbsBounds", new Object[0]);
-                boolean exact = ownerThread && attached
+                boolean exact = ownerThread
                         && pendingElementLeashReuse.get() == token
                         && currentSession == session
                         && session.finished.get() == 0
@@ -10747,8 +13746,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 SurfaceControl.Transaction startTransaction =
                         (SurfaceControl.Transaction) transactionObject;
                 synchronized (token) {
-                    boolean stillOwned = attached
-                            && pendingElementLeashReuse.get() == token
+                    boolean stillOwned = pendingElementLeashReuse.get() == token
                             && currentSession == session
                             && session.finished.get() == 0
                             && token.phase.get()
@@ -10771,7 +13769,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                             ReturnHomeElementLeashReuseToken.SEED_APPLIED);
                 }
                 log(Log.INFO, TAG,
-                        "Armed element and predictive closing geometry for transition apply"
+                        "Armed predictive closing geometry for transition apply"
                                 + ", generation=" + token.generation
                                 + ", taskId=" + token.taskId
                                 + ", transitionDebugId="
@@ -10813,7 +13811,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         && ((Handler) handlerObject).getLooper()
                         == Looper.myLooper();
                 ReturnHomeSession session = token.session;
-                boolean exact = ownerThread && attached
+                boolean exact = ownerThread
                         && pendingElementLeashReuse.get() == token
                         && currentSession == session
                         && session.finished.get() == 0
@@ -10850,11 +13848,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 ReturnHomeSession session = token.session;
                 ReturnHomeNativeGeometrySnapshot snapshot =
                         session.nativeGeometrySnapshot.get();
-                long snapshotAgeNanos = snapshot == null ? Long.MAX_VALUE
-                        : SystemClock.elapsedRealtimeNanos()
-                        - snapshot.capturedElapsedRealtimeNanos;
-                boolean exact = attached
-                        && pendingElementLeashReuse.get() == token
+                boolean exact = pendingElementLeashReuse.get() == token
                         && currentSession == session
                         && session.finished.get() == 0
                         && token.phase.get()
@@ -10869,9 +13863,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                         && readTransitionDebugId(token.transitionInfo)
                         == token.transitionDebugId
                         && snapshot != null
-                        && snapshotAgeNanos >= 0L
-                        && snapshotAgeNanos
-                        <= RETURN_HOME_NATIVE_GEOMETRY_MAX_AGE_NS
                         && session.nativeGeometrySnapshot.get() == snapshot
                         && snapshot.generation == token.generation
                         && snapshot.animationIdentity
@@ -10881,8 +13872,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                             "start geometry apply ownership changed"
                                     + ", tokenPhase=" + token.phase.get()
                                     + ", snapshot=" + shortObject(snapshot)
-                                    + ", snapshotAgeNanos="
-                                    + snapshotAgeNanos);
+                                    + ", snapshotGeneration="
+                                    + (snapshot == null ? -1L
+                                    : snapshot.generation));
                 }
                 Object savedLeash = invokeAnyMethod(
                         token.helper, "getOpenLeash", new Object[0]);
@@ -10904,21 +13896,17 @@ public final class MiuiBackGestureHook extends XposedModule {
                              new SurfaceControl.Transaction()) {
                     Matrix refreshMatrix = new Matrix();
                     refreshMatrix.setValues(matrixValues);
-                    SurfaceControl[] geometryLeashes =
-                            new SurfaceControl[]{token.elementLeash,
-                                    token.closingLeash};
-                    for (SurfaceControl geometryLeash
-                            : geometryLeashes) {
-                        invokeAnyMethod(refreshTransaction, "setMatrix",
-                                new Object[]{geometryLeash,
-                                        refreshMatrix, new float[9]});
-                        invokeAnyMethod(refreshTransaction,
-                                "setWindowCrop",
-                                new Object[]{geometryLeash, crop});
-                        applyNativeSurfaceCornerRadii(
-                                refreshTransaction, geometryLeash,
-                                surfaceRadii);
-                    }
+                    // The element leash belongs to Xiaomi's native island animation. Only
+                    // preserve the predictive geometry on the real application task leash;
+                    // CLOSE_TO_ELEMENT must retain its native element geometry and spring.
+                    invokeAnyMethod(refreshTransaction, "setMatrix",
+                            new Object[]{token.closingLeash,
+                                    refreshMatrix, new float[9]});
+                    invokeAnyMethod(refreshTransaction, "setWindowCrop",
+                            new Object[]{token.closingLeash, crop});
+                    applyNativeSurfaceCornerRadii(
+                            refreshTransaction, token.closingLeash,
+                            surfaceRadii);
                     if (pendingElementLeashReuse.get() != token
                             || currentSession != session
                             || session.finished.get() != 0
@@ -10998,10 +13986,41 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", phaseChanged=" + changed
                             + ", phase="
                             + token.startGeometrySeed.get());
+            Object pendingAnimParams = token.pendingAnimParams;
+            if (applied && changed) {
+                handler.post(() -> {
+                    if (pendingElementLeashReuse.get() != token
+                            || token.startGeometrySeed.get()
+                            != ReturnHomeElementLeashReuseToken
+                            .SEED_COMMITTED) {
+                        return;
+                    }
+                    if (pendingAnimParams != null) {
+                        try {
+                            adoptElementTransitionIfStarted(
+                                    token.windowElement,
+                                    pendingAnimParams);
+                        } catch (Throwable throwable) {
+                            log(Log.WARN, TAG,
+                                    "Failed delayed predictive element adoption after geometry commit"
+                                            + ", generation="
+                                            + token.generation
+                                            + ", taskId="
+                                            + token.taskId,
+                                    throwable);
+                        }
+                    }
+                    consumeUnifiedNativeFinishSnapshot(
+                            token.session,
+                            "elementStartGeometryCommitted");
+                });
+            }
         }
 
         void adoptElementTransitionIfStarted(
                 Object windowElement, Object params) throws Throwable {
+            adoptUnifiedStandardCommitIfStarted(windowElement, params);
+            adoptUnifiedNativeCommitIfStarted(windowElement, params);
             ReturnHomeElementLeashReuseToken token =
                     pendingElementLeashReuse.get();
             if (token == null || token.windowElement != windowElement
@@ -11017,6 +14036,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ? ((Enum<?>) typeObject).name()
                     : String.valueOf(typeObject);
             if (!"CLOSE_TO_ELEMENT".equals(typeName)) {
+                return;
+            }
+            if (token.pendingAnimParams == null) {
+                token.pendingAnimParams = params;
+            } else if (token.pendingAnimParams != params) {
                 return;
             }
             ReturnHomeSession session = token.session;
@@ -11043,6 +14067,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && session.nativeWindowElement == windowElement
                     && currentIdentity == token.animationIdentity
                     && "CLOSE_TO_ELEMENT".equals(currentType)
+                    && token.startGeometrySeed.get()
+                    == ReturnHomeElementLeashReuseToken.SEED_COMMITTED
                     && running
                     && adoptedLeash instanceof SurfaceControl
                     && ((SurfaceControl) adoptedLeash).isValid()
@@ -11053,7 +14079,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "Rejected predictive element leash adoption"
                                 + ", generation=" + session.generation
                                 + ", currentType=" + currentType
-                                + ", running=" + running);
+                                + ", running=" + running
+                                + ", geometrySeed="
+                                + token.startGeometrySeed.get());
                 return;
             }
             if (!token.phase.compareAndSet(
@@ -11068,6 +14096,2194 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", taskId=" + token.taskId
                             + ", transitionDebugId="
                             + token.transitionDebugId);
+        }
+
+        private boolean isExactUnifiedCommitTransition(
+                ReturnHomeSession session,
+                UnifiedNativeCommitTransitionToken transition,
+                Object windowElement,
+                int requiredPhase) throws Throwable {
+            if (session == null || transition == null
+                    || transition.session != session
+                    || transition.generation != session.generation
+                    || session.unifiedNativeCommitTransition
+                    != transition
+                    || transition.phase.get() != requiredPhase
+                    || transition.windowElement != windowElement
+                    || transition.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || transition.transitionToken == null
+                    || transition.transitionInfo == null
+                    || readTransitionDebugId(
+                    transition.transitionInfo)
+                    != transition.transitionDebugId) {
+                return false;
+            }
+            Object currentCompat = invokeAnyMethod(windowElement,
+                    "getWindowTransitionCompat", new Object[0]);
+            Object currentHelper = currentCompat == null ? null
+                    : invokeAnyMethod(currentCompat,
+                    "getCallbackHelper", new Object[0]);
+            if (currentCompat != transition.compat
+                    || currentHelper != transition.helper
+                    || readIntFieldOrDefault(currentCompat,
+                    "mMainTransitionInfoDebugId", -1)
+                    != transition.transitionDebugId) {
+                return false;
+            }
+            Object remoteParams = transition.remoteTransitionParams;
+            Object mainDebugObject = invokeAnyMethod(
+                    remoteParams, "getMainInfoDebugId", new Object[0]);
+            return invokeAnyMethod(remoteParams,
+                    "getToken", new Object[0])
+                    == transition.transitionToken
+                    && invokeAnyMethod(remoteParams, "getTransitionInfo",
+                    new Object[0]) == transition.transitionInfo
+                    && mainDebugObject instanceof Number
+                    && ((Number) mainDebugObject).intValue()
+                    == transition.transitionDebugId;
+        }
+
+        private boolean hasCommittedUnifiedElementGeometry(
+                ReturnHomeSession session,
+                UnifiedNativeCommitTransitionToken transition,
+                Object windowElement, Object animationIdentity) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            return token != null && transition != null
+                    && token.session == session
+                    && token.windowElement == windowElement
+                    && token.animationIdentity == animationIdentity
+                    && token.compat == transition.compat
+                    && token.helper == transition.helper
+                    && token.transitionInfo
+                    == transition.transitionInfo
+                    && token.transitionDebugId
+                    == transition.transitionDebugId
+                    && token.closingLeash == session.closingLeash
+                    && token.startGeometrySeed.get()
+                    == ReturnHomeElementLeashReuseToken.SEED_COMMITTED;
+        }
+
+        private void adoptUnifiedStandardCommitIfStarted(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            UnifiedNativeStandardCommitToken token = session == null
+                    ? null : session.unifiedNativeStandardCommit;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null || token == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.unifiedNativeCommitPending
+                    || session.unifiedNativeCleanupVerified
+                    || token.session != session
+                    || token.windowElement != windowElement
+                    || token.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || params == null
+                    || token.animParams.get() != params) {
+                return;
+            }
+            int phase = token.phase.get();
+            if (phase == UnifiedNativeStandardCommitToken.PHASE_ENTERING) {
+                if (!token.phase.compareAndSet(
+                        UnifiedNativeStandardCommitToken.PHASE_ENTERING,
+                        UnifiedNativeStandardCommitToken.PHASE_ENTERED)) {
+                    return;
+                }
+            } else if (phase
+                    != UnifiedNativeStandardCommitToken.PHASE_ENTERED) {
+                return;
+            }
+            Object typeObject = invokeAnyMethod(
+                    params, "getAnimType", new Object[0]);
+            String typeName = typeObject instanceof Enum<?>
+                    ? ((Enum<?>) typeObject).name()
+                    : String.valueOf(typeObject);
+            if (!"CLOSE_TO_HOME".equals(typeName)
+                    && !"CLOSE_TO_HOME_CENTER".equals(typeName)) {
+                return;
+            }
+            Object currentElement = invokeAnyMethod(
+                    session.stateManager,
+                    "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object targetSet = invokeAnyMethod(
+                    params, "getTargetApps", new Object[0]);
+            if (currentElement != windowElement
+                    || currentIdentity != token.animationIdentity
+                    || resolveUnifiedNativeClosingTarget(
+                    session, targetSet) == null) {
+                return;
+            }
+            if (!token.phase.compareAndSet(
+                    UnifiedNativeStandardCommitToken.PHASE_ENTERED,
+                    UnifiedNativeStandardCommitToken.PHASE_CONSUMED)) {
+                return;
+            }
+            long ownerAttempt = session.unifiedNativeRetargetAttempts
+                    .incrementAndGet();
+            token.ownerAttempt = ownerAttempt;
+            log(Log.INFO, TAG,
+                    "Queued Xiaomi standard commit owner verification"
+                            + ", generation=" + session.generation
+                            + ", signalAttempt="
+                            + token.signal.attempt
+                            + ", ownerAttempt=" + ownerAttempt
+                            + ", requestedType=" + typeName
+                            + ", animationIdentity="
+                            + shortObject(currentIdentity));
+            try {
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativeRetargetInspection inspection =
+                            inspectUnifiedNativeRetarget(
+                                    session, ownerAttempt,
+                                    typeName, false, null);
+                    publishUnifiedProvisionalCommit(
+                            session, token, null, inspection);
+                    handler.post(() -> acceptUnifiedStandardCommit(
+                            session, token, inspection));
+                });
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not queue standard commit owner verification"
+                                + ", generation="
+                                + session.generation
+                                + ", signalAttempt="
+                                + token.signal.attempt
+                                + ", ownerAttempt="
+                                + ownerAttempt
+                                + ", retainedConsumedToken=true",
+                        throwable);
+            }
+        }
+
+        private void acceptUnifiedStandardCommit(
+                ReturnHomeSession session,
+                UnifiedNativeStandardCommitToken token,
+                UnifiedNativeRetargetInspection inspection) {
+            if (session == null || token == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCommitPending
+                    || !isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, token)
+                    || token.ownerAttempt != inspection.attempt
+                    ) {
+                return;
+            }
+            Object currentElement = null;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not verify standard Xiaomi commit element"
+                                + ", generation="
+                                + session.generation
+                                + ", ownerAttempt="
+                                + inspection.attempt,
+                        throwable);
+            }
+            boolean standardType = "CLOSE_TO_HOME".equals(
+                    inspection.actualType)
+                    || "CLOSE_TO_HOME_CENTER".equals(
+                    inspection.actualType);
+            boolean exact = inspection.failure == null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && inspection.requestedType.equals(
+                    inspection.actualType)
+                    && standardType
+                    && currentElement == session.nativeWindowElement;
+            if (!exact) {
+                log(Log.ERROR, TAG,
+                        "Rejected Xiaomi standard commit at animation-owner tail"
+                                + ", generation="
+                                + session.generation
+                                + ", signalAttempt="
+                                + token.signal.attempt
+                                + ", ownerAttempt="
+                                + inspection.attempt
+                                + ", requestedType="
+                                + inspection.requestedType
+                                + ", actualType="
+                                + inspection.actualType
+                                + ", sameAnimation="
+                                + inspection.sameAnimation
+                                + ", exactTarget="
+                                + inspection.exactTarget
+                                + ", sameElement="
+                                + (currentElement
+                                == session.nativeWindowElement)
+                                + ", running="
+                                + inspection.running,
+                        inspection.failure);
+                return;
+            }
+            if (!adoptUnifiedStandardCommitToken(token)) {
+                return;
+            }
+            Runnable previousTimeout = session.nativeTimeout;
+            if (previousTimeout != null) {
+                handler.removeCallbacks(previousTimeout);
+            }
+            session.nativeTimeout = null;
+            session.unifiedNativeCommitPending = false;
+            session.unifiedNativeStandardCommit = null;
+            session.nativeAnimationIdentity =
+                    inspection.animationIdentity;
+            session.nativeAnimationType = inspection.actualType;
+            session.nativeAnimationStarted = true;
+            session.nativeContinuationVerified = true;
+            handler.post(() -> completeUnifiedNativeCommitHandoff(
+                    session, inspection.animationIdentity,
+                    inspection.actualType));
+            scheduleUnifiedNativeEndTimeout(session);
+            log(Log.INFO, TAG,
+                    "Accepted the same Xiaomi predictive spring for standard return-home"
+                            + ", generation=" + session.generation
+                            + ", signalAttempt="
+                            + token.signal.attempt
+                            + ", ownerAttempt="
+                            + inspection.attempt
+                            + ", from=CLOSE_TO_DRAG"
+                            + ", to=" + inspection.actualType
+                            + ", running=" + inspection.running
+                            + ", finishComplete="
+                            + inspection.finishComplete
+                            + ", animationIdentity="
+                            + shortObject(
+                            inspection.animationIdentity)
+                            + ", leash="
+                            + shortObject(session.closingLeash));
+        }
+
+        private boolean isExactUnifiedStandardCommitToken(
+                ReturnHomeSession session,
+                UnifiedNativeStandardCommitToken token,
+                int requiredPhase) {
+            StandardReturnHomeCommitSignal signal = token == null
+                    ? null : token.signal;
+            return session != null && token != null
+                    && token == session.unifiedNativeStandardCommit
+                    && token.session == session
+                    && token.generation == session.generation
+                    && token.windowElement
+                    == session.nativeWindowElement
+                    && token.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && token.phase.get() == requiredPhase
+                    && token.animParams.get() != null
+                    && token.animToEpoch > 0L
+                    && token.animToEpoch
+                    == session.unifiedNativeActiveAnimToEpoch
+                    && session.unifiedNativeCommitTransition == null
+                    && signal != null
+                    && signal.attempt > 0L
+                    && signal.taskId >= 0
+                    && signal.transitionDebugId >= 0
+                    && signal.taskId == session.unifiedNativeTaskId
+                    && signal.arbiterGeneration
+                    == miuiHomeSystemUiInputArbiterGeneration
+                    && signal.launcherSessionGeneration
+                    == session.generation
+                    && signal.matchesInput(
+                    session.acceptedInputIdentity)
+                    && isStandardSingleTaskReturnHome(session);
+        }
+
+        private boolean isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                ReturnHomeSession session,
+                UnifiedNativeStandardCommitToken token) {
+            int phase = token == null
+                    ? UnifiedNativeStandardCommitToken.PHASE_INVALID
+                    : token.phase.get();
+            return (phase == UnifiedNativeStandardCommitToken.PHASE_ENTERING
+                    || phase
+                    == UnifiedNativeStandardCommitToken.PHASE_ENTERED
+                    || phase
+                    == UnifiedNativeStandardCommitToken.PHASE_CONSUMED)
+                    && isExactUnifiedStandardCommitToken(
+                    session, token, phase);
+        }
+
+        private boolean adoptUnifiedStandardCommitToken(
+                UnifiedNativeStandardCommitToken token) {
+            if (token == null) {
+                return false;
+            }
+            while (true) {
+                int phase = token.phase.get();
+                if (phase != UnifiedNativeStandardCommitToken.PHASE_ENTERING
+                        && phase
+                        != UnifiedNativeStandardCommitToken.PHASE_ENTERED
+                        && phase
+                        != UnifiedNativeStandardCommitToken.PHASE_CONSUMED) {
+                    return false;
+                }
+                if (token.phase.compareAndSet(
+                        phase,
+                        UnifiedNativeStandardCommitToken.PHASE_ADOPTED)) {
+                    return true;
+                }
+            }
+        }
+
+        private boolean isUnifiedCommitTransitionAtAnimToBoundary(
+                ReturnHomeSession session,
+                UnifiedNativeCommitTransitionToken transition) {
+            if (session == null || transition == null
+                    || transition.session != session
+                    || transition.generation != session.generation
+                    || transition != session.unifiedNativeCommitTransition
+                    || transition.windowElement
+                    != session.nativeWindowElement
+                    || transition.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || transition.animParams.get() == null
+                    || transition.animToEpoch <= 0L
+                    || transition.animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch
+                    || transition.transitionToken == null
+                    || transition.transitionInfo == null
+                    || readTransitionDebugId(
+                    transition.transitionInfo)
+                    != transition.transitionDebugId) {
+                return false;
+            }
+            int phase = transition.phase.get();
+            return phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_ENTERING
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_ENTERED
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_CONSUMED;
+        }
+
+        private boolean adoptUnifiedCommitTransitionToken(
+                UnifiedNativeCommitTransitionToken transition) {
+            if (transition == null) {
+                return false;
+            }
+            while (true) {
+                int phase = transition.phase.get();
+                if (phase
+                        != UnifiedNativeCommitTransitionToken.PHASE_ENTERING
+                        && phase
+                        != UnifiedNativeCommitTransitionToken.PHASE_ENTERED
+                        && phase
+                        != UnifiedNativeCommitTransitionToken.PHASE_CONSUMED) {
+                    return false;
+                }
+                if (transition.phase.compareAndSet(
+                        phase,
+                        UnifiedNativeCommitTransitionToken.PHASE_ADOPTED)) {
+                    return true;
+                }
+            }
+        }
+
+        private boolean hasProvisionalUnifiedCommitBoundary(
+                ReturnHomeSession session) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCommitPending) {
+                return false;
+            }
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null
+                    && standard == session.unifiedNativeStandardCommit
+                    && standard.session == session
+                    && standard.generation == session.generation
+                    && standard.windowElement
+                    == session.nativeWindowElement
+                    && standard.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && standard.signal != null
+                    && standard.signal.taskId
+                    == session.unifiedNativeTaskId
+                    && standard.signal.arbiterGeneration
+                    == miuiHomeSystemUiInputArbiterGeneration
+                    && standard.signal.launcherSessionGeneration
+                    == session.generation
+                    && standard.signal.matchesInput(
+                    session.acceptedInputIdentity)) {
+                int phase = standard.phase.get();
+                if (phase
+                        == UnifiedNativeStandardCommitToken.PHASE_PENDING
+                        || phase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERING
+                        || phase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERED
+                        || phase
+                        == UnifiedNativeStandardCommitToken.PHASE_CONSUMED
+                        || phase
+                        == UnifiedNativeStandardCommitToken.PHASE_ADOPTED) {
+                    return true;
+                }
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (transition == null
+                    || transition != session.unifiedNativeCommitTransition
+                    || transition.session != session
+                    || transition.generation != session.generation
+                    || transition.windowElement
+                    != session.nativeWindowElement
+                    || transition.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || transition.transitionToken == null
+                    || transition.transitionInfo == null) {
+                return false;
+            }
+            int phase = transition.phase.get();
+            return phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_PENDING
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_ENTERING
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_ENTERED
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_CONSUMED
+                    || phase
+                    == UnifiedNativeCommitTransitionToken.PHASE_ADOPTED;
+        }
+
+        private void adoptUnifiedNativeCommitIfStarted(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.unifiedNativeCommitPending
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement != windowElement
+                    || params == null) {
+                return;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (transition == null
+                    || transition.session != session
+                    || transition.generation != session.generation
+                    || transition != session.unifiedNativeCommitTransition
+                    || transition.windowElement != windowElement
+                    || transition.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || transition.animParams.get() != params) {
+                return;
+            }
+            int phase = transition.phase.get();
+            if (phase == UnifiedNativeCommitTransitionToken.PHASE_ENTERING) {
+                if (!transition.phase.compareAndSet(
+                        UnifiedNativeCommitTransitionToken.PHASE_ENTERING,
+                        UnifiedNativeCommitTransitionToken.PHASE_ENTERED)) {
+                    return;
+                }
+            } else if (phase
+                    != UnifiedNativeCommitTransitionToken.PHASE_ENTERED) {
+                return;
+            }
+            if (!isExactUnifiedCommitTransition(
+                    session, transition, windowElement,
+                    UnifiedNativeCommitTransitionToken.PHASE_ENTERED)) {
+                return;
+            }
+            Object typeObject = invokeAnyMethod(
+                    params, "getAnimType", new Object[0]);
+            String typeName = typeObject instanceof Enum<?>
+                    ? ((Enum<?>) typeObject).name()
+                    : String.valueOf(typeObject);
+            if (!isReturnHomeNativeCloseType(typeName)) {
+                return;
+            }
+            Object currentElement = invokeAnyMethod(
+                    session.stateManager, "getCurrentWindowElement",
+                    new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object targetSet = invokeAnyMethod(
+                    params, "getTargetApps", new Object[0]);
+            Object closingTarget = resolveUnifiedNativeClosingTarget(
+                    session, targetSet);
+            if (currentElement != windowElement
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || closingTarget == null) {
+                log(Log.WARN, TAG,
+                        "Rejected Xiaomi unified commit candidate"
+                                + ", generation=" + session.generation
+                                + ", requestedType=" + typeName
+                                + ", sameIdentity="
+                                + (currentIdentity
+                                == session.unifiedNativeAnimationIdentity)
+                                + ", sameLeash="
+                                + (closingTarget != null));
+                return;
+            }
+            if ("CLOSE_TO_ELEMENT".equals(typeName)
+                    && !hasCommittedUnifiedElementGeometry(
+                    session, transition, windowElement,
+                    currentIdentity)) {
+                log(Log.INFO, TAG,
+                        "Deferred Xiaomi unified element commit until start geometry is committed"
+                                + ", generation="
+                                + session.generation
+                                + ", debugId="
+                                + transition.transitionDebugId);
+                return;
+            }
+            if (!transition.phase.compareAndSet(
+                    UnifiedNativeCommitTransitionToken.PHASE_ENTERED,
+                    UnifiedNativeCommitTransitionToken.PHASE_CONSUMED)) {
+                return;
+            }
+            long attempt = session.unifiedNativeRetargetAttempts
+                    .incrementAndGet();
+            session.unifiedNativeCommitAttempt = attempt;
+            session.unifiedNativeCommitRequestedType = typeName;
+            log(Log.INFO, TAG,
+                    "Queued Xiaomi unified commit verification"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + attempt
+                            + ", requestedType=" + typeName
+                            + ", animationIdentity="
+                            + shortObject(currentIdentity));
+            try {
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativeRetargetInspection inspection =
+                            inspectUnifiedNativeRetarget(
+                                    session, attempt, typeName, false,
+                                    transition);
+                    publishUnifiedProvisionalCommit(
+                            session, null, transition, inspection);
+                    handler.post(() -> acceptUnifiedNativeCommit(
+                            session, inspection));
+                });
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not queue Xiaomi commit owner-tail verification"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + attempt,
+                        throwable);
+            }
+        }
+
+        private UnifiedNativeRetargetInspection inspectUnifiedNativeRetarget(
+                ReturnHomeSession session, long attempt,
+                String requestedType, boolean cancel) {
+            return inspectUnifiedNativeRetarget(
+                    session, attempt, requestedType, cancel, null);
+        }
+
+        private void publishUnifiedProvisionalCommit(
+                ReturnHomeSession session,
+                UnifiedNativeStandardCommitToken standardToken,
+                UnifiedNativeCommitTransitionToken transitionToken,
+                UnifiedNativeRetargetInspection inspection) {
+            UnifiedNativeConfiguredAnimToSnapshot configured =
+                    session == null ? null
+                            : session.unifiedNativeConfiguredAnimTo.get();
+            boolean standard = standardToken != null
+                    && transitionToken == null;
+            boolean exact = session != null && inspection != null
+                    && currentSession == session
+                    && session.finished.get() == 0
+                    && session.unifiedNativeCommitPending
+                    && !session.nativeAnimationStarted
+                    && !session.unifiedNativeCleanupVerified
+                    && inspection.failure == null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && inspection.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && inspection.requestedType.equals(
+                    inspection.actualType)
+                    && isReturnHomeNativeCloseType(
+                    inspection.actualType)
+                    && configured != null
+                    && configured
+                    == session.unifiedNativeConfiguredAnimTo.get()
+                    && !configured.cancel
+                    && configured.animationType.equals(
+                    inspection.actualType)
+                    && configured.animToEpoch
+                    == session.unifiedNativeActiveAnimToEpoch
+                    && ((standard
+                    && configured.ownerToken == standardToken
+                    && standardToken.ownerAttempt
+                    == inspection.attempt
+                    && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, standardToken))
+                    || (!standard
+                    && configured.ownerToken == transitionToken
+                    && inspection.commitTransition == transitionToken
+                    && session.unifiedNativeCommitAttempt
+                    == inspection.attempt
+                    && isUnifiedCommitTransitionAtAnimToBoundary(
+                    session, transitionToken)));
+            if (!exact) {
+                return;
+            }
+            UnifiedNativeProvisionalCommitSnapshot snapshot =
+                    new UnifiedNativeProvisionalCommitSnapshot(
+                            session, configured, standardToken,
+                            transitionToken, inspection);
+            UnifiedNativeProvisionalCommitSnapshot previous =
+                    session.unifiedNativeProvisionalCommit
+                            .getAndSet(snapshot);
+            if (previous != null && previous != snapshot) {
+                previous.phase.compareAndSet(
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_PENDING,
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            log(Log.INFO, TAG,
+                    "Published provisional Xiaomi final-owner acceptance"
+                            + ", generation=" + session.generation
+                            + ", ownerAttempt="
+                            + inspection.attempt
+                            + ", animToEpoch="
+                            + configured.animToEpoch
+                            + ", type="
+                            + inspection.actualType
+                            + ", standard=" + standard);
+        }
+
+        private UnifiedNativePendingInterruptionSnapshot
+        armUnifiedPendingCommitInterruption(
+                ReturnHomeSession session, Object expectedWindowElement,
+                String reason) throws Throwable {
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.nativeHandoffStarted
+                    || !session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement
+                    != expectedWindowElement
+                    || session.unifiedNativeConfiguredAnimTo.get()
+                    != null) {
+                return null;
+            }
+            Object ownerToken;
+            Object animParams;
+            long animToEpoch;
+            long ownerAttempt;
+            UnifiedNativeCommitTransitionToken transition = null;
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null
+                    && standard.ownerAttempt > 0L
+                    && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, standard)) {
+                ownerToken = standard;
+                animParams = standard.animParams.get();
+                animToEpoch = standard.animToEpoch;
+                ownerAttempt = standard.ownerAttempt;
+            } else {
+                transition = session.unifiedNativeCommitTransition;
+                if (transition == null
+                        || session.unifiedNativeCommitAttempt <= 0L
+                        || !isUnifiedCommitTransitionAtAnimToBoundary(
+                        session, transition)) {
+                    return null;
+                }
+                int phase = transition.phase.get();
+                if (!isExactUnifiedCommitTransition(
+                        session, transition,
+                        expectedWindowElement, phase)) {
+                    return null;
+                }
+                ownerToken = transition;
+                animParams = transition.animParams.get();
+                animToEpoch = transition.animToEpoch;
+                ownerAttempt =
+                        session.unifiedNativeCommitAttempt;
+            }
+            if (animParams == null || animToEpoch <= 0L
+                    || animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch) {
+                return null;
+            }
+            Object requestedTypeObject = invokeAnyMethod(
+                    animParams, "getAnimType", new Object[0]);
+            String requestedType = requestedTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) requestedTypeObject).name()
+                    : String.valueOf(requestedTypeObject);
+            if (!isReturnHomeNativeCloseType(requestedType)
+                    || ("CLOSE_TO_ELEMENT".equals(requestedType)
+                    && !hasCommittedUnifiedElementGeometry(
+                    session, transition, expectedWindowElement,
+                    session.unifiedNativeAnimationIdentity))) {
+                return null;
+            }
+            Object currentElement = invokeAnyMethod(
+                    session.stateManager,
+                    "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    expectedWindowElement,
+                    "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    expectedWindowElement,
+                    "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object targetSet = invokeAnyMethod(
+                    expectedWindowElement,
+                    "getRemoteTargetSet", new Object[0]);
+            if (currentElement != expectedWindowElement
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || (!"CLOSE_TO_DRAG".equals(currentType)
+                    && !requestedType.equals(currentType))
+                    || resolveUnifiedNativeClosingTarget(
+                    session, targetSet) == null) {
+                return null;
+            }
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    new UnifiedNativePendingInterruptionSnapshot(
+                            session, animParams, ownerToken,
+                            animToEpoch, ownerAttempt,
+                            requestedType);
+            synchronized (snapshot.configLock) {
+                boolean ownerStillAtBoundary = ownerToken
+                        instanceof UnifiedNativeStandardCommitToken
+                        ? isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                        session,
+                        (UnifiedNativeStandardCommitToken) ownerToken)
+                        : session.unifiedNativeCommitAttempt == ownerAttempt
+                        && isUnifiedCommitTransitionAtAnimToBoundary(
+                        session,
+                        (UnifiedNativeCommitTransitionToken) ownerToken);
+                if (currentSession != session
+                        || session.finished.get() != 0
+                        || session.cleaned.get() != 0
+                        || session.unifiedNativeCleanupVerified
+                        || session.nativeAnimationStarted
+                        || session.unifiedNativeConfiguredAnimTo.get()
+                        != null
+                        || session.unifiedNativeActiveAnimToEpoch
+                        != animToEpoch
+                        || unifiedConfigHookState(ownerToken) == null
+                        || unifiedConfigHookState(ownerToken).get()
+                        != UNIFIED_CONFIG_HOOK_PENDING
+                        || !ownerStillAtBoundary) {
+                    return null;
+                }
+                while (true) {
+                    UnifiedNativePendingInterruptionSnapshot existing =
+                            session.unifiedNativePendingInterruption.get();
+                    if (existing != null
+                            && existing.phase.get()
+                            == UnifiedNativePendingInterruptionSnapshot
+                            .PHASE_PENDING
+                            && existing.session == session
+                            && existing.windowElement
+                            == expectedWindowElement
+                            && existing.animationIdentity
+                            == currentIdentity
+                            && existing.animParams == animParams
+                            && existing.ownerToken == ownerToken
+                            && existing.animToEpoch == animToEpoch
+                            && existing.ownerAttempt == ownerAttempt
+                            && existing.requestedType.equals(
+                            requestedType)) {
+                        if (existing.configDisposition.get()
+                                != UnifiedNativePendingInterruptionSnapshot
+                                .CONFIG_PENDING) {
+                            // The config hook already acknowledged this exact queued lambda.
+                            // Keep the live native-callback token, but never resurrect its
+                            // params tombstone after CONFIG_ACK_SKIPPED removed it.
+                            return existing;
+                        }
+                        UnifiedNativePendingInterruptionSnapshot mapped =
+                                pendingUnifiedInterruptedAnimToConfigs
+                                        .putIfAbsent(
+                                                new ObjectIdentityKey(
+                                                        animParams),
+                                                existing);
+                        return mapped == null || mapped == existing
+                                ? existing : null;
+                    }
+                    if (existing != null
+                            && existing.phase.get()
+                            != UnifiedNativePendingInterruptionSnapshot
+                            .PHASE_INVALID) {
+                        return null;
+                    }
+                    if (session.unifiedNativePendingInterruption
+                            .compareAndSet(existing, snapshot)) {
+                        UnifiedNativePendingInterruptionSnapshot mapped =
+                                pendingUnifiedInterruptedAnimToConfigs
+                                        .putIfAbsent(
+                                                new ObjectIdentityKey(
+                                                        animParams),
+                                                snapshot);
+                        if (mapped != null && mapped != snapshot) {
+                            session.unifiedNativePendingInterruption
+                                    .compareAndSet(snapshot, null);
+                            snapshot.phase.set(
+                                    UnifiedNativePendingInterruptionSnapshot
+                                            .PHASE_INVALID);
+                            log(Log.ERROR, TAG,
+                                    "Rejected colliding Xiaomi animTo interruption tombstone"
+                                            + ", generation="
+                                            + session.generation
+                                            + ", animToEpoch="
+                                            + animToEpoch
+                                            + ", existingGeneration="
+                                            + mapped.generation
+                                            + ", existingEpoch="
+                                            + mapped.animToEpoch);
+                            return null;
+                        }
+                        if (existing != null) {
+                            existing.phase.set(
+                                    UnifiedNativePendingInterruptionSnapshot
+                                            .PHASE_INVALID);
+                            if (existing.mutation.get()
+                                    == UnifiedNativePendingInterruptionSnapshot
+                                    .MUTATION_NONE) {
+                                existing.configDisposition.compareAndSet(
+                                        UnifiedNativePendingInterruptionSnapshot
+                                                .CONFIG_PENDING,
+                                        UnifiedNativePendingInterruptionSnapshot
+                                                .CONFIG_INVALID);
+                                pendingUnifiedInterruptedAnimToConfigs.remove(
+                                        new ObjectIdentityKey(
+                                                existing.animParams),
+                                        existing);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            log(Log.INFO, TAG,
+                    "Armed exact pre-config Xiaomi interruption boundary"
+                            + ", generation=" + session.generation
+                            + ", ownerAttempt=" + ownerAttempt
+                            + ", animToEpoch=" + animToEpoch
+                            + ", requestedType=" + requestedType
+                            + ", currentType=" + currentType
+                            + ", reason=" + reason);
+            return snapshot;
+        }
+
+        private boolean isExactUnifiedPendingInterruption(
+                ReturnHomeSession session,
+                UnifiedNativePendingInterruptionSnapshot snapshot,
+                Object currentElement, Object currentIdentity,
+                String currentType, boolean requireTokenBoundary) {
+            if (session == null || snapshot == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || snapshot
+                    != session.unifiedNativePendingInterruption.get()
+                    || snapshot.phase.get()
+                    != UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING
+                    || snapshot.session != session
+                    || snapshot.generation != session.generation
+                    || snapshot.windowElement
+                    != session.nativeWindowElement
+                    || snapshot.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || snapshot.animToEpoch <= 0L
+                    || snapshot.animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch
+                    || snapshot.animParams == null
+                    || currentElement != snapshot.windowElement
+                    || currentIdentity != snapshot.animationIdentity
+                    || (!"CLOSE_TO_DRAG".equals(currentType)
+                    && !snapshot.requestedType.equals(currentType))) {
+                return false;
+            }
+            try {
+                Object targetSet = invokeAnyMethod(
+                        snapshot.windowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                if (resolveUnifiedNativeClosingTarget(
+                        session, targetSet) == null) {
+                    return false;
+                }
+            } catch (Throwable throwable) {
+                return false;
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                UnifiedNativeStandardCommitToken token =
+                        (UnifiedNativeStandardCommitToken)
+                                snapshot.ownerToken;
+                boolean identity = token.session == session
+                        && token.generation == session.generation
+                        && token.windowElement == snapshot.windowElement
+                        && token.animationIdentity
+                        == snapshot.animationIdentity
+                        && token.animParams.get()
+                        == snapshot.animParams
+                        && token.animToEpoch
+                        == snapshot.animToEpoch
+                        && token.ownerAttempt
+                        == snapshot.ownerAttempt;
+                return identity && (!requireTokenBoundary
+                        || isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                        session, token));
+            }
+            if (snapshot.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                UnifiedNativeCommitTransitionToken token =
+                        (UnifiedNativeCommitTransitionToken)
+                                snapshot.ownerToken;
+                boolean identity = token.session == session
+                        && token.generation == session.generation
+                        && token.windowElement == snapshot.windowElement
+                        && token.animationIdentity
+                        == snapshot.animationIdentity
+                        && token.animParams.get()
+                        == snapshot.animParams
+                        && token.animToEpoch
+                        == snapshot.animToEpoch
+                        && snapshot.ownerAttempt > 0L;
+                return identity && (!requireTokenBoundary
+                        || (session.unifiedNativeCommitAttempt
+                        == snapshot.ownerAttempt
+                        && isUnifiedCommitTransitionAtAnimToBoundary(
+                        session, token)));
+            }
+            return false;
+        }
+
+        private void invalidateUnifiedPendingInterruption(
+                ReturnHomeSession session, String reason) {
+            if (session == null) {
+                return;
+            }
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    session.unifiedNativePendingInterruption.get();
+            if (snapshot == null) {
+                return;
+            }
+            synchronized (snapshot.configLock) {
+                if (snapshot
+                        != session.unifiedNativePendingInterruption.get()) {
+                    return;
+                }
+                if (snapshot.phase.get()
+                        == UnifiedNativePendingInterruptionSnapshot
+                        .PHASE_PENDING
+                        && snapshot.mutation.get()
+                        != UnifiedNativePendingInterruptionSnapshot
+                        .MUTATION_NONE) {
+                    // A native cancel already owns this exact WindowElement. Retain both the
+                    // callback token and the params-identity tombstone until the native callback
+                    // consumes the former and the queued gesture-executor config acks the latter.
+                    log(Log.INFO, TAG,
+                            "Retained terminal Xiaomi animTo interruption tombstone"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", animToEpoch="
+                                    + snapshot.animToEpoch
+                                    + ", mutation="
+                                    + snapshot.mutation.get()
+                                    + ", configDisposition="
+                                    + snapshot.configDisposition.get()
+                                    + ", reason=" + reason);
+                    return;
+                }
+                if (!session.unifiedNativePendingInterruption
+                        .compareAndSet(snapshot, null)) {
+                    return;
+                }
+                snapshot.phase.compareAndSet(
+                        UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING,
+                        UnifiedNativePendingInterruptionSnapshot.PHASE_INVALID);
+                snapshot.configDisposition.compareAndSet(
+                        UnifiedNativePendingInterruptionSnapshot.CONFIG_PENDING,
+                        UnifiedNativePendingInterruptionSnapshot.CONFIG_INVALID);
+                pendingUnifiedInterruptedAnimToConfigs.remove(
+                        new ObjectIdentityKey(snapshot.animParams), snapshot);
+                log(Log.INFO, TAG,
+                        "Invalidated pre-config Xiaomi interruption boundary"
+                                + ", generation="
+                                + session.generation
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch
+                                + ", configDisposition="
+                                + snapshot.configDisposition.get()
+                                + ", reason=" + reason);
+            }
+        }
+
+        private boolean consumeUnifiedPendingInterruption(
+                ReturnHomeSession session,
+                UnifiedNativePendingInterruptionSnapshot snapshot,
+                String reason) {
+            if (session == null || snapshot == null
+                    || snapshot
+                    != session.unifiedNativePendingInterruption.get()
+                    || !snapshot.phase.compareAndSet(
+                    UnifiedNativePendingInterruptionSnapshot.PHASE_PENDING,
+                    UnifiedNativePendingInterruptionSnapshot.PHASE_CONSUMED)) {
+                return false;
+            }
+            session.unifiedNativePendingInterruption.compareAndSet(
+                    snapshot, null);
+            Runnable nativeTimeout = session.nativeTimeout;
+            if (nativeTimeout != null) {
+                handler.removeCallbacks(nativeTimeout);
+            }
+            session.nativeTimeout = null;
+            UnifiedNativeStandardCommitToken standard =
+                    session.unifiedNativeStandardCommit;
+            if (standard != null) {
+                standard.phase.set(
+                        UnifiedNativeStandardCommitToken.PHASE_INVALID);
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (transition != null) {
+                transition.phase.set(
+                        UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+            }
+            UnifiedNativeProvisionalCommitSnapshot provisional =
+                    session.unifiedNativeProvisionalCommit.getAndSet(null);
+            if (provisional != null) {
+                provisional.phase.set(
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            UnifiedNativeTerminalFailureSnapshot terminal =
+                    session.unifiedNativeTerminalFailure.get();
+            if (terminal != null
+                    && terminal.animToEpoch == snapshot.animToEpoch
+                    && terminal.phase.compareAndSet(
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_PENDING,
+                    UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID)) {
+                session.unifiedNativeTerminalFailure.compareAndSet(
+                        terminal, null);
+            }
+            session.unifiedNativeConfiguredAnimTo.set(null);
+            session.unifiedNativeStandardCommit = null;
+            session.unifiedNativeCommitTransition = null;
+            session.unifiedNativeCommitPending = false;
+            session.unifiedNativeCleanupVerified = true;
+            log(Log.INFO, TAG,
+                    "Consumed exact pre-config Xiaomi interruption boundary"
+                            + ", generation=" + session.generation
+                            + ", ownerAttempt="
+                            + snapshot.ownerAttempt
+                            + ", animToEpoch="
+                            + snapshot.animToEpoch
+                            + ", requestedType="
+                            + snapshot.requestedType
+                            + ", configDisposition="
+                            + snapshot.configDisposition.get()
+                            + ", reason=" + reason);
+            if (snapshot.configDisposition.get()
+                    == UnifiedNativePendingInterruptionSnapshot
+                    .CONFIG_PENDING) {
+                scheduleUnifiedInterruptedConfigOwnerDrain(
+                        snapshot, reason);
+            }
+            return true;
+        }
+
+        private boolean adoptConfiguredCommitForInterruption(
+                ReturnHomeSession session, Object expectedWindowElement,
+                String reason) throws Throwable {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.ERROR, TAG,
+                        "Rejected provisional Xiaomi commit adoption off main"
+                                + ", generation="
+                                + (session == null ? 0L
+                                : session.generation)
+                                + ", reason=" + reason);
+                return false;
+            }
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.nativeHandoffStarted
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeWindowElement
+                    != expectedWindowElement) {
+                return false;
+            }
+            if (session.nativeAnimationStarted) {
+                return session.nativeContinuationVerified
+                        && session.nativeAnimationIdentity
+                        == session.unifiedNativeAnimationIdentity
+                        && isReturnHomeNativeCloseType(
+                        session.nativeAnimationType);
+            }
+            if (!session.unifiedNativeCommitPending) {
+                return false;
+            }
+
+            UnifiedNativeConfiguredAnimToSnapshot configured =
+                    session.unifiedNativeConfiguredAnimTo.get();
+            if (configured == null) {
+                UnifiedNativePendingInterruptionSnapshot armed =
+                        armUnifiedPendingCommitInterruption(
+                        session, expectedWindowElement,
+                        "awaitConfigured:" + reason);
+                if (armed != null) {
+                    return false;
+                }
+                // The config owner may have won the same configLock immediately before arm's
+                // locked recheck. Adopt that freshly published exact owner in this invocation;
+                // otherwise the caller would fall through into Xiaomi's cancel path and mutate
+                // the WindowElement before a post hook could recover it.
+                configured = session.unifiedNativeConfiguredAnimTo.get();
+                if (configured == null) {
+                    return false;
+                }
+            }
+            if (configured
+                    != session.unifiedNativeConfiguredAnimTo.get()
+                    || configured.cancel
+                    || configured.session != session
+                    || configured.generation != session.generation
+                    || configured.windowElement
+                    != expectedWindowElement
+                    || configured.animationIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || configured.animToEpoch <= 0L
+                    || configured.animToEpoch
+                    != session.unifiedNativeActiveAnimToEpoch
+                    || !isReturnHomeNativeCloseType(
+                    configured.animationType)) {
+                return false;
+            }
+
+            Object currentElement = invokeAnyMethod(
+                    session.stateManager,
+                    "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    expectedWindowElement,
+                    "getAnimSymbol", new Object[0]);
+            Object actualTypeObject = invokeAnyMethod(
+                    currentIdentity, "getLastAminType", new Object[0]);
+            String actualType = actualTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) actualTypeObject).name()
+                    : String.valueOf(actualTypeObject);
+            Object requestedTypeObject = invokeAnyMethod(
+                    configured.animParams,
+                    "getAnimType", new Object[0]);
+            String requestedType = requestedTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) requestedTypeObject).name()
+                    : String.valueOf(requestedTypeObject);
+            Object targetSet = invokeAnyMethod(
+                    expectedWindowElement,
+                    "getRemoteTargetSet", new Object[0]);
+            if (currentElement != expectedWindowElement
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || !configured.animationType.equals(actualType)
+                    || !requestedType.equals(actualType)
+                    || resolveUnifiedNativeClosingTarget(
+                    session, targetSet) == null) {
+                return false;
+            }
+
+            UnifiedNativeStandardCommitToken standard = null;
+            UnifiedNativeCommitTransitionToken transition = null;
+            long attempt;
+            if (configured.ownerToken
+                    instanceof UnifiedNativeStandardCommitToken) {
+                standard = (UnifiedNativeStandardCommitToken)
+                        configured.ownerToken;
+                if (standard.animParams.get()
+                        != configured.animParams
+                        || standard.animToEpoch
+                        != configured.animToEpoch
+                        || standard.ownerAttempt <= 0L
+                        || !isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                        session, standard)) {
+                    return false;
+                }
+                attempt = standard.ownerAttempt;
+            } else if (configured.ownerToken
+                    instanceof UnifiedNativeCommitTransitionToken) {
+                transition = (UnifiedNativeCommitTransitionToken)
+                        configured.ownerToken;
+                if (transition.animParams.get()
+                        != configured.animParams
+                        || transition.animToEpoch
+                        != configured.animToEpoch
+                        || session.unifiedNativeCommitAttempt <= 0L
+                        || !isUnifiedCommitTransitionAtAnimToBoundary(
+                        session, transition)
+                        || ("CLOSE_TO_ELEMENT".equals(actualType)
+                        && !hasCommittedUnifiedElementGeometry(
+                        session, transition,
+                        expectedWindowElement, currentIdentity))) {
+                    return false;
+                }
+                attempt = session.unifiedNativeCommitAttempt;
+            } else {
+                return false;
+            }
+
+            UnifiedNativeProvisionalCommitSnapshot provisional =
+                    session.unifiedNativeProvisionalCommit.get();
+            UnifiedNativeRetargetInspection inspection = null;
+            boolean claimedProvisional = false;
+            if (provisional != null
+                    && provisional
+                    == session.unifiedNativeProvisionalCommit.get()
+                    && provisional.session == session
+                    && provisional.generation == session.generation
+                    && provisional.windowElement
+                    == expectedWindowElement
+                    && provisional.animationIdentity == currentIdentity
+                    && provisional.configured == configured
+                    && provisional.standardToken == standard
+                    && provisional.transitionToken == transition
+                    && provisional.ownerAttempt == attempt
+                    && provisional.animToEpoch
+                    == configured.animToEpoch
+                    && provisional.animationType.equals(actualType)
+                    && provisional.phase.compareAndSet(
+                    UnifiedNativeProvisionalCommitSnapshot.PHASE_PENDING,
+                    UnifiedNativeProvisionalCommitSnapshot.PHASE_ADOPTING)) {
+                inspection = provisional.inspection;
+                claimedProvisional = true;
+            }
+            if (inspection == null) {
+                inspection = new UnifiedNativeRetargetInspection(
+                        attempt, requestedType, actualType,
+                        currentIdentity, true, true,
+                        configured.running, configured.finishComplete,
+                        false, transition, null);
+            }
+
+            if (standard != null) {
+                acceptUnifiedStandardCommit(
+                        session, standard, inspection);
+            } else {
+                acceptUnifiedNativeCommit(session, inspection);
+            }
+            boolean adopted = currentSession == session
+                    && session.finished.get() == 0
+                    && session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && session.nativeAnimationIdentity == currentIdentity
+                    && actualType.equals(session.nativeAnimationType);
+            if (claimedProvisional) {
+                provisional.phase.set(adopted
+                        ? UnifiedNativeProvisionalCommitSnapshot.PHASE_ADOPTED
+                        : UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            log(adopted ? Log.INFO : Log.WARN, TAG,
+                    "Adopted configured Xiaomi commit before launcher interruption"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason
+                            + ", adopted=" + adopted
+                            + ", ownerAttempt=" + attempt
+                            + ", animToEpoch="
+                            + configured.animToEpoch
+                            + ", type=" + actualType
+                            + ", usedProvisional="
+                            + claimedProvisional);
+            return adopted;
+        }
+
+        private UnifiedNativeRetargetInspection inspectUnifiedNativeRetarget(
+                ReturnHomeSession session, long attempt,
+                String requestedType, boolean cancel,
+                UnifiedNativeCommitTransitionToken commitTransition) {
+            try {
+                Object animationIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object typeObject = animationIdentity == null ? null
+                        : invokeAnyMethod(animationIdentity,
+                        "getLastAminType", new Object[0]);
+                String actualType = typeObject instanceof Enum<?>
+                        ? ((Enum<?>) typeObject).name()
+                        : String.valueOf(typeObject);
+                boolean running = animationIdentity != null
+                        && Boolean.TRUE.equals(invokeAnyMethod(
+                        animationIdentity, "isRunning", new Object[0]));
+                Object targetSet = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                boolean exactTarget = resolveUnifiedNativeClosingTarget(
+                        session, targetSet) != null;
+                boolean finishComplete = Boolean.TRUE.equals(readField(
+                        session.nativeWindowElement, "mFinishComplete"));
+                boolean fullscreen = false;
+                if (cancel && animationIdentity != null) {
+                    Object rectObject = invokeAnyMethod(
+                            animationIdentity, "getCurrentRectF",
+                            new Object[0]);
+                    float tolerance = Math.max(2.0f, dp(2.0f));
+                    fullscreen = rectObject instanceof RectF
+                            && rectsNear((RectF) rectObject,
+                            new RectF(session.startRect), tolerance);
+                }
+                return new UnifiedNativeRetargetInspection(
+                        attempt, requestedType, actualType,
+                        animationIdentity,
+                        animationIdentity
+                                == session.unifiedNativeAnimationIdentity,
+                        exactTarget, running, finishComplete,
+                        fullscreen, commitTransition, null);
+            } catch (Throwable throwable) {
+                return new UnifiedNativeRetargetInspection(
+                        attempt, requestedType, "unknown", null,
+                        false, false, false, false,
+                        false, commitTransition, throwable);
+            }
+        }
+
+        private boolean rectsNear(RectF first, RectF second,
+                                  float tolerance) {
+            return first != null && second != null
+                    && Math.abs(first.left - second.left) <= tolerance
+                    && Math.abs(first.top - second.top) <= tolerance
+                    && Math.abs(first.right - second.right) <= tolerance
+                    && Math.abs(first.bottom - second.bottom) <= tolerance;
+        }
+
+        private UnifiedNativeFinishSnapshot captureUnifiedNativeFinishSnapshot(
+                ReturnHomeSession session, Object listener,
+                Object animationIdentity) {
+            Object callbackStateManager = null;
+            Object currentElement = null;
+            Object currentIdentity = null;
+            String actualType = "unknown";
+            boolean exactTarget = false;
+            boolean running = false;
+            boolean finishComplete = false;
+            boolean fullscreen = false;
+            Throwable failure = null;
+            try {
+                callbackStateManager = readField(listener, "this$0");
+                currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+                currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement, "getAnimSymbol",
+                        new Object[0]);
+                Object typeObject = animationIdentity == null ? null
+                        : invokeAnyMethod(animationIdentity,
+                        "getLastAminType", new Object[0]);
+                if (typeObject == null) {
+                    typeObject = invokeAnyMethod(
+                            session.nativeWindowElement,
+                            "getCurrentAnimType", new Object[0]);
+                }
+                actualType = typeObject instanceof Enum<?>
+                        ? ((Enum<?>) typeObject).name()
+                        : String.valueOf(typeObject);
+                running = animationIdentity != null
+                        && Boolean.TRUE.equals(invokeAnyMethod(
+                        animationIdentity, "isRunning", new Object[0]));
+                Object targetSet = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                exactTarget = resolveUnifiedNativeClosingTarget(
+                        session, targetSet) != null;
+                finishComplete = Boolean.TRUE.equals(readField(
+                        session.nativeWindowElement, "mFinishComplete"));
+                if (animationIdentity != null) {
+                    Object rectObject = invokeAnyMethod(
+                            animationIdentity, "getCurrentRectF",
+                            new Object[0]);
+                    float tolerance = Math.max(2.0f, dp(2.0f));
+                    fullscreen = rectObject instanceof RectF
+                            && rectsNear((RectF) rectObject,
+                            new RectF(session.startRect), tolerance);
+                }
+            } catch (Throwable throwable) {
+                failure = throwable;
+            }
+            return new UnifiedNativeFinishSnapshot(
+                    session, callbackStateManager, currentElement,
+                    animationIdentity, currentIdentity, actualType,
+                    exactTarget, running, finishComplete, fullscreen,
+                    session.unifiedNativeActiveAnimToEpoch,
+                    session.unifiedNativeCommitTransition, failure);
+        }
+
+        private boolean isExactUnifiedNativeFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot) {
+            return session != null && snapshot != null
+                    && snapshot.failure == null
+                    && snapshot.session == session
+                    && snapshot.generation == session.generation
+                    && snapshot.stateManager == session.stateManager
+                    && snapshot.callbackStateManager == session.stateManager
+                    && snapshot.windowElement
+                    == session.nativeWindowElement
+                    && snapshot.currentElement
+                    == session.nativeWindowElement
+                    && snapshot.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && snapshot.currentAnimationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && snapshot.animToEpoch
+                    == session.unifiedNativeActiveAnimToEpoch
+                    && snapshot.exactTarget
+                    && snapshot.finishComplete;
+        }
+
+        private boolean acceptUnifiedNativeCommitFromFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot,
+                String reason) {
+            UnifiedNativeCommitTransitionToken transition = snapshot == null
+                    ? null : snapshot.commitTransition;
+            boolean exact = currentSession == session
+                    && session.finished.get() == 0
+                    && session.unifiedNativeCommitPending
+                    && !session.nativeAnimationStarted
+                    && isExactUnifiedNativeFinishSnapshot(session, snapshot)
+                    && isReturnHomeNativeCloseType(snapshot.actualType)
+                    && isUnifiedCommitTransitionAtAnimToBoundary(
+                    session, transition)
+                    && (!"CLOSE_TO_ELEMENT".equals(snapshot.actualType)
+                    || hasCommittedUnifiedElementGeometry(
+                    session, transition, session.nativeWindowElement,
+                    snapshot.animationIdentity));
+            if (!exact || !adoptUnifiedCommitTransitionToken(
+                    transition)) {
+                return false;
+            }
+            Runnable timeout = session.nativeTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            Runnable unifiedCancelTimeout =
+                    session.unifiedNativeCancelTimeout;
+            if (unifiedCancelTimeout != null) {
+                handler.removeCallbacks(unifiedCancelTimeout);
+            }
+            session.unifiedNativeCancelTimeout = null;
+            session.nativeTimeout = null;
+            session.unifiedNativeCommitPending = false;
+            session.nativeAnimationIdentity = snapshot.animationIdentity;
+            session.nativeAnimationType = snapshot.actualType;
+            session.nativeAnimationStarted = true;
+            session.nativeContinuationVerified = true;
+            session.unifiedNativeCommitEndObserved = true;
+            markUnifiedElementLeashAdopted(
+                    session, snapshot.animationIdentity,
+                    snapshot.actualType);
+            completeUnifiedNativeCommitHandoff(
+                    session, snapshot.animationIdentity,
+                    snapshot.actualType);
+            if (!snapshot.phase.compareAndSet(
+                    UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                    UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                return session.unifiedNativeCleanupVerified;
+            }
+            session.unifiedNativeCleanupVerified = true;
+            log(Log.INFO, TAG,
+                    "Accepted completed Xiaomi commit at pre-clear finish boundary"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason
+                            + ", type=" + snapshot.actualType
+                            + ", transitionDebugId="
+                            + transition.transitionDebugId
+                            + ", animationIdentity="
+                            + shortObject(snapshot.animationIdentity));
+            finishUnifiedSessionAfterNativeListener(session, reason);
+            return true;
+        }
+
+        private boolean acceptUnifiedStandardCommitFromFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot,
+                String reason) {
+            UnifiedNativeStandardCommitToken token = session == null
+                    ? null : session.unifiedNativeStandardCommit;
+            StandardReturnHomeCommitSignal signal = token == null
+                    ? null : token.signal;
+            boolean standardType = snapshot != null
+                    && ("CLOSE_TO_HOME".equals(snapshot.actualType)
+                    || "CLOSE_TO_HOME_CENTER".equals(
+                    snapshot.actualType));
+            boolean exact = session != null
+                    && currentSession == session
+                    && session.finished.get() == 0
+                    && session.unifiedNativeCommitPending
+                    && !session.nativeAnimationStarted
+                    && isExactUnifiedNativeFinishSnapshot(session, snapshot)
+                    && standardType
+                    && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, token);
+            if (!exact || !adoptUnifiedStandardCommitToken(token)) {
+                return false;
+            }
+            Runnable timeout = session.nativeTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            session.nativeTimeout = null;
+            session.unifiedNativeCommitPending = false;
+            session.unifiedNativeStandardCommit = null;
+            session.nativeAnimationIdentity = snapshot.animationIdentity;
+            session.nativeAnimationType = snapshot.actualType;
+            session.nativeAnimationStarted = true;
+            session.nativeContinuationVerified = true;
+            session.unifiedNativeCommitEndObserved = true;
+            completeUnifiedNativeCommitHandoff(
+                    session, snapshot.animationIdentity,
+                    snapshot.actualType);
+            if (!snapshot.phase.compareAndSet(
+                    UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                    UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                return session.unifiedNativeCleanupVerified;
+            }
+            session.unifiedNativeCleanupVerified = true;
+            log(Log.INFO, TAG,
+                    "Accepted completed Xiaomi standard commit at pre-clear finish boundary"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason
+                            + ", type=" + snapshot.actualType
+                            + ", signalAttempt=" + signal.attempt
+                            + ", taskId=" + signal.taskId
+                            + ", transitionDebugId="
+                            + signal.transitionDebugId
+                            + ", animationIdentity="
+                            + shortObject(snapshot.animationIdentity));
+            finishUnifiedSessionAfterNativeListener(session, reason);
+            return true;
+        }
+
+        private void finishUnifiedSessionAfterNativeListener(
+                ReturnHomeSession session, String reason) {
+            handler.post(() -> {
+                if (currentSession == session
+                        && session.finished.get() == 0
+                        && session.unifiedNativeCleanupVerified) {
+                    finishSession(session, reason, false);
+                }
+            });
+        }
+
+        private boolean consumeUnifiedNativeFinishSnapshot(
+                ReturnHomeSession session, String reason) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.ERROR, TAG,
+                        "Rejected Xiaomi finish-snapshot consumption off main"
+                                + ", generation="
+                                + (session == null ? 0L
+                                : session.generation)
+                                + ", reason=" + reason);
+                return false;
+            }
+            UnifiedNativeFinishSnapshot snapshot = session == null ? null
+                    : session.unifiedNativeFinishSnapshot.get();
+            if (session == null || snapshot == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || snapshot.phase.get()
+                    != UnifiedNativeFinishSnapshot.PHASE_PENDING) {
+                return false;
+            }
+            if (!isExactUnifiedNativeFinishSnapshot(session, snapshot)) {
+                if (snapshot.phase.compareAndSet(
+                        UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                        UnifiedNativeFinishSnapshot.PHASE_INVALID)) {
+                    log(Log.ERROR, TAG,
+                            "Rejected Xiaomi pre-clear finish snapshot; retained owner"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", reason=" + reason
+                                    + ", type=" + snapshot.actualType
+                                    + ", sameStateManager="
+                                    + (snapshot.callbackStateManager
+                                    == session.stateManager)
+                                    + ", sameElement="
+                                    + (snapshot.currentElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (snapshot.currentAnimationIdentity
+                                    == session.unifiedNativeAnimationIdentity)
+                                    + ", exactTarget="
+                                    + snapshot.exactTarget
+                                    + ", running=" + snapshot.running
+                                    + ", finishComplete="
+                                    + snapshot.finishComplete,
+                            snapshot.failure);
+                }
+                return false;
+            }
+            if (session.unifiedNativeCancelPending) {
+                if (!session.unifiedNativeCancelEndObserved
+                        || snapshot.animToEpoch
+                        != session.unifiedNativeCancelAnimToEpoch
+                        || !"APP_TO_APP".equals(snapshot.actualType)
+                        || !snapshot.fullscreen) {
+                    return false;
+                }
+                session.unifiedNativeCancelRetargeted = true;
+                if (!snapshot.phase.compareAndSet(
+                        UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                        UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                    return false;
+                }
+                session.unifiedNativeCancelPending = false;
+                session.unifiedNativeCancelRetargeted = false;
+                session.unifiedNativeCleanupVerified = true;
+                log(Log.INFO, TAG,
+                        "Accepted completed Xiaomi cancel at pre-clear finish boundary"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", animationIdentity="
+                                + shortObject(snapshot.animationIdentity));
+                finishUnifiedSessionAfterNativeListener(session, reason);
+                return true;
+            }
+            if (!session.unifiedNativeCommitEndObserved) {
+                return false;
+            }
+            if (session.nativeAnimationStarted) {
+                boolean exactClose = session.nativeAnimationIdentity
+                        == snapshot.animationIdentity
+                        && snapshot.actualType.equals(
+                        session.nativeAnimationType)
+                        && isReturnHomeNativeCloseType(
+                        snapshot.actualType);
+                if (!exactClose || !snapshot.phase.compareAndSet(
+                        UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                        UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                    return false;
+                }
+                completeUnifiedNativeCommitHandoff(
+                        session, snapshot.animationIdentity,
+                        snapshot.actualType);
+                session.unifiedNativeCommitPending = false;
+                session.unifiedNativeCleanupVerified = true;
+                finishUnifiedSessionAfterNativeListener(session, reason);
+                return true;
+            }
+            if (acceptUnifiedNativeCommitFromFinishSnapshot(
+                    session, snapshot, reason)) {
+                return true;
+            }
+            if (acceptUnifiedStandardCommitFromFinishSnapshot(
+                    session, snapshot, reason)) {
+                return true;
+            }
+            boolean activeCommitAnimTo = snapshot.animToEpoch > 0L
+                    && ((session.unifiedNativeCommitTransition != null
+                    && session.unifiedNativeCommitTransition.animToEpoch
+                    == snapshot.animToEpoch
+                    && isUnifiedCommitTransitionAtAnimToBoundary(
+                    session, session.unifiedNativeCommitTransition))
+                    || (session.unifiedNativeStandardCommit != null
+                    && session.unifiedNativeStandardCommit.animToEpoch
+                    == snapshot.animToEpoch
+                    && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, session.unifiedNativeStandardCommit)));
+            if ((activeCommitAnimTo
+                    || hasProvisionalUnifiedCommitBoundary(session))
+                    && "CLOSE_TO_DRAG".equals(snapshot.actualType)) {
+                log(Log.INFO, TAG,
+                        "Retained drag finish emitted inside commit animTo boundary"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", animToEpoch="
+                                + snapshot.animToEpoch);
+                return false;
+            }
+            if (session.unifiedNativeCommitPending
+                    && "CLOSE_TO_DRAG".equals(snapshot.actualType)
+                    && snapshot.phase.compareAndSet(
+                    UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                    UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                Runnable timeout = session.nativeTimeout;
+                if (timeout != null) {
+                    handler.removeCallbacks(timeout);
+                }
+                session.nativeTimeout = null;
+                session.unifiedNativeCommitPending = false;
+                session.unifiedNativeCleanupVerified = true;
+                log(Log.WARN, TAG,
+                        "Finished committed return-home at exact stopped drag boundary"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", animationIdentity="
+                                + shortObject(snapshot.animationIdentity));
+                finishUnifiedSessionAfterNativeListener(session, reason);
+                return true;
+            }
+            return false;
+        }
+
+        private void acceptUnifiedNativeCommit(
+                ReturnHomeSession session,
+                UnifiedNativeRetargetInspection inspection) {
+            if (session == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCommitPending
+                    || inspection.commitTransition == null
+                    || session.unifiedNativeCommitTransition
+                    != inspection.commitTransition
+                    || session.unifiedNativeCommitAttempt
+                    != inspection.attempt) {
+                return;
+            }
+            Object currentElement;
+            boolean exactTransition;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+                int transitionPhase = inspection.commitTransition.phase.get();
+                exactTransition =
+                        isUnifiedCommitTransitionAtAnimToBoundary(
+                                session, inspection.commitTransition)
+                                && isExactUnifiedCommitTransition(
+                                session, inspection.commitTransition,
+                                session.nativeWindowElement,
+                                transitionPhase);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not verify Xiaomi commit element on main"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt,
+                        throwable);
+                return;
+            }
+            boolean exact = inspection.failure == null
+                    && exactTransition
+                    && inspection.commitTransition.animParams.get()
+                    != null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && inspection.requestedType.equals(
+                    inspection.actualType)
+                    && isReturnHomeNativeCloseType(
+                    inspection.actualType)
+                    && (!"CLOSE_TO_ELEMENT".equals(
+                    inspection.actualType)
+                    || hasCommittedUnifiedElementGeometry(
+                    session, inspection.commitTransition,
+                    session.nativeWindowElement,
+                    inspection.animationIdentity))
+                    && currentElement == session.nativeWindowElement;
+            if (!exact) {
+                log(Log.WARN, TAG,
+                        "Rejected Xiaomi unified commit at animation-owner tail"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt
+                                + ", requestedType="
+                                + inspection.requestedType
+                                + ", actualType="
+                                + inspection.actualType
+                                + ", sameAnimation="
+                                + inspection.sameAnimation
+                                + ", exactTarget="
+                                + inspection.exactTarget
+                                + ", running=" + inspection.running,
+                        inspection.failure);
+                return;
+            }
+            if (!adoptUnifiedCommitTransitionToken(
+                    inspection.commitTransition)) {
+                return;
+            }
+            Runnable previousTimeout = session.nativeTimeout;
+            if (previousTimeout != null) {
+                handler.removeCallbacks(previousTimeout);
+            }
+            session.nativeTimeout = null;
+            session.unifiedNativeCommitPending = false;
+            session.nativeAnimationIdentity =
+                    inspection.animationIdentity;
+            session.nativeAnimationType = inspection.actualType;
+            session.nativeAnimationStarted = true;
+            session.nativeContinuationVerified = true;
+            markUnifiedElementLeashAdopted(
+                    session, inspection.animationIdentity,
+                    inspection.actualType);
+            handler.post(() -> completeUnifiedNativeCommitHandoff(
+                    session, inspection.animationIdentity,
+                    inspection.actualType));
+            scheduleUnifiedNativeEndTimeout(session);
+            log(Log.INFO, TAG,
+                    "Accepted the same Xiaomi predictive spring at owner tail"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + inspection.attempt
+                            + ", from=CLOSE_TO_DRAG"
+                            + ", to=" + inspection.actualType
+                            + ", running=" + inspection.running
+                            + ", finishComplete="
+                            + inspection.finishComplete
+                            + ", animationIdentity="
+                            + shortObject(inspection.animationIdentity)
+                            + ", leash="
+                            + shortObject(session.closingLeash));
+        }
+
+        private void markUnifiedElementLeashAdopted(
+                ReturnHomeSession session, Object animationIdentity,
+                String animationType) {
+            ReturnHomeElementLeashReuseToken token =
+                    pendingElementLeashReuse.get();
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            if (token == null || token.session != session
+                    || token.windowElement
+                    != session.nativeWindowElement
+                    || token.animationIdentity != animationIdentity
+                    || token.closingLeash != session.closingLeash
+                    || !"CLOSE_TO_ELEMENT".equals(animationType)
+                    || !hasCommittedUnifiedElementGeometry(
+                    session, transition,
+                    session.nativeWindowElement,
+                    animationIdentity)) {
+                return;
+            }
+            if (token.phase.compareAndSet(
+                    ReturnHomeElementLeashReuseToken.PHASE_REARMED,
+                    ReturnHomeElementLeashReuseToken.PHASE_ADOPTED)) {
+                log(Log.INFO, TAG,
+                        "Accepted predictive element leash at animation-owner tail"
+                                + ", generation=" + session.generation
+                                + ", taskId=" + token.taskId
+                                + ", transitionDebugId="
+                                + token.transitionDebugId);
+            }
+        }
+
+        private void scheduleUnifiedNativeEndTimeout(
+                ReturnHomeSession session) {
+            Runnable endTimeout = () -> {
+                if (currentSession != session
+                        || session.finished.get() != 0
+                        || !session.nativeAnimationStarted
+                        || session.unifiedNativeCleanupVerified) {
+                    return;
+                }
+                if (consumeUnifiedNativeFinishSnapshot(
+                        session, "nativeEndTimeout")) {
+                    return;
+                }
+                long attempt = session.unifiedNativeRetargetAttempts
+                        .incrementAndGet();
+                try {
+                    executeOnNativeGestureAnimationOwner(() -> {
+                        UnifiedNativeRetargetInspection inspection =
+                                inspectUnifiedNativeRetarget(
+                                        session, attempt,
+                                        session.nativeAnimationType,
+                                        false);
+                        handler.post(() -> {
+                            if (currentSession != session
+                                    || session.finished.get() != 0
+                                    || session.unifiedNativeCleanupVerified
+                                    || session.nativeAnimationIdentity
+                                    != inspection.animationIdentity) {
+                                return;
+                            }
+                            if (consumeUnifiedNativeFinishSnapshot(
+                                    session,
+                                    "nativeEndOwnerTimeout")) {
+                                return;
+                            }
+                            log(Log.ERROR, TAG,
+                                    "Retained timed-out Xiaomi native owner without same-epoch end"
+                                            + ", generation="
+                                            + session.generation
+                                            + ", type="
+                                            + inspection.actualType
+                                            + ", running="
+                                            + inspection.running
+                                            + ", finishComplete="
+                                            + inspection.finishComplete,
+                                    inspection.failure);
+                            scheduleUnifiedNativeEndTimeout(session);
+                        });
+                    });
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Could not classify timed-out Xiaomi native owner"
+                                    + ", generation="
+                                    + session.generation,
+                            throwable);
+                    scheduleUnifiedNativeEndTimeout(session);
+                }
+            };
+            session.nativeTimeout = endTimeout;
+            handler.postDelayed(endTimeout,
+                    RETURN_HOME_NATIVE_TIMEOUT_MS);
+        }
+
+        private void classifyUnifiedCommitTransitionTimeout(
+                ReturnHomeSession session) {
+            if (currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted) {
+                return;
+            }
+            long attempt = session.unifiedNativeRetargetAttempts
+                    .incrementAndGet();
+            session.unifiedNativeCommitAttempt = attempt;
+            String requestedType =
+                    session.unifiedNativeCommitRequestedType;
+            try {
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativeRetargetInspection inspection =
+                            inspectUnifiedNativeRetarget(
+                                    session, attempt,
+                                    requestedType == null
+                                            ? "timeout-unclassified"
+                                            : requestedType,
+                                    false,
+                                    session.unifiedNativeCommitTransition);
+                    handler.post(() ->
+                            completeUnifiedCommitTransitionTimeout(
+                                    session, inspection));
+                });
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not classify timed-out Xiaomi commit owner"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + attempt,
+                        throwable);
+            }
+        }
+
+        private void completeUnifiedCommitTransitionTimeout(
+                ReturnHomeSession session,
+                UnifiedNativeRetargetInspection inspection) {
+            if (session == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted
+                    || session.unifiedNativeCommitAttempt
+                    != inspection.attempt) {
+                return;
+            }
+            if (consumeUnifiedNativeFinishSnapshot(
+                    session, "commitTransitionTimeout")) {
+                return;
+            }
+            Object currentElement;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not verify timed-out Xiaomi commit element"
+                                + ", generation=" + session.generation,
+                        throwable);
+                return;
+            }
+            boolean exactOwner = inspection.failure == null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && currentElement == session.nativeWindowElement;
+            UnifiedNativeStandardCommitToken standardCommit =
+                    session.unifiedNativeStandardCommit;
+            boolean standardType = "CLOSE_TO_HOME".equals(
+                    inspection.actualType)
+                    || "CLOSE_TO_HOME_CENTER".equals(
+                    inspection.actualType);
+            boolean exactStandardCommit = exactOwner
+                    && standardType
+                    && inspection.commitTransition == null
+                    && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                    session, standardCommit);
+            if (exactStandardCommit) {
+                standardCommit.ownerAttempt = inspection.attempt;
+                UnifiedNativeRetargetInspection normalized =
+                        new UnifiedNativeRetargetInspection(
+                                inspection.attempt,
+                                inspection.actualType,
+                                inspection.actualType,
+                                inspection.animationIdentity,
+                                true, true, inspection.running,
+                                inspection.finishComplete,
+                                inspection.fullscreen,
+                                null, null);
+                log(Log.WARN, TAG,
+                        "Recovered Xiaomi standard commit from timeout inspection"
+                                + ", generation=" + session.generation
+                                + ", signalAttempt="
+                                + standardCommit.signal.attempt
+                                + ", ownerAttempt="
+                                + inspection.attempt
+                                + ", type="
+                                + inspection.actualType
+                                + ", running="
+                                + inspection.running
+                                + ", finishComplete="
+                                + inspection.finishComplete);
+                acceptUnifiedStandardCommit(
+                        session, standardCommit, normalized);
+                return;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    inspection.commitTransition;
+            boolean exactTransition =
+                    isUnifiedCommitTransitionAtAnimToBoundary(
+                            session, transition);
+            if (exactOwner && exactTransition
+                    && isReturnHomeNativeCloseType(
+                    inspection.actualType)) {
+                session.unifiedNativeCommitRequestedType =
+                        inspection.actualType;
+                UnifiedNativeRetargetInspection normalized =
+                        new UnifiedNativeRetargetInspection(
+                                inspection.attempt,
+                                inspection.actualType,
+                                inspection.actualType,
+                                inspection.animationIdentity,
+                                true, true, inspection.running,
+                                inspection.finishComplete,
+                                inspection.fullscreen,
+                                transition, null);
+                acceptUnifiedNativeCommit(session, normalized);
+                return;
+            }
+            if (exactOwner
+                    && "CLOSE_TO_DRAG".equals(
+                    inspection.actualType)) {
+                boolean invalidatedAnimToBoundary = false;
+                UnifiedNativeStandardCommitToken stalledStandard =
+                        session.unifiedNativeStandardCommit;
+                if (stalledStandard != null
+                        && isExactUnifiedStandardCommitTokenAtAnimToBoundary(
+                        session, stalledStandard)
+                        && adoptUnifiedStandardCommitToken(
+                        stalledStandard)) {
+                    stalledStandard.phase.set(
+                            UnifiedNativeStandardCommitToken.PHASE_INVALID);
+                    if (session.unifiedNativeStandardCommit
+                            == stalledStandard) {
+                        session.unifiedNativeStandardCommit = null;
+                    }
+                    invalidatedAnimToBoundary = true;
+                }
+                UnifiedNativeCommitTransitionToken stalledTransition =
+                        session.unifiedNativeCommitTransition;
+                if (stalledTransition != null
+                        && isUnifiedCommitTransitionAtAnimToBoundary(
+                        session, stalledTransition)
+                        && adoptUnifiedCommitTransitionToken(
+                        stalledTransition)) {
+                    stalledTransition.phase.set(
+                            UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+                    if (session.unifiedNativeCommitTransition
+                            == stalledTransition) {
+                        session.unifiedNativeCommitTransition = null;
+                    }
+                    session.unifiedNativeCommitAttempt = 0L;
+                    session.unifiedNativeCommitRequestedType = null;
+                    invalidateElementTransitionContinuity(
+                            session, "exactDragAfterCommitAnimTo", true);
+                    invalidatedAnimToBoundary = true;
+                }
+                if (invalidatedAnimToBoundary) {
+                    boolean terminationQueued =
+                            requestUnifiedPendingCommitTermination(
+                                    session,
+                                    "commitAnimToStayedDrag");
+                    log(terminationQueued ? Log.WARN : Log.ERROR, TAG,
+                            "Terminating exact drag after failed commit animTo"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", attempt="
+                                    + inspection.attempt
+                                    + ", terminationQueued="
+                                    + terminationQueued);
+                    return;
+                }
+                log(Log.WARN, TAG,
+                        "Retained committed Xiaomi drag owner without same-epoch end"
+                                + ", generation="
+                                + session.generation
+                                + ", attempt="
+                                + inspection.attempt
+                                + ", running="
+                                + inspection.running
+                                + ", finishComplete="
+                                + inspection.finishComplete);
+                String externalReason =
+                        session.unifiedNativeExternalTerminationReason;
+                if (externalReason != null) {
+                    requestUnifiedPendingCommitTermination(
+                            session, externalReason);
+                }
+                return;
+            }
+            log(Log.ERROR, TAG,
+                    "Retained unclassified Xiaomi commit owner"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + inspection.attempt
+                            + ", type=" + inspection.actualType
+                            + ", sameAnimation="
+                            + inspection.sameAnimation
+                            + ", exactTarget="
+                            + inspection.exactTarget
+                            + ", sameElement="
+                            + (currentElement
+                            == session.nativeWindowElement)
+                            + ", running=" + inspection.running
+                            + ", finishComplete="
+                            + inspection.finishComplete,
+                    inspection.failure);
+        }
+
+        private void completeUnifiedNativeCommitHandoff(
+                ReturnHomeSession session, Object animationIdentity,
+                String animationType) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                log(Log.ERROR, TAG,
+                        "Rejected launcher-state handoff off main"
+                                + ", generation="
+                                + (session == null ? 0L
+                                : session.generation)
+                                + ", type=" + animationType);
+                return;
+            }
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.nativeAnimationStarted
+                    || session.nativeAnimationIdentity
+                    != animationIdentity
+                    || !animationType.equals(
+                    session.nativeAnimationType)) {
+                return;
+            }
+            invalidateUnifiedPendingInterruption(
+                    session, "nativeCommitAccepted:" + animationType);
+            // WindowElement.animTo() is the first part of StateManager's closing update.
+            // Queue behind that main-loop turn so shortcut, wallpaper, and blur commands have
+            // all reached their native ownership boundary before module state is transferred.
+            session.previewBlurProviderReturned = true;
+            session.previewBackdropProviderReturned = true;
+            completeNativePreviewBackdropHandoff(session);
+            completeNativePreviewBlurHandoff(session);
+            log(Log.INFO, TAG,
+                    "Transferred predictive launcher state after Xiaomi commit"
+                            + ", generation=" + session.generation
+                            + ", type=" + animationType);
         }
 
         void invalidateElementTransitionContinuity(
@@ -11132,6 +16348,991 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private void ensureUnifiedNativePreviewReflection()
+                throws Exception {
+            if (nativeTargetSetConstructor != null
+                    && nativeWindowAnimParamsConstructor != null
+                    && nativeRectFParamsConstructor != null
+                    && nativeCornerRadiiConstructor != null
+                    && nativeClipAnimationHelperConstructor != null
+                    && nativeGestureAnimExecutorMethod != null
+                    && nativeCloseToDragType != null
+                    && nativeAppToAppType != null) {
+                return;
+            }
+            Class<?> compatClass = Class.forName(
+                    MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT, false,
+                    classLoader);
+            Class<?> compatArrayClass =
+                    Array.newInstance(compatClass, 0).getClass();
+            Class<?> targetSetClass = Class.forName(
+                    MIUI_HOME_REMOTE_ANIMATION_TARGET_SET, false,
+                    classLoader);
+            Class<?> windowAnimParamsClass = Class.forName(
+                    MIUI_HOME_WINDOW_ANIM_PARAMS, false, classLoader);
+            Class<?> rectFParamsClass = Class.forName(
+                    MIUI_HOME_RECTF_PARAMS, false, classLoader);
+            Class<?> animTypeClass = Class.forName(
+                    MIUI_HOME_RECTF_SPRING_ANIM_TYPE, false,
+                    classLoader);
+            Class<?> springAnimClass = Class.forName(
+                    MIUI_HOME_RECTF_SPRING_ANIM, false, classLoader);
+            Class<?> cornerRadiiClass = Class.forName(
+                    MIUI_HOME_CORNER_RADII, false, classLoader);
+            Class<?> clipAnimationHelperClass = Class.forName(
+                    MIUI_HOME_CLIP_ANIMATION_HELPER, false, classLoader);
+            Class<?> windowAnimListenerClass = Class.forName(
+                    MIUI_HOME_WINDOW_ANIM_LISTENER, false, classLoader);
+            Class<?> gestureCalculatorClass = Class.forName(
+                    MIUI_HOME_GESTURE_HOME_CALCULATOR, false,
+                    classLoader);
+
+            Constructor<?> targetSet = targetSetClass.getDeclaredConstructor(
+                    compatArrayClass, int.class, compatArrayClass);
+            Constructor<?> windowParams =
+                    windowAnimParamsClass.getDeclaredConstructor(
+                            RectF.class, RectF.class, cornerRadiiClass,
+                            cornerRadiiClass, float.class, float.class);
+            Constructor<?> rectParams = rectFParamsClass.getDeclaredConstructor(
+                    targetSetClass, windowAnimParamsClass, animTypeClass,
+                    boolean.class, boolean.class, boolean.class, View.class,
+                    windowAnimListenerClass, clipAnimationHelperClass,
+                    boolean.class, int.class, int.class,
+                    gestureCalculatorClass, boolean.class, int.class,
+                    boolean.class, boolean.class, int.class, int.class,
+                    boolean.class, boolean.class, boolean.class);
+            Constructor<?> radii = cornerRadiiClass.getDeclaredConstructor(
+                    float.class);
+            Constructor<?> clip =
+                    clipAnimationHelperClass.getDeclaredConstructor();
+            Method gestureAnimExecutor = springAnimClass.getDeclaredMethod(
+                    "getGestureAnimRunningExecutor");
+            targetSet.setAccessible(true);
+            windowParams.setAccessible(true);
+            rectParams.setAccessible(true);
+            radii.setAccessible(true);
+            clip.setAccessible(true);
+            gestureAnimExecutor.setAccessible(true);
+            Class<? extends Enum> enumClass =
+                    (Class<? extends Enum>) animTypeClass.asSubclass(
+                            Enum.class);
+
+            nativeTargetSetConstructor = targetSet;
+            nativeWindowAnimParamsConstructor = windowParams;
+            nativeRectFParamsConstructor = rectParams;
+            nativeCornerRadiiConstructor = radii;
+            nativeClipAnimationHelperConstructor = clip;
+            nativeGestureAnimExecutorMethod = gestureAnimExecutor;
+            nativeCloseToDragType = Enum.valueOf(
+                    enumClass, "CLOSE_TO_DRAG");
+            nativeAppToAppType = Enum.valueOf(enumClass, "APP_TO_APP");
+        }
+
+        private void executeOnNativeGestureAnimationOwner(Runnable runnable)
+                throws Exception {
+            ensureUnifiedNativePreviewReflection();
+            Object executor = nativeGestureAnimExecutorMethod.invoke(null);
+            if (executor instanceof Executor) {
+                ((Executor) executor).execute(runnable);
+                return;
+            }
+            invokeAnyMethod(executor, "execute", new Object[]{runnable});
+        }
+
+        private Object wrapNativeAnimationTargets(Object[] targets)
+                throws Exception {
+            Class<?> compatClass = Class.forName(
+                    MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT, false,
+                    classLoader);
+            if (targets == null || targets.length == 0) {
+                return Array.newInstance(compatClass, 0);
+            }
+            Method wrap = compatClass.getDeclaredMethod(
+                    "wrap", targets.getClass());
+            wrap.setAccessible(true);
+            return wrap.invoke(null, new Object[]{targets});
+        }
+
+        private Object resolveUnifiedNativeClosingTarget(
+                ReturnHomeSession session, Object targetSet)
+                throws Exception {
+            Object target = targetSet == null ? null
+                    : invokeAnyMethod(targetSet,
+                    "getFirstTarget", new Object[0]);
+            Object compatLeash = target == null ? null
+                    : readField(target, "leash");
+            Object surface = compatLeash == null ? null
+                    : readField(compatLeash, "mSurfaceControl");
+            return target != null
+                    && readIntFieldOrDefault(target, "taskId", -1)
+                    == session.unifiedNativeTaskId
+                    && surface instanceof SurfaceControl
+                    && ((SurfaceControl) surface).isValid()
+                    && surfacesAreSame((SurfaceControl) surface,
+                    session.closingLeash) ? target : null;
+        }
+
+        private Object createUnifiedNativeRectFParams(
+                ReturnHomeSession session, Object animType,
+                RectF targetRect, float endRadius, boolean needFinish,
+                RectF explicitStartRect) throws Exception {
+            ensureUnifiedNativePreviewReflection();
+            Object startRadii = nativeCornerRadiiConstructor.newInstance(
+                    Float.valueOf(session.currentCornerRadius));
+            Object endRadii = nativeCornerRadiiConstructor.newInstance(
+                    Float.valueOf(endRadius));
+            Object windowParams =
+                    nativeWindowAnimParamsConstructor.newInstance(
+                            explicitStartRect == null ? null
+                                    : new RectF(explicitStartRect),
+                            new RectF(targetRect), startRadii, endRadii,
+                            Float.valueOf(1.0f), Float.valueOf(1.0f));
+            return nativeRectFParamsConstructor.newInstance(
+                    session.unifiedNativeTargetSet, windowParams, animType,
+                    Boolean.TRUE, Boolean.valueOf(needFinish), Boolean.FALSE,
+                    null, null, session.unifiedNativeClipHelper,
+                    Boolean.TRUE,
+                    Integer.valueOf(session.unifiedNativeCurrentRotation),
+                    Integer.valueOf(session.unifiedNativeHomeRotation), null,
+                    Boolean.valueOf(needFinish), Integer.valueOf(0),
+                    Boolean.FALSE, Boolean.FALSE,
+                    Integer.valueOf(session.unifiedNativeTaskId),
+                    Integer.valueOf(2), Boolean.valueOf(needFinish),
+                    Boolean.FALSE, Boolean.FALSE);
+        }
+
+        private boolean prepareUnifiedNativePreview(
+                ReturnHomeSession session) {
+            if (session == null || session.finished.get() != 0
+                    || currentSession != session
+                    || !session.previewInitialized
+                    || session.unifiedNativePreviewOwned
+                    || !isStandardSingleTaskReturnHome(session)
+                    || Looper.myLooper() != Looper.getMainLooper()) {
+                return false;
+            }
+            try {
+                Object closingTaskInfo = readField(
+                        session.closingTarget, "taskInfo");
+                Object openingTaskInfo = readField(
+                        session.openingTarget, "taskInfo");
+                Object closingConfiguration = readField(
+                        session.closingTarget, "windowConfiguration");
+                Object openingConfiguration = readField(
+                        session.openingTarget, "windowConfiguration");
+                int taskId = readIntFieldOrDefault(
+                        session.closingTarget, "taskId", -1);
+                int closingDisplay = readIntFieldOrDefault(
+                        closingTaskInfo, "displayId", -1);
+                int openingDisplay = readIntFieldOrDefault(
+                        openingTaskInfo, "displayId", -1);
+                Object closingRotationObject = invokeAnyMethod(
+                        closingConfiguration, "getRotation", new Object[0]);
+                Object openingRotationObject = invokeAnyMethod(
+                        openingConfiguration, "getRotation", new Object[0]);
+                int closingRotation = closingRotationObject instanceof Number
+                        ? ((Number) closingRotationObject).intValue() : -1;
+                int openingRotation = openingRotationObject instanceof Number
+                        ? ((Number) openingRotationObject).intValue() : -1;
+                boolean exactShape = taskId >= 0 && closingDisplay >= 0
+                        && closingDisplay == openingDisplay
+                        && closingRotation >= 0 && openingRotation >= 0
+                        && resolveRemoteTargetActivityType(
+                        session.closingTarget) == ACTIVITY_TYPE_STANDARD
+                        && resolveRemoteTargetWindowingMode(
+                        session.closingTarget) == WINDOWING_MODE_FULLSCREEN
+                        && resolveRemoteTargetActivityType(
+                        session.openingTarget) == ACTIVITY_TYPE_HOME
+                        && resolveRemoteTargetWindowingMode(
+                        session.openingTarget) == WINDOWING_MODE_FULLSCREEN
+                        && session.previewLeash != null
+                        && session.closingLeash != null
+                        && session.previewLeash.isValid()
+                        && session.closingLeash.isValid()
+                        && surfacesAreSame(session.previewLeash,
+                        session.closingLeash);
+                if (!exactShape) {
+                    return false;
+                }
+
+                ensureUnifiedNativePreviewReflection();
+                Object compatApps = wrapNativeAnimationTargets(session.apps);
+                Object closingCompat = null;
+                int appCount = Array.getLength(compatApps);
+                for (int index = 0; index < appCount; index++) {
+                    Object candidate = Array.get(compatApps, index);
+                    if (readIntFieldOrDefault(candidate, "mode", -1) == 1
+                            && readIntFieldOrDefault(
+                            candidate, "taskId", -1) == taskId) {
+                        if (closingCompat != null) {
+                            throw new IllegalStateException(
+                                    "multiple Xiaomi closing targets");
+                        }
+                        closingCompat = candidate;
+                    }
+                }
+                if (closingCompat == null) {
+                    throw new IllegalStateException(
+                            "missing Xiaomi closing target");
+                }
+                Class<?> compatClass =
+                        compatApps.getClass().getComponentType();
+                Object previewApps = Array.newInstance(compatClass, 1);
+                Array.set(previewApps, 0, closingCompat);
+                Object emptyTargets = Array.newInstance(compatClass, 0);
+                Object targetSet = nativeTargetSetConstructor.newInstance(
+                        previewApps, Integer.valueOf(1), emptyTargets);
+                session.unifiedNativeTaskId = taskId;
+                Object firstTarget = resolveUnifiedNativeClosingTarget(
+                        session, targetSet);
+                if (firstTarget == null) {
+                    throw new IllegalStateException(
+                            "wrapped Xiaomi closing leash changed");
+                }
+
+                Object clipHelper =
+                        nativeClipAnimationHelperConstructor.newInstance();
+                invokeAnyMethod(clipHelper, "updateSourceStack",
+                        new Object[]{firstTarget});
+                invokeAnyMethod(clipHelper, "updateSourceStackBounds",
+                        new Object[]{targetSet, Boolean.TRUE});
+                Object sourceBounds = readField(
+                        firstTarget, "sourceContainerBounds");
+                Rect nativeBounds = sourceBounds instanceof Rect
+                        && !((Rect) sourceBounds).isEmpty()
+                        ? new Rect((Rect) sourceBounds)
+                        : new Rect(session.startRect);
+                invokeAnyMethod(clipHelper, "updateHomeStack",
+                        new Object[]{nativeBounds});
+                invokeAnyMethod(clipHelper, "updateTargetRect",
+                        new Object[]{nativeBounds});
+                invokeAnyMethod(clipHelper, "prepareAnimation",
+                        new Object[]{Boolean.FALSE});
+                invokeAnyMethod(clipHelper, "setIsUseForHomeGesture",
+                        new Object[]{Boolean.TRUE});
+
+                Class<?> stateManagerClass = Class.forName(
+                        MIUI_HOME_STATE_MANAGER, false, classLoader);
+                Object companion = readStaticField(
+                        stateManagerClass, "Companion");
+                Object stateManager = invokeAnyMethod(
+                        companion, "getInstance", new Object[0]);
+                Object previousElement = invokeAnyMethod(
+                        stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+                if (previousElement != null || Boolean.TRUE.equals(
+                        invokeAnyMethod(stateManager,
+                                "isWindowElementRunning", new Object[0]))) {
+                    log(Log.INFO, TAG,
+                            "Skipped unified predictive owner for active element"
+                                    + ", generation=" + session.generation
+                                    + ", element="
+                                    + shortObject(previousElement));
+                    return false;
+                }
+                invokeAnyMethod(stateManager,
+                        "initWindowElement", new Object[0]);
+                Object windowElement = invokeAnyMethod(
+                        stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+                Object animationIdentity = windowElement == null ? null
+                        : invokeAnyMethod(windowElement,
+                        "getAnimSymbol", new Object[0]);
+                if (windowElement == null || animationIdentity == null) {
+                    throw new IllegalStateException(
+                            "new Xiaomi WindowElement has no animation owner");
+                }
+                // Publish ownership before validating the rest of the freshly-created
+                // element. Any later failure must cancel this exact WindowElement instead of
+                // falling back to a second surface animator while leaving it in StateManager.
+                session.stateManager = stateManager;
+                session.nativeWindowElement = windowElement;
+                session.nativeAnimationIdentity = animationIdentity;
+                session.nativeAnimationType = "CLOSE_TO_DRAG";
+                session.unifiedNativeAnimationIdentity =
+                        animationIdentity;
+                session.unifiedNativeTargetSet = targetSet;
+                session.unifiedNativeClipHelper = clipHelper;
+                session.unifiedNativeCurrentRotation = closingRotation;
+                session.unifiedNativeHomeRotation = openingRotation;
+                session.unifiedNativePreviewOwned = true;
+                // Exercise both generated accessors (with the exact backing-field fallback)
+                // before the module starts the first native frame. Later finish-epoch gating
+                // must not discover an unusable gate after ownership has already transferred.
+                verifyUnifiedStateManagerListenerGate(
+                        session, true, "previewClaimProbeDisable");
+                verifyUnifiedStateManagerListenerGate(
+                        session, false, "previewClaimProbeRestore");
+                Object compat = invokeAnyMethod(windowElement,
+                        "getWindowTransitionCompat", new Object[0]);
+                Object helper = compat == null ? null
+                        : invokeAnyMethod(compat,
+                        "getCallbackHelper", new Object[0]);
+                if (helper == null || Boolean.TRUE.equals(invokeAnyMethod(
+                        windowElement, "isAnimRunning", new Object[0]))
+                        || Boolean.TRUE.equals(invokeAnyMethod(
+                        helper, "hasMainFinishCallback", new Object[0]))
+                        || Boolean.TRUE.equals(invokeAnyMethod(
+                        helper, "hasMergeFinishCallback", new Object[0]))
+                        || Boolean.TRUE.equals(invokeAnyMethod(
+                        helper, "isFinishCalled", new Object[0]))
+                        || invokeAnyMethod(helper,
+                        "getOpenLeash", new Object[0]) != null) {
+                    throw new IllegalStateException(
+                            "new Xiaomi WindowElement is not idle");
+                }
+                if (!driveUnifiedNativePreviewFrame(session, true)) {
+                    throw new IllegalStateException(
+                            "failed first Xiaomi CLOSE_TO_DRAG frame");
+                }
+                if (invokeAnyMethod(stateManager,
+                        "getCurrentWindowElement", new Object[0])
+                        != windowElement
+                        || invokeAnyMethod(windowElement,
+                        "getAnimSymbol", new Object[0])
+                        != animationIdentity
+                        || invokeAnyMethod(windowElement,
+                        "getRemoteTargetSet", new Object[0]) != targetSet) {
+                    throw new IllegalStateException(
+                            "Xiaomi predictive owner changed during start");
+                }
+                log(Log.INFO, TAG,
+                        "Unified predictive preview with Xiaomi WindowElement"
+                                + ", generation=" + session.generation
+                                + ", taskId=" + taskId
+                                + ", animationIdentity="
+                                + shortObject(animationIdentity)
+                                + ", leash="
+                                + shortObject(session.closingLeash));
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to establish unified Xiaomi predictive owner"
+                                + ", generation=" + session.generation,
+                        throwable);
+                if (session.unifiedNativePreviewOwned) {
+                    startUnifiedNativeCancel(
+                            session, "prepareFailed");
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        private boolean driveUnifiedNativePreviewFrame(
+                ReturnHomeSession session, boolean firstFrame) {
+            if (session == null || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || session.finished.get() != 0
+                    || currentSession != session
+                    || session.nativeHandoffStarted
+                    || session.unifiedNativeCancelPending) {
+                return false;
+            }
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                if (currentElement != session.nativeWindowElement
+                        || currentIdentity
+                        != session.unifiedNativeAnimationIdentity
+                        || session.previewLeash == null
+                        || !session.previewLeash.isValid()
+                        || !surfacesAreSame(session.previewLeash,
+                        session.closingLeash)) {
+                    throw new IllegalStateException(
+                            "unified Xiaomi preview ownership changed");
+                }
+                Object params = createUnifiedNativeRectFParams(
+                        session, nativeCloseToDragType,
+                        session.currentRect, session.currentCornerRadius,
+                        false, firstFrame
+                                ? new RectF(session.startRect) : null);
+                invokeAnyMethod(session.nativeWindowElement,
+                        "animTo", new Object[]{params});
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to drive unified Xiaomi predictive frame"
+                                + ", generation=" + session.generation
+                                + ", rect=" + session.currentRect,
+                        throwable);
+                return false;
+            }
+        }
+
+        private boolean requestUnifiedPendingCommitTermination(
+                ReturnHomeSession session, String reason) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || !session.nativeHandoffStarted
+                    || !session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted
+                    || session.unifiedNativeCancelPending) {
+                return false;
+            }
+            long attempt = session.unifiedNativeRetargetAttempts
+                    .incrementAndGet();
+            session.unifiedNativeExternalTerminationAttempt = attempt;
+            session.unifiedNativeExternalTerminationReason = reason;
+            try {
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativeRetargetInspection inspection =
+                            inspectUnifiedNativeRetarget(
+                                    session, attempt,
+                                    "CLOSE_TO_DRAG", false,
+                                    session.unifiedNativeCommitTransition);
+                    handler.post(() ->
+                            completeUnifiedPendingCommitTermination(
+                                    session, inspection, reason));
+                });
+                log(Log.WARN, TAG,
+                        "Queued exact Xiaomi pending-commit termination"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + attempt
+                                + ", reason=" + reason);
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not inspect Xiaomi pending commit at external terminal"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + attempt
+                                + ", reason=" + reason,
+                        throwable);
+                return false;
+            }
+        }
+
+        private void completeUnifiedPendingCommitTermination(
+                ReturnHomeSession session,
+                UnifiedNativeRetargetInspection inspection,
+                String reason) {
+            if (session == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || !session.nativeHandoffStarted
+                    || !session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted
+                    || session.unifiedNativeExternalTerminationAttempt
+                    != inspection.attempt
+                    || !reason.equals(
+                    session.unifiedNativeExternalTerminationReason)) {
+                return;
+            }
+            if (consumeUnifiedNativeFinishSnapshot(
+                    session, "externalTerminal:" + reason)) {
+                return;
+            }
+            Object currentElement;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not verify Xiaomi owner at external terminal"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt
+                                + ", reason=" + reason,
+                        throwable);
+                return;
+            }
+            UnifiedNativeCommitTransitionToken transition =
+                    session.unifiedNativeCommitTransition;
+            int transitionPhase = transition == null
+                    ? UnifiedNativeCommitTransitionToken.PHASE_INVALID
+                    : transition.phase.get();
+            boolean exactDragOwner = inspection.failure == null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && "CLOSE_TO_DRAG".equals(inspection.actualType)
+                    && currentElement == session.nativeWindowElement;
+            boolean safeExternalBoundary = exactDragOwner
+                    && transition == null;
+            if (!safeExternalBoundary) {
+                log(Log.ERROR, TAG,
+                        "Retained Xiaomi owner across unsafe external terminal"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt
+                                + ", reason=" + reason
+                                + ", type=" + inspection.actualType
+                                + ", sameAnimation="
+                                + inspection.sameAnimation
+                                + ", exactTarget="
+                                + inspection.exactTarget
+                                + ", sameElement="
+                                + (currentElement
+                                == session.nativeWindowElement)
+                                + ", running=" + inspection.running
+                                + ", finishComplete="
+                                + inspection.finishComplete
+                                + ", transitionPhase="
+                                + transitionPhase,
+                        inspection.failure);
+                return;
+            }
+            UnifiedNativeStandardCommitToken standardCommit =
+                    session.unifiedNativeStandardCommit;
+            if (standardCommit != null
+                    && standardCommit.session == session
+                    && standardCommit.windowElement
+                    == session.nativeWindowElement
+                    && standardCommit.animationIdentity
+                    == session.unifiedNativeAnimationIdentity) {
+                int standardPhase = standardCommit.phase.get();
+                if (standardPhase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERING
+                        || standardPhase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERED
+                        || standardPhase
+                        == UnifiedNativeStandardCommitToken.PHASE_CONSUMED) {
+                    standardCommit.phase.set(
+                            UnifiedNativeStandardCommitToken.PHASE_INVALID);
+                    if (session.unifiedNativeStandardCommit
+                            == standardCommit) {
+                        session.unifiedNativeStandardCommit = null;
+                    }
+                    log(Log.WARN, TAG,
+                            "Invalidated standard commit after exact drag proof"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", signalAttempt="
+                                    + standardCommit.signal.attempt
+                                    + ", phase=" + standardPhase
+                                    + ", reason=" + reason);
+                }
+            }
+            boolean accepted = startUnifiedNativeCancel(
+                    session, "externalTerminal:" + reason, true);
+            boolean cancelEntered = accepted
+                    && session.unifiedNativeCancelPending;
+            if (cancelEntered) {
+                session.unifiedNativeExternalTerminationAttempt = 0L;
+                session.unifiedNativeExternalTerminationReason = null;
+            }
+            log(cancelEntered ? Log.WARN : Log.ERROR, TAG,
+                    "Applied Xiaomi pending-commit termination"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + inspection.attempt
+                            + ", reason=" + reason
+                            + ", running=" + inspection.running
+                            + ", transitionPhase=" + transitionPhase
+                            + ", accepted=" + cancelEntered);
+        }
+
+        private boolean startUnifiedNativeCancel(
+                ReturnHomeSession session, String reason) {
+            return startUnifiedNativeCancel(session, reason, false);
+        }
+
+        private boolean startUnifiedNativeCancel(
+                ReturnHomeSession session, String reason,
+                boolean externalPendingCommitTermination) {
+            if (session == null || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || currentSession != session
+                    || session.finished.get() != 0) {
+                return false;
+            }
+            freezePreviewProgress(session,
+                    "unifiedCancel:" + reason);
+            if (session.unifiedNativeCancelPending) {
+                return true;
+            }
+            boolean exactExternalPendingCommit =
+                    externalPendingCommitTermination
+                            && session.nativeHandoffStarted
+                            && session.unifiedNativeCommitPending
+                            && !session.nativeAnimationStarted;
+            if (session.nativeAnimationStarted
+                    || (!exactExternalPendingCommit
+                    && (session.nativeHandoffStarted
+                    || session.unifiedNativeCommitPending))) {
+                return false;
+            }
+            boolean animToEntered = false;
+            boolean externalStateCleared = false;
+            UnifiedNativeCommitTransitionToken externalTransition = null;
+            Runnable externalTimeout = null;
+            Object cancelParams = null;
+            long cancelAnimToEpoch = 0L;
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
+                if (currentElement != session.nativeWindowElement
+                        || currentIdentity
+                        != session.unifiedNativeAnimationIdentity) {
+                    throw new IllegalStateException(
+                            "Xiaomi owner changed before cancel"
+                                    + ", type=" + currentType
+                                    + ", sameElement="
+                                    + (currentElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity
+                                    == session.unifiedNativeAnimationIdentity));
+                }
+                if (exactExternalPendingCommit) {
+                    externalTransition =
+                            session.unifiedNativeCommitTransition;
+                    if (!"CLOSE_TO_DRAG".equals(currentType)
+                            || externalTransition != null) {
+                        log(Log.WARN, TAG,
+                                "Rejected external termination across Xiaomi commit boundary"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", reason=" + reason
+                                        + ", type=" + currentType
+                                        + ", transitionPhase="
+                                        + (externalTransition == null
+                                        ? -1
+                                        : externalTransition.phase.get()));
+                        return false;
+                    }
+                    externalTimeout = session.nativeTimeout;
+                    session.nativeHandoffStarted = false;
+                    session.unifiedNativeCommitPending = false;
+                    externalStateCleared = true;
+                }
+                session.unifiedNativeCancelPending = true;
+                session.unifiedNativeCancelRetargeted = false;
+                session.unifiedNativeCancelEndObserved = false;
+                long attempt = session.unifiedNativeRetargetAttempts
+                        .incrementAndGet();
+                session.unifiedNativeCancelAttempt = attempt;
+                cancelParams = createUnifiedNativeRectFParams(
+                        session, nativeAppToAppType,
+                        new RectF(session.startRect),
+                        session.startCornerRadius, true, null);
+                cancelAnimToEpoch = beginUnifiedAnimToEpoch(
+                        session, "cancel:" + reason);
+                session.unifiedNativeCancelAnimToEpoch =
+                        cancelAnimToEpoch;
+                session.unifiedNativeCancelEndObserved = false;
+                session.unifiedNativeCancelAnimParams = cancelParams;
+                verifyUnifiedStateManagerListenerGate(
+                        session, true, "cancelEntry:" + reason);
+                scheduleUnifiedNativeCancelTimeout(
+                        session, cancelAnimToEpoch, reason);
+                animToEntered = true;
+                invokeAnyMethod(session.nativeWindowElement,
+                        "animTo", new Object[]{cancelParams});
+                UnifiedNativeFinishSnapshot synchronousFinish =
+                        session.unifiedNativeFinishSnapshot.get();
+                if (synchronousFinish != null
+                        && synchronousFinish.animToEpoch
+                        == cancelAnimToEpoch
+                        && "CLOSE_TO_DRAG".equals(
+                        synchronousFinish.actualType)
+                        && synchronousFinish.phase.compareAndSet(
+                        UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                        UnifiedNativeFinishSnapshot.PHASE_INVALID)) {
+                    session.unifiedNativeFinishSnapshot.compareAndSet(
+                            synchronousFinish, null);
+                    session.unifiedNativeCancelEndObserved = false;
+                    log(Log.INFO, TAG,
+                            "Discarded previous drag finish from cancel animTo call"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", animToEpoch="
+                                    + cancelAnimToEpoch);
+                }
+                if (externalStateCleared) {
+                    session.unifiedNativeCommitAttempt = 0L;
+                    session.unifiedNativeCommitRequestedType = null;
+                    if (externalTimeout != null) {
+                        handler.removeCallbacks(externalTimeout);
+                    }
+                    session.nativeTimeout = null;
+                    if (externalTransition != null) {
+                        externalTransition.phase.set(
+                                UnifiedNativeCommitTransitionToken
+                                        .PHASE_INVALID);
+                    }
+                    session.unifiedNativeCommitTransition = null;
+                    invalidateElementTransitionContinuity(
+                            session, "externalCommitTermination", true);
+                }
+                executeOnNativeGestureAnimationOwner(() -> {
+                    UnifiedNativeRetargetInspection inspection =
+                            inspectUnifiedNativeRetarget(
+                                    session, attempt,
+                                    "APP_TO_APP", true);
+                    handler.post(() -> acceptUnifiedNativeCancel(
+                            session, inspection, reason));
+                });
+                log(Log.INFO, TAG,
+                        "Queued unified Xiaomi fullscreen-cancel verification"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + attempt
+                                + ", reason=" + reason
+                                + ", observedTypeBeforeQueue="
+                                + currentType
+                                + ", animationIdentity="
+                                + shortObject(
+                                session.unifiedNativeAnimationIdentity));
+                return true;
+            } catch (Throwable throwable) {
+                boolean terminalQueued =
+                        publishUnifiedNativeTerminalFailure(
+                                session, cancelParams,
+                                cancelParams, cancelAnimToEpoch,
+                                true, exactExternalPendingCommit,
+                                externalStateCleared,
+                                "cancelFailure:" + reason,
+                                throwable);
+                if (terminalQueued) {
+                    log(Log.ERROR, TAG,
+                            "Terminating failed unified Xiaomi cancel through exact native owner"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", reason=" + reason
+                                    + ", animToEntered="
+                                    + animToEntered
+                                    + ", animToEpoch="
+                                    + cancelAnimToEpoch,
+                            throwable);
+                    return true;
+                }
+                if (!animToEntered) {
+                    if (externalStateCleared) {
+                        session.nativeHandoffStarted = true;
+                        session.unifiedNativeCommitPending = true;
+                        session.unifiedNativeCommitTransition =
+                                externalTransition;
+                        session.nativeTimeout = externalTimeout;
+                    }
+                    session.unifiedNativeCancelPending = false;
+                    session.unifiedNativeCancelRetargeted = false;
+                    session.unifiedNativeCancelEndObserved = false;
+                    session.unifiedNativeCancelAttempt = 0L;
+                    session.unifiedNativeCancelAnimParams = null;
+                } else if (externalStateCleared) {
+                    session.unifiedNativeCommitAttempt = 0L;
+                    session.unifiedNativeCommitRequestedType = null;
+                    if (externalTimeout != null) {
+                        handler.removeCallbacks(externalTimeout);
+                    }
+                    session.nativeTimeout = null;
+                    if (externalTransition != null) {
+                        externalTransition.phase.set(
+                                UnifiedNativeCommitTransitionToken
+                                        .PHASE_INVALID);
+                    }
+                    session.unifiedNativeCommitTransition = null;
+                    invalidateElementTransitionContinuity(
+                            session, "externalCommitTerminationPartial",
+                            true);
+                }
+                log(Log.ERROR, TAG,
+                        "Could not queue or terminate unified Xiaomi cancel"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", animToEntered="
+                                + animToEntered,
+                        throwable);
+                return false;
+            }
+        }
+
+        private void scheduleUnifiedNativeCancelTimeout(
+                ReturnHomeSession session, long animToEpoch,
+                String reason) {
+            Runnable previous = session.unifiedNativeCancelTimeout;
+            if (previous != null) {
+                handler.removeCallbacks(previous);
+            }
+            Runnable timeout = () -> {
+                if (currentSession != session
+                        || session.finished.get() != 0
+                        || session.unifiedNativeCleanupVerified
+                        || !session.unifiedNativeCancelPending
+                        || session.unifiedNativeCancelAnimToEpoch
+                        != animToEpoch) {
+                    return;
+                }
+                long attempt = session.unifiedNativeRetargetAttempts
+                        .incrementAndGet();
+                session.unifiedNativeCancelTimeoutAttempt = attempt;
+                try {
+                    executeOnNativeGestureAnimationOwner(() -> {
+                        UnifiedNativeRetargetInspection inspection =
+                                inspectUnifiedNativeRetarget(
+                                        session, attempt,
+                                        "APP_TO_APP", true);
+                        handler.post(() ->
+                                completeUnifiedNativeCancelTimeout(
+                                        session, inspection,
+                                        animToEpoch, reason));
+                    });
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Could not inspect timed-out Xiaomi cancel owner"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", attempt=" + attempt
+                                    + ", animToEpoch="
+                                    + animToEpoch
+                                    + ", reason=" + reason,
+                            throwable);
+                    scheduleUnifiedNativeCancelTimeout(
+                            session, animToEpoch, reason);
+                }
+            };
+            session.unifiedNativeCancelTimeout = timeout;
+            handler.postDelayed(timeout,
+                    RETURN_HOME_NATIVE_TIMEOUT_MS);
+        }
+
+        private void completeUnifiedNativeCancelTimeout(
+                ReturnHomeSession session,
+                UnifiedNativeRetargetInspection inspection,
+                long animToEpoch, String reason) {
+            if (session == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || !session.unifiedNativeCancelPending
+                    || session.unifiedNativeCancelAnimToEpoch
+                    != animToEpoch
+                    || session.unifiedNativeActiveAnimToEpoch
+                    != animToEpoch
+                    || session.unifiedNativeCancelTimeoutAttempt
+                    != inspection.attempt) {
+                return;
+            }
+            if (consumeUnifiedNativeFinishSnapshot(
+                    session, "unifiedCancelTimeout:" + reason)) {
+                return;
+            }
+            Object currentElement = null;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not verify timed-out Xiaomi cancel element"
+                                + ", generation="
+                                + session.generation
+                                + ", attempt="
+                                + inspection.attempt,
+                        throwable);
+            }
+            log(Log.ERROR, TAG,
+                    "Retained timed-out Xiaomi cancel owner without same-epoch end"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + inspection.attempt
+                            + ", animToEpoch=" + animToEpoch
+                            + ", type=" + inspection.actualType
+                            + ", sameAnimation="
+                            + inspection.sameAnimation
+                            + ", exactTarget="
+                            + inspection.exactTarget
+                            + ", sameElement="
+                            + (currentElement
+                            == session.nativeWindowElement)
+                            + ", running=" + inspection.running
+                            + ", finishComplete="
+                            + inspection.finishComplete
+                            + ", fullscreen="
+                            + inspection.fullscreen,
+                    inspection.failure);
+            scheduleUnifiedNativeCancelTimeout(
+                    session, animToEpoch, reason);
+        }
+
+        private void acceptUnifiedNativeCancel(
+                ReturnHomeSession session,
+                UnifiedNativeRetargetInspection inspection,
+                String reason) {
+            if (session == null || inspection == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCancelPending
+                    || session.unifiedNativeCancelAttempt
+                    != inspection.attempt) {
+                return;
+            }
+            Object currentElement;
+            try {
+                currentElement = invokeAnyMethod(
+                        session.stateManager, "getCurrentWindowElement",
+                        new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not verify Xiaomi cancel element on main"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt,
+                        throwable);
+                return;
+            }
+            boolean exact = inspection.failure == null
+                    && inspection.sameAnimation
+                    && inspection.exactTarget
+                    && "APP_TO_APP".equals(inspection.actualType)
+                    && currentElement == session.nativeWindowElement;
+            if (!exact) {
+                log(Log.ERROR, TAG,
+                        "Rejected Xiaomi cancel at animation-owner tail; retained owner"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + inspection.attempt
+                                + ", actualType="
+                                + inspection.actualType
+                                + ", sameAnimation="
+                                + inspection.sameAnimation
+                                + ", exactTarget="
+                                + inspection.exactTarget
+                                + ", running=" + inspection.running,
+                        inspection.failure);
+                return;
+            }
+            session.unifiedNativeCancelRetargeted = true;
+            log(Log.INFO, TAG,
+                    "Accepted unified Xiaomi fullscreen cancel at owner tail"
+                            + ", generation=" + session.generation
+                            + ", attempt=" + inspection.attempt
+                            + ", reason=" + reason
+                            + ", running=" + inspection.running
+                            + ", finishComplete="
+                            + inspection.finishComplete
+                            + ", fullscreen="
+                            + inspection.fullscreen);
+            if (session.unifiedNativeCancelEndObserved) {
+                completeUnifiedNativeCancel(
+                        session, "unifiedCancelEndBeforeAcceptance");
+            }
+        }
+
+        private void completeUnifiedNativeCancel(
+                ReturnHomeSession session, String reason) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativeCancelPending
+                    || !session.unifiedNativeCancelRetargeted
+                    || !session.unifiedNativeCancelEndObserved) {
+                return;
+            }
+            consumeUnifiedNativeFinishSnapshot(session, reason);
+        }
+
         private boolean isStandardSingleTaskReturnHome(ReturnHomeSession session) {
             if (session.apps == null || session.apps.length != 2
                     || session.closingTarget == null
@@ -11159,6 +17360,560 @@ public final class MiuiBackGestureHook extends XposedModule {
             return closingCount == 1 && openingCount == 1;
         }
 
+        private boolean standardSignalMatchesSession(
+                StandardReturnHomeCommitSignal signal,
+                ReturnHomeSession session) {
+            if (signal == null || session == null
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || !signal.matchesInput(
+                    session.acceptedInputIdentity)
+                    || signal.arbiterGeneration
+                    != miuiHomeSystemUiInputArbiterGeneration
+                    || (signal.launcherSessionGeneration != 0L
+                    && signal.launcherSessionGeneration
+                    != session.generation)
+                    || !isStandardSingleTaskReturnHome(session)) {
+                return false;
+            }
+            int closingTaskId = session.unifiedNativeTaskId >= 0
+                    ? session.unifiedNativeTaskId
+                    : readIntFieldOrDefault(
+                    session.closingTarget, "taskId", -1);
+            return closingTaskId >= 0
+                    && signal.taskId == closingTaskId;
+        }
+
+        void onMiuiHomeAcceptedInputIdentityChanged(
+                MiuiHomeAcceptedInputToken identity) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                handler.post(() ->
+                        onMiuiHomeAcceptedInputIdentityChanged(identity));
+                return;
+            }
+            while (true) {
+                StandardReturnHomeCommitSignal pending =
+                        pendingStandardCommitSignal.get();
+                if (pending == null
+                        || pending.launcherSessionGeneration != 0L
+                        || pending.matchesInput(identity)) {
+                    return;
+                }
+                if (pendingStandardCommitSignal.compareAndSet(
+                        pending, null)) {
+                    log(Log.WARN, TAG,
+                            "Discarded unbound standard commit on new accepted DOWN"
+                                    + ", attempt=" + pending.attempt
+                                    + ", oldEventId="
+                                    + pending.eventId
+                                    + ", newEventId="
+                                    + (identity == null ? 0
+                                    : identity.eventId));
+                    return;
+                }
+            }
+        }
+
+        private void discardMatchingUnboundStandardSignal(
+                MiuiHomeAcceptedInputToken identity, String reason) {
+            if (identity == null) {
+                return;
+            }
+            while (true) {
+                StandardReturnHomeCommitSignal pending =
+                        pendingStandardCommitSignal.get();
+                if (pending == null
+                        || pending.launcherSessionGeneration != 0L
+                        || pending.arbiterGeneration
+                        != miuiHomeSystemUiInputArbiterGeneration
+                        || !pending.matchesInput(identity)) {
+                    return;
+                }
+                if (pendingStandardCommitSignal.compareAndSet(
+                        pending, null)) {
+                    log(Log.WARN, TAG,
+                            "Discarded matching unbound standard commit"
+                                    + ", attempt=" + pending.attempt
+                                    + ", taskId=" + pending.taskId
+                                    + ", eventId=" + pending.eventId
+                                    + ", arbiterGeneration="
+                                    + pending.arbiterGeneration
+                                    + ", reason=" + reason);
+                    return;
+                }
+            }
+        }
+
+        private void bindPendingStandardCommitToSession(
+                ReturnHomeSession session) {
+            if (session == null || currentSession != session) {
+                return;
+            }
+            while (true) {
+                StandardReturnHomeCommitSignal pending =
+                        pendingStandardCommitSignal.get();
+                if (pending == null
+                        || pending.launcherSessionGeneration
+                        == session.generation) {
+                    return;
+                }
+                if (pending.launcherSessionGeneration != 0L
+                        || !standardSignalMatchesSession(
+                        pending, session)) {
+                    if (pending.launcherSessionGeneration == 0L
+                            && pendingStandardCommitSignal.compareAndSet(
+                            pending, null)) {
+                        log(Log.WARN, TAG,
+                                "Discarded unbound standard commit at runner mismatch"
+                                        + ", attempt="
+                                        + pending.attempt
+                                        + ", eventId="
+                                        + pending.eventId
+                                        + ", runnerGeneration="
+                                        + session.generation);
+                    }
+                    return;
+                }
+                StandardReturnHomeCommitSignal bound =
+                        pending.bindToLauncherSession(
+                                session.generation);
+                if (pendingStandardCommitSignal.compareAndSet(
+                        pending, bound)) {
+                    log(Log.INFO, TAG,
+                            "Bound early standard commit to launcher runner"
+                                    + ", attempt=" + bound.attempt
+                                    + ", taskId=" + bound.taskId
+                                    + ", eventId=" + bound.eventId
+                                    + ", launcherGeneration="
+                                    + bound.launcherSessionGeneration);
+                    return;
+                }
+            }
+        }
+
+        void onStandardShellReturnHomeCommit(
+                StandardReturnHomeCommitSignal signal) {
+            if (signal == null || !attached) {
+                return;
+            }
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                handler.post(() -> onStandardShellReturnHomeCommit(signal));
+                return;
+            }
+            MiuiHomeAcceptedInputToken latestInput =
+                    miuiHomeAcceptedInputIdentity.get();
+            if (signal.arbiterGeneration
+                    != miuiHomeSystemUiInputArbiterGeneration
+                    || !signal.matchesInput(latestInput)) {
+                log(Log.WARN, TAG,
+                        "Rejected standard commit without current accepted DOWN"
+                                + ", attempt=" + signal.attempt
+                                + ", taskId=" + signal.taskId
+                                + ", eventId=" + signal.eventId
+                                + ", currentEventId="
+                                + (latestInput == null ? 0
+                                : latestInput.eventId));
+                return;
+            }
+            if (signal.attempt <= lastStandardCommitSignalAttempt) {
+                log(Log.WARN, TAG,
+                        "Ignored reordered standard return-home commit signal"
+                                + ", attempt=" + signal.attempt
+                                + ", lastAttempt="
+                                + lastStandardCommitSignalAttempt
+                                + ", taskId=" + signal.taskId);
+                return;
+            }
+            lastStandardCommitSignalAttempt = signal.attempt;
+            ReturnHomeSession activeSession = currentSession;
+            boolean bindNow = standardSignalMatchesSession(
+                    signal, activeSession);
+            StandardReturnHomeCommitSignal boundSignal = bindNow
+                    ? signal.bindToLauncherSession(
+                    activeSession.generation)
+                    : signal;
+            while (true) {
+                StandardReturnHomeCommitSignal previous =
+                        pendingStandardCommitSignal.get();
+                if (previous != null
+                        && previous.attempt >= boundSignal.attempt) {
+                    log(Log.WARN, TAG,
+                            "Ignored stale standard return-home commit signal"
+                                    + ", attempt=" + boundSignal.attempt
+                                    + ", activeAttempt="
+                                    + previous.attempt
+                                    + ", taskId=" + boundSignal.taskId);
+                    return;
+                }
+                if (pendingStandardCommitSignal.compareAndSet(
+                        previous, boundSignal)) {
+                    break;
+                }
+            }
+            log(Log.INFO, TAG,
+                    "Received authenticated standard return-home commit"
+                            + ", attempt=" + boundSignal.attempt
+                            + ", taskId=" + boundSignal.taskId
+                            + ", transitionDebugId="
+                            + boundSignal.transitionDebugId
+                            + ", arbiterGeneration="
+                            + boundSignal.arbiterGeneration
+                            + ", eventId=" + boundSignal.eventId
+                            + ", launcherGeneration="
+                            + boundSignal.launcherSessionGeneration);
+            if (bindNow) {
+                continueUnifiedStandardCommit(activeSession);
+            } else {
+                log(Log.INFO, TAG,
+                        "Retained authenticated standard commit until runner arrives"
+                                + ", attempt="
+                                + boundSignal.attempt
+                                + ", taskId="
+                                + boundSignal.taskId
+                                + ", eventId="
+                                + boundSignal.eventId);
+            }
+        }
+
+        private void continueUnifiedStandardCommit(
+                ReturnHomeSession session) {
+            StandardReturnHomeCommitSignal signal =
+                    pendingStandardCommitSignal.get();
+            if (signal == null || session == null
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || !session.nativeHandoffStarted
+                    || !session.unifiedNativeCommitPending
+                    || !session.unifiedNativeCommitReady.get()
+                    || session.unifiedNativeCleanupVerified
+                    || session.unifiedNativeStandardCommit != null) {
+                return;
+            }
+            if (signal.arbiterGeneration
+                    != miuiHomeSystemUiInputArbiterGeneration
+                    || signal.launcherSessionGeneration
+                    != session.generation
+                    || !signal.matchesInput(
+                    session.acceptedInputIdentity)
+                    || signal.taskId != session.unifiedNativeTaskId
+                    || session.unifiedNativeCommitTransition != null
+                    || !isStandardSingleTaskReturnHome(session)) {
+                if (signal.taskId != session.unifiedNativeTaskId
+                        || signal.arbiterGeneration
+                        != miuiHomeSystemUiInputArbiterGeneration
+                        || signal.launcherSessionGeneration
+                        != session.generation
+                        || !signal.matchesInput(
+                        session.acceptedInputIdentity)) {
+                    pendingStandardCommitSignal.compareAndSet(signal, null);
+                }
+                log(Log.WARN, TAG,
+                        "Rejected non-matching standard return-home commit"
+                                + ", attempt=" + signal.attempt
+                                + ", signalTaskId=" + signal.taskId
+                                + ", sessionTaskId="
+                                + session.unifiedNativeTaskId
+                                + ", signalGeneration="
+                                + signal.arbiterGeneration
+                                + ", currentGeneration="
+                                + miuiHomeSystemUiInputArbiterGeneration
+                                + ", signalLauncherGeneration="
+                                + signal.launcherSessionGeneration
+                                + ", sessionGeneration="
+                                + session.generation
+                                + ", inputMatch="
+                                + signal.matchesInput(
+                                session.acceptedInputIdentity)
+                                + ", nativeTransition="
+                                + shortObject(
+                                session.unifiedNativeCommitTransition));
+                return;
+            }
+            UnifiedNativeStandardCommitToken standardToken = null;
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
+                if (currentElement != session.nativeWindowElement
+                        || currentIdentity
+                        != session.unifiedNativeAnimationIdentity
+                        || !"CLOSE_TO_DRAG".equals(currentType)
+                        || !pendingStandardCommitSignal.compareAndSet(
+                        signal, null)) {
+                    throw new IllegalStateException(
+                            "standard commit owner changed"
+                                    + ", currentType=" + currentType
+                                    + ", sameElement="
+                                    + (currentElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity
+                                    == session.unifiedNativeAnimationIdentity));
+                }
+                UnifiedNativeStandardCommitToken token =
+                        new UnifiedNativeStandardCommitToken(
+                                session, signal);
+                standardToken = token;
+                session.unifiedNativeStandardCommit = token;
+                boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "isAnimRunning", new Object[0]));
+                if (!running) {
+                    armUnifiedLocalHandoffStatus(
+                            session, "standardShellCommit");
+                }
+                Object compatApps = wrapNativeAnimationTargets(
+                        session.apps);
+                Object compatNonApps = wrapNativeAnimationTargets(
+                        session.nonApps);
+                invokeAnyMethod(session.nativeWindowElement,
+                        "onClosingWindowTransitionExecute",
+                        new Object[]{compatApps, compatNonApps,
+                                null, Boolean.FALSE});
+                session.previewBlurProviderReturned = true;
+                session.previewBackdropProviderReturned = true;
+                log(Log.INFO, TAG,
+                        "Requested Xiaomi standard CLOSE on unified owner"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + signal.attempt
+                                + ", taskId=" + signal.taskId
+                                + ", transitionDebugId="
+                                + signal.transitionDebugId
+                                + ", dragRunning=" + running
+                                + ", animationIdentity="
+                                + shortObject(currentIdentity));
+            } catch (Throwable throwable) {
+                UnifiedNativeStandardCommitToken token = standardToken;
+                if (token == null) {
+                    token = session.unifiedNativeStandardCommit;
+                }
+                boolean failedBeforeAdoption = token == null
+                        || (token.session == session
+                        && token.phase.compareAndSet(
+                        UnifiedNativeStandardCommitToken.PHASE_PENDING,
+                        UnifiedNativeStandardCommitToken.PHASE_INVALID));
+                if (failedBeforeAdoption) {
+                    if (token != null
+                            && session.unifiedNativeStandardCommit == token) {
+                        session.unifiedNativeStandardCommit = null;
+                    }
+                    boolean terminationQueued =
+                            requestUnifiedPendingCommitTermination(
+                                    session,
+                                    "standardNativeHandoffRejected");
+                    log(Log.ERROR, TAG,
+                            "Failed Xiaomi standard CLOSE before animTo adoption"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", attempt=" + signal.attempt
+                                    + ", taskId=" + signal.taskId
+                                    + ", tokenCreated=" + (token != null)
+                                    + ", terminationQueued="
+                                    + terminationQueued,
+                            throwable);
+                    return;
+                }
+                int phase = token == null
+                        ? UnifiedNativeStandardCommitToken.PHASE_INVALID
+                        : token.phase.get();
+                boolean terminationQueued = (phase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERING
+                        || phase
+                        == UnifiedNativeStandardCommitToken.PHASE_ENTERED)
+                        && requestUnifiedPendingCommitTermination(
+                        session, "standardNativeProviderFailed");
+                log(Log.ERROR, TAG,
+                        "Xiaomi standard CLOSE provider tail failed; retained native owner"
+                                + ", generation=" + session.generation
+                                + ", attempt=" + signal.attempt
+                                + ", taskId=" + signal.taskId
+                                + ", tokenPhase=" + phase
+                                + ", nativeStarted="
+                                + session.nativeAnimationStarted
+                                + ", cleanupVerified="
+                                + session.unifiedNativeCleanupVerified
+                                + ", terminationQueued="
+                                + terminationQueued,
+                        throwable);
+            }
+        }
+
+        private boolean startUnifiedNativeProviderCommit(
+                ReturnHomeSession session) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeProviderCommitAdopted
+                    || !session.nativeHandoffStarted
+                    || !session.unifiedNativeCommitPending
+                    || !session.unifiedNativeCommitReady.get()
+                    || session.stateManager == null
+                    || session.nativeWindowElement == null
+                    || session.unifiedNativeAnimationIdentity == null) {
+                return false;
+            }
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
+                if (currentElement != session.nativeWindowElement
+                        || currentIdentity
+                        != session.unifiedNativeAnimationIdentity
+                        || !"CLOSE_TO_DRAG".equals(currentType)) {
+                    throw new IllegalStateException(
+                            "predictive owner changed before native provider"
+                                    + ", sameElement="
+                                    + (currentElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity
+                                    == session.unifiedNativeAnimationIdentity)
+                                    + ", type=" + currentType);
+                }
+
+                long providerAnimToEpoch = beginUnifiedAnimToEpoch(
+                        session, "nativeProviderCommit");
+                Object compatApps = wrapNativeAnimationTargets(
+                        session.apps);
+                Object compatNonApps = wrapNativeAnimationTargets(
+                        session.nonApps);
+                invokeAnyMethod(session.nativeWindowElement,
+                        "onClosingWindowTransitionExecute",
+                        new Object[]{compatApps, compatNonApps,
+                                null, Boolean.FALSE});
+
+                Object providerElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object providerIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                Object providerTypeObject = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getCurrentAnimType", new Object[0]);
+                String providerType = providerTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) providerTypeObject).name()
+                        : String.valueOf(providerTypeObject);
+                Object providerTargetSet = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0]);
+                Object homeTarget = providerTargetSet == null ? null
+                        : invokeAnyMethod(providerTargetSet,
+                        "getHomeTarget", new Object[0]);
+                SurfaceControl homeSurface = surfaceFromNativeTarget(
+                        homeTarget);
+                Object floatingObject = readField(
+                        session.nativeWindowElement,
+                        "mFloatingIconLayerLeash");
+                SurfaceControl floatingSurface =
+                        floatingObject instanceof SurfaceControl
+                                ? (SurfaceControl) floatingObject : null;
+                boolean running = Boolean.TRUE.equals(invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "isAnimRunning", new Object[0]));
+                boolean exact = providerElement
+                        == session.nativeWindowElement
+                        && providerIdentity
+                        == session.unifiedNativeAnimationIdentity
+                        && ("CLOSE_TO_HOME".equals(providerType)
+                        || "CLOSE_TO_HOME_CENTER".equals(providerType))
+                        && resolveUnifiedNativeClosingTarget(
+                        session, providerTargetSet) != null
+                        && homeSurface != null && homeSurface.isValid()
+                        && floatingSurface != null
+                        && floatingSurface.isValid();
+                if (!exact) {
+                    throw new IllegalStateException(
+                            "Xiaomi native provider did not establish full closing context"
+                                    + ", sameElement="
+                                    + (providerElement
+                                    == session.nativeWindowElement)
+                                    + ", sameIdentity="
+                                    + (providerIdentity
+                                    == session.unifiedNativeAnimationIdentity)
+                                    + ", type=" + providerType
+                                    + ", hasHome="
+                                    + (homeSurface != null
+                                    && homeSurface.isValid())
+                                    + ", hasFloatingLayer="
+                                    + (floatingSurface != null
+                                    && floatingSurface.isValid())
+                                    + ", running=" + running);
+                }
+
+                verifyUnifiedStateManagerListenerGate(
+                        session, false, "nativeProviderAdopted");
+                session.unifiedNativeProviderCommitAdopted = true;
+                session.unifiedNativeCommitPending = false;
+                session.nativeAnimationIdentity = providerIdentity;
+                session.nativeAnimationType = providerType;
+                session.nativeAnimationStarted = true;
+                session.nativeContinuationVerified = true;
+                session.previewBlurProviderReturned = true;
+                session.previewBackdropProviderReturned = true;
+                Runnable previousTimeout = session.nativeTimeout;
+                if (previousTimeout != null) {
+                    handler.removeCallbacks(previousTimeout);
+                }
+                session.nativeTimeout = null;
+                completeUnifiedNativeCommitHandoff(
+                        session, providerIdentity, providerType);
+                scheduleUnifiedNativeEndTimeout(session);
+                StandardReturnHomeCommitSignal pendingSignal =
+                        pendingStandardCommitSignal.get();
+                if (pendingSignal != null
+                        && pendingSignal.taskId
+                        == session.unifiedNativeTaskId
+                        && pendingSignal.launcherSessionGeneration
+                        == session.generation
+                        && pendingSignal.matchesInput(
+                        session.acceptedInputIdentity)) {
+                    pendingStandardCommitSignal.compareAndSet(
+                            pendingSignal, null);
+                }
+                log(Log.INFO, TAG,
+                        "Adopted Xiaomi full native closing provider on unified owner"
+                                + ", generation=" + session.generation
+                                + ", from=CLOSE_TO_DRAG"
+                                + ", to=" + providerType
+                                + ", animToEpoch="
+                                + providerAnimToEpoch
+                                + ", running=" + running
+                                + ", hasHome=true"
+                                + ", floatingLayer="
+                                + shortObject(floatingSurface)
+                                + ", animationIdentity="
+                                + shortObject(providerIdentity));
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed Xiaomi full native provider adoption on unified owner"
+                                + ", generation="
+                                + session.generation,
+                        throwable);
+                return false;
+            }
+        }
+
         private void startNativeClose(ReturnHomeSession session) {
             if (session.finished.get() != 0 || currentSession != session
                     || session.nativeHandoffStarted) {
@@ -11174,6 +17929,48 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session.previewBlurTargetDimming, "commit");
             }
             prepareNativePreviewBackdropForCommit(session);
+            if (session.unifiedNativePreviewOwned) {
+                session.nativeHandoffStarted = true;
+                session.unifiedNativeCommitPending = true;
+                log(Log.INFO, TAG,
+                        "Held Xiaomi CLOSE_TO_DRAG for real commit transition"
+                                + ", generation=" + session.generation
+                                + ", animationIdentity="
+                                + shortObject(
+                                session.unifiedNativeAnimationIdentity)
+                                + ", rect=" + session.currentRect);
+                if (!session.unifiedNativeCommitReady.compareAndSet(
+                        false, true)) {
+                    log(Log.ERROR, TAG,
+                            "Rejected duplicate Xiaomi predictive retarget boundary"
+                                    + ", generation=" + session.generation
+                                    + ", ready=true");
+                    return;
+                }
+                // Enter Xiaomi's complete native closing provider with the original runner
+                // targets before the real element transition arrives. The provider binds Home
+                // and the floating-icon layer, while LocalWindowAnimImplementor retargets the
+                // same running RectFSpringAnim. The later CLOSE_TO_ELEMENT transition can then
+                // use Xiaomi's normal CLOSE_TO_HOME -> CLOSE_TO_ELEMENT path without changing
+                // Surface or animation ownership.
+                log(Log.INFO, TAG,
+                        "Entering Xiaomi full native closing provider on unified owner"
+                                + ", generation=" + session.generation
+                                + ", animationIdentity="
+                                + shortObject(
+                                session.unifiedNativeAnimationIdentity)
+                                + ", rect=" + session.currentRect);
+                if (startUnifiedNativeProviderCommit(session)) {
+                    return;
+                }
+                Runnable timeout = () ->
+                        classifyUnifiedCommitTransitionTimeout(session);
+                session.nativeTimeout = timeout;
+                handler.postDelayed(timeout,
+                        RETURN_HOME_NATIVE_TIMEOUT_MS);
+                continueUnifiedStandardCommit(session);
+                return;
+            }
             session.nativeHandoffStarted = true;
             try {
                 Class<?> stateManagerClass = Class.forName(
@@ -11279,8 +18076,19 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + session.nativeStatusPublished
                                 + ", animationStarted="
                                 + session.nativeAnimationStarted);
-                        finishSession(session, "nativeTimeout",
-                                shouldRestorePreview(session));
+                        if (session.nativeAnimationStarted
+                                && isReturnHomeNativeCloseType(
+                                session.nativeAnimationType)) {
+                            log(Log.ERROR, TAG,
+                                    "Retained timed-out Xiaomi CLOSE owner until exact native end"
+                                            + ", generation="
+                                            + session.generation
+                                            + ", type="
+                                            + session.nativeAnimationType);
+                        } else {
+                            finishSession(session, "nativeTimeout",
+                                    shouldRestorePreview(session));
+                        }
                     }
                 };
                 session.nativeTimeout = timeout;
@@ -11308,28 +18116,51 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && session.nativeAnimationIdentity == null;
         }
 
-        void onNativeAnimationStart(Object listener, Object animationIdentity) {
+        boolean onNativeAnimationStart(
+                Object listener, Object animationIdentity) {
             ReturnHomeSession session = currentSession;
-            if (session == null || session.finished.get() != 0
-                    || !session.nativeHandoffStarted
-                    || !session.nativeStatusPublished
-                    || session.nativeAnimationIdentity != null) {
-                return;
+            if (session == null) {
+                return false;
             }
             try {
                 Object stateManager = readField(listener, "this$0");
                 Object windowElement = invokeAnyMethod(stateManager,
                         "getCurrentWindowElement", new Object[0]);
+                if (session.finished.get() == 0
+                        && session.unifiedNativePreviewOwned
+                        && stateManager == session.stateManager
+                        && windowElement == session.nativeWindowElement
+                        && animationIdentity
+                        == session.unifiedNativeAnimationIdentity) {
+                    log(Log.INFO, TAG,
+                            "Observed module-owned Xiaomi predictive spring"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", phase="
+                                    + (session.nativeHandoffStarted
+                                    ? "commit" : "preview")
+                                    + ", animationIdentity="
+                                    + shortObject(animationIdentity));
+                    return true;
+                }
+                if (session.finished.get() != 0
+                        || !session.nativeHandoffStarted
+                        || !session.nativeStatusPublished
+                        || session.nativeAnimationIdentity != null) {
+                    return false;
+                }
                 if (windowElement != session.nativeWindowElement) {
-                    return;
+                    return false;
                 }
                 session.nativeAnimationIdentity = animationIdentity;
                 verifyNativeContinuationStart(session, animationIdentity);
                 handler.post(() -> verifyNativeAnimationStarted(session,
                         stateManager, windowElement, animationIdentity));
+                return true;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to capture Xiaomi CLOSE animation identity"
                         + ", generation=" + session.generation, throwable);
+                return false;
             }
         }
 
@@ -11396,8 +18227,60 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        void prepareNativeCloseInterruption(
+                Object windowElement, String reason) throws Throwable {
+            if (!MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(reason)) {
+                return;
+            }
+            adoptConfiguredCommitForInterruption(
+                    currentSession, windowElement,
+                    "cancelSurfacePre:" + reason);
+            ReturnHomeSession session = currentSession;
+            UnifiedNativePendingInterruptionSnapshot snapshot =
+                    session == null ? null
+                            : session.unifiedNativePendingInterruption.get();
+            if (snapshot != null) {
+                synchronized (snapshot.configLock) {
+                    adoptConfiguredCommitForInterruption(
+                            currentSession, windowElement,
+                            "cancelSurfacePreLocked:" + reason);
+                    session = currentSession;
+                    UnifiedNativePendingInterruptionSnapshot active =
+                            session == null ? null
+                                    : session.unifiedNativePendingInterruption.get();
+                    if (active == snapshot && currentSession == session
+                            && !session.nativeAnimationStarted
+                            && snapshot.windowElement == windowElement
+                            && snapshot.animationIdentity
+                            == session.unifiedNativeAnimationIdentity
+                            && snapshot.phase.get()
+                            == UnifiedNativePendingInterruptionSnapshot
+                            .PHASE_PENDING
+                            && snapshot.mutation.compareAndSet(
+                            UnifiedNativePendingInterruptionSnapshot
+                                    .MUTATION_NONE,
+                            UnifiedNativePendingInterruptionSnapshot
+                                    .MUTATION_CANCEL_SURFACE)) {
+                        log(Log.INFO, TAG,
+                                "Marked pre-config Xiaomi cancel-surface mutation"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", animToEpoch="
+                                        + snapshot.animToEpoch);
+                    }
+                }
+            }
+        }
+
         boolean shouldRouteSameIconThroughNativeParallel(
                 Object stateManager, Object[] args) throws Throwable {
+            return shouldRouteSameIconThroughNativeParallel(
+                    stateManager, args, false);
+        }
+
+        private boolean shouldRouteSameIconThroughNativeParallel(
+                Object stateManager, Object[] args,
+                boolean configLocked) throws Throwable {
             if (args == null || args.length != 4
                     || !MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(args[0])
                     || !Boolean.TRUE.equals(args[1])
@@ -11419,15 +18302,24 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (session == null) {
                 return false;
             }
-            if (!attached || session.finished.get() != 0
+            adoptConfiguredCommitForInterruption(
+                    session, session.nativeWindowElement,
+                    "sameIconParallelRoute");
+            UnifiedNativePendingInterruptionSnapshot earlyPending =
+                    session.unifiedNativePendingInterruption.get();
+            if (!configLocked && !session.nativeAnimationStarted
+                    && earlyPending != null) {
+                synchronized (earlyPending.configLock) {
+                    return shouldRouteSameIconThroughNativeParallel(
+                            stateManager, args, true);
+                }
+            }
+            if (session.finished.get() != 0
                     || session.cleaned.get() != 0
                     || !session.nativeHandoffStarted
-                    || !session.nativeAnimationStarted
-                    || !session.nativeContinuationVerified
                     || session.stateManager != stateManager
                     || session.nativeWindowElement == null
-                    || session.nativeAnimationIdentity == null
-                    || !"CLOSE_TO_HOME".equals(session.nativeAnimationType)) {
+                    || session.nativeAnimationIdentity == null) {
                 log(Log.WARN, TAG,
                         "Rejected inactive Xiaomi same-icon native parallel routing"
                                 + ", generation=" + session.generation
@@ -11511,18 +18403,33 @@ public final class MiuiBackGestureHook extends XposedModule {
                     readField(windowElement, "mShellTransitionCallback") == null;
             boolean noPendingHandoff = pendingCloseInterruption.get() == null
                     && pendingDirectCancel.get() == null;
+            boolean verifiedClose = session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && session.nativeAnimationIdentity == currentIdentity
+                    && "CLOSE_TO_HOME".equals(currentType)
+                    && session.nativeAnimationType.equals(currentType);
+            UnifiedNativePendingInterruptionSnapshot
+                    pendingCommitInterruption =
+                    session.unifiedNativePendingInterruption.get();
+            boolean pendingCommit = !session.nativeAnimationStarted
+                    && isExactUnifiedPendingInterruption(
+                    session, pendingCommitInterruption,
+                    currentElement, currentIdentity,
+                    currentType, true);
             boolean valid = currentSession == session
                     && session.generation > 0L
                     && currentElement == windowElement
                     && currentIdentity == session.nativeAnimationIdentity
-                    && session.nativeAnimationType.equals(currentType)
+                    && (verifiedClose || pendingCommit)
                     && samePendingIcon && running && !reusable && !usingSf
                     && !mainAnimNoFinishClear
                     && validSurface && multiFlyHelper != null && !currentMultiFly
                     && !nativeWouldCancelSurfaceAndView
                     && !nativeWouldCancelElement
                     && !canceled && !surfaceCanceled && !surfaceCancelExecuted
-                    && !listenerDisabled && !finishSurface && !finishComplete
+                    && (pendingCommit
+                    ? listenerDisabled : !listenerDisabled)
+                    && !finishSurface
                     && !duringMerge && !endWaitingMerge && cancelSurfaceTaskClear
                     && useShellListener && couldExecuteShellEnd && callbackClear
                     && noPendingHandoff;
@@ -11581,12 +18488,22 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             ReturnHomeSession session = currentSession;
+            try {
+                adoptConfiguredCommitForInterruption(
+                        session, windowElement,
+                        "cancelSurfacePost:" + reason);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not adopt Xiaomi commit at cancel-surface fallback"
+                                + ", generation="
+                                + (session == null ? 0L
+                                : session.generation),
+                        throwable);
+            }
             if (session == null || session.finished.get() != 0
-                    || !session.nativeAnimationStarted
                     || session.stateManager == null
                     || session.nativeWindowElement != windowElement
-                    || session.nativeAnimationIdentity == null
-                    || !isReturnHomeNativeCloseType(session.nativeAnimationType)) {
+                    || session.nativeAnimationIdentity == null) {
                 return;
             }
             try {
@@ -11594,12 +18511,32 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session.stateManager, "getCurrentWindowElement", new Object[0]);
                 Object currentIdentity = invokeAnyMethod(
                         windowElement, "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        windowElement, "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
                 boolean surfaceCanceled = Boolean.TRUE.equals(
                         readField(windowElement, "mSurfaceCanceled"));
                 boolean listenerDisabled = Boolean.TRUE.equals(
                         readField(windowElement, "mDisableStateManagerListener"));
+                boolean verifiedClose = session.nativeAnimationStarted
+                        && session.nativeContinuationVerified
+                        && session.nativeAnimationIdentity
+                        == currentIdentity
+                        && session.nativeAnimationType.equals(currentType)
+                        && isReturnHomeNativeCloseType(currentType);
+                UnifiedNativePendingInterruptionSnapshot
+                        pendingCommitInterruption =
+                        session.unifiedNativePendingInterruption.get();
+                boolean pendingCommit = !session.nativeAnimationStarted
+                        && isExactUnifiedPendingInterruption(
+                        session, pendingCommitInterruption,
+                        currentElement, currentIdentity,
+                        currentType, false);
                 if (currentElement != windowElement
                         || currentIdentity != session.nativeAnimationIdentity
+                        || (!verifiedClose && !pendingCommit)
                         || !surfaceCanceled || !listenerDisabled) {
                     log(Log.WARN, TAG,
                             "Rejected mismatched interrupted Xiaomi return-home CLOSE"
@@ -11609,13 +18546,18 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + (currentIdentity == session.nativeAnimationIdentity)
                                     + ", surfaceCanceled=" + surfaceCanceled
                                     + ", listenerDisabled=" + listenerDisabled
-                                    + ", type=" + session.nativeAnimationType);
+                                    + ", type=" + currentType
+                                    + ", verifiedClose=" + verifiedClose
+                                    + ", pendingCommit=" + pendingCommit);
                     return;
                 }
                 ReturnHomeCloseInterruptionToken token =
                         new ReturnHomeCloseInterruptionToken(
                                 session, session.stateManager, windowElement,
-                                session.nativeAnimationIdentity);
+                                session.nativeAnimationIdentity,
+                                pendingCommit
+                                        ? pendingCommitInterruption
+                                        : null);
                 ReturnHomeCloseInterruptionToken replaced =
                         pendingCloseInterruption.getAndSet(token);
                 if (replaced != null && replaced.session != session) {
@@ -11628,7 +18570,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "Captured interrupted Xiaomi return-home CLOSE"
                                 + ", generation=" + session.generation
                                 + ", reason=" + reason
-                                + ", type=" + session.nativeAnimationType
+                                + ", type=" + currentType
+                                + ", pendingCommit=" + pendingCommit
                                 + ", animationIdentity="
                                 + shortObject(session.nativeAnimationIdentity)
                                 + ", windowElement=" + shortObject(windowElement));
@@ -11649,8 +18592,21 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 Object currentElement = invokeAnyMethod(
                         stateManager, "getCurrentWindowElement", new Object[0]);
+                String replacementType = null;
+                if (currentElement != null && currentElement != windowElement) {
+                    Object replacementTypeObject = invokeAnyMethod(
+                            currentElement, "getCurrentAnimType", new Object[0]);
+                    replacementType = replacementTypeObject instanceof Enum<?>
+                            ? ((Enum<?>) replacementTypeObject).name()
+                            : String.valueOf(replacementTypeObject);
+                }
                 Object currentIdentity = invokeAnyMethod(
                         windowElement, "getAnimSymbol", new Object[0]);
+                Object currentTypeObject = invokeAnyMethod(
+                        windowElement, "getCurrentAnimType", new Object[0]);
+                String currentType = currentTypeObject instanceof Enum<?>
+                        ? ((Enum<?>) currentTypeObject).name()
+                        : String.valueOf(currentTypeObject);
                 boolean surfaceCanceled = Boolean.TRUE.equals(
                         readField(windowElement, "mSurfaceCanceled"));
                 boolean surfaceCancelExecuted = Boolean.TRUE.equals(
@@ -11661,18 +18617,64 @@ public final class MiuiBackGestureHook extends XposedModule {
                         readField(windowElement, "mDisableStateManagerListener"));
                 boolean nativeCallbackConsumed =
                         readField(windowElement, "mShellTransitionCallback") == null;
+                Object oldListObject = readField(
+                        stateManager, "windowElementOldList");
+                boolean oldElementRecorded = oldListObject instanceof List<?>
+                        && ((List<?>) oldListObject).contains(windowElement);
+                boolean verifiedClose = session.nativeAnimationStarted
+                        && session.nativeContinuationVerified
+                        && session.nativeAnimationIdentity
+                        == token.animationIdentity
+                        && session.nativeAnimationType.equals(currentType)
+                        && isReturnHomeNativeCloseType(currentType);
+                UnifiedNativePendingInterruptionSnapshot
+                        pendingCommitInterruption =
+                        token.pendingCommitInterruption;
+                boolean pendingCommit = pendingCommitInterruption != null
+                        && !session.nativeAnimationStarted
+                        && isExactUnifiedPendingInterruption(
+                        session, pendingCommitInterruption,
+                        currentElement, currentIdentity,
+                        currentType, false);
+                UnifiedNativeFinishSnapshot finishSnapshot =
+                        session.unifiedNativeFinishSnapshot.get();
+                boolean exactInterruptedFinish = verifiedClose
+                        && finishSnapshot != null
+                        && finishSnapshot.phase.get()
+                        == UnifiedNativeFinishSnapshot.PHASE_PENDING
+                        && finishSnapshot.animationIdentity
+                        == token.animationIdentity
+                        && currentType.equals(finishSnapshot.actualType)
+                        && isExactUnifiedNativeFinishSnapshot(
+                        session, finishSnapshot);
+                boolean replacementElementValid = currentElement == null
+                        || (currentElement != windowElement
+                        && isMiuiHomeLauncherOpenType(replacementType));
+                boolean pendingCommitValid = pendingCommit
+                        && currentElement == windowElement
+                        && currentIdentity == token.animationIdentity
+                        && listenerDisabled;
+                boolean earlySetToOldValid = !pendingCommit
+                        && verifiedClose
+                        && currentElement == windowElement
+                        && currentIdentity == token.animationIdentity
+                        && listenerDisabled
+                        && oldElementRecorded;
+                boolean completedReplacementValid = !pendingCommit
+                        && exactInterruptedFinish
+                        && oldElementRecorded
+                        && replacementElementValid;
                 boolean valid = currentSession == session
                         && session.finished.get() == 0
                         && session.generation == token.generation
                         && session.stateManager == stateManager
                         && session.nativeWindowElement == windowElement
-                        && session.nativeAnimationStarted
                         && session.nativeAnimationIdentity == token.animationIdentity
-                        && currentElement == windowElement
                         && currentIdentity == token.animationIdentity
-                        && isReturnHomeNativeCloseType(session.nativeAnimationType)
+                        && (pendingCommitValid || earlySetToOldValid
+                        || completedReplacementValid)
                         && surfaceCanceled && surfaceCancelExecuted && canceled
-                        && listenerDisabled && nativeCallbackConsumed;
+                        && nativeCallbackConsumed;
                 if (!valid) {
                     pendingCloseInterruption.compareAndSet(token, null);
                     log(Log.WARN, TAG,
@@ -11681,6 +18683,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", currentSession=" + (currentSession == session)
                                     + ", finished=" + session.finished.get()
                                     + ", sameElement=" + (currentElement == windowElement)
+                                    + ", replacementType=" + replacementType
                                     + ", sameIdentity="
                                     + (currentIdentity == token.animationIdentity)
                                     + ", surfaceCanceled=" + surfaceCanceled
@@ -11690,19 +18693,68 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", listenerDisabled=" + listenerDisabled
                                     + ", nativeCallbackConsumed="
                                     + nativeCallbackConsumed
-                                    + ", type=" + session.nativeAnimationType);
+                                    + ", oldElementRecorded="
+                                    + oldElementRecorded
+                                    + ", exactInterruptedFinish="
+                                    + exactInterruptedFinish
+                                    + ", earlySetToOldValid="
+                                    + earlySetToOldValid
+                                    + ", type=" + currentType
+                                    + ", verifiedClose=" + verifiedClose
+                                    + ", pendingCommit=" + pendingCommit);
                     return;
                 }
                 if (!pendingCloseInterruption.compareAndSet(token, null)) {
                     return;
                 }
+                if (pendingCommit
+                        && !consumeUnifiedPendingInterruption(
+                        session, pendingCommitInterruption,
+                        "cancelSurfaceSetToOld")) {
+                    return;
+                }
+                if (!pendingCommit && !earlySetToOldValid) {
+                    if (finishSnapshot == null
+                            || !finishSnapshot.phase.compareAndSet(
+                            UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                            UnifiedNativeFinishSnapshot.PHASE_CONSUMED)) {
+                        log(Log.WARN, TAG,
+                                "Lost interrupted Xiaomi finish snapshot race"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", replacementType="
+                                        + replacementType);
+                        return;
+                    }
+                    session.unifiedNativeCommitEndObserved = true;
+                    session.unifiedNativeCommitPending = false;
+                    completeUnifiedNativeCommitHandoff(
+                            session, token.animationIdentity, currentType);
+                } else if (earlySetToOldValid) {
+                    // Xiaomi has cancelled the exact old application Surface, consumed its
+                    // Shell callback, and accepted the WindowElement into the old list. With
+                    // the complete native provider this boundary can precede the old CLOSE
+                    // finish callback; waiting for that callback lets the replacement OPEN
+                    // become current and strands the old Shell runner.
+                    session.unifiedNativeCommitPending = false;
+                }
                 log(Log.INFO, TAG,
                         "Accepted interrupted Xiaomi return-home completion boundary"
                                 + ", generation=" + session.generation
-                                + ", type=" + session.nativeAnimationType
+                                + ", type=" + currentType
+                                + ", pendingCommit=" + pendingCommit
+                                + ", earlySetToOld="
+                                + earlySetToOldValid
+                                + ", replacementType=" + replacementType
+                                + ", oldElementRecorded="
+                                + oldElementRecorded
                                 + ", animationIdentity="
                                 + shortObject(token.animationIdentity)
                                 + ", windowElement=" + shortObject(windowElement));
+                if (session.unifiedNativePreviewOwned
+                        && !pendingCommit) {
+                    session.unifiedNativeCleanupVerified = true;
+                }
                 // Xiaomi has completed the exact old CLOSE callback, while its outer icon-click
                 // callback has not yet created or requested the new FastLaunch OPEN. Release the
                 // prepared Shell transition here so its finish transaction cannot land on top of
@@ -11718,6 +18770,13 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         ReturnHomeDirectCancelToken prepareNativeDirectCancel(
                 Object windowElement, Object[] args) throws Throwable {
+            return prepareNativeDirectCancel(
+                    windowElement, args, false);
+        }
+
+        private ReturnHomeDirectCancelToken prepareNativeDirectCancel(
+                Object windowElement, Object[] args,
+                boolean configLocked) throws Throwable {
             if (args == null || args.length != 5
                     || !MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(args[0])
                     || !Boolean.FALSE.equals(args[1])
@@ -11731,13 +18790,24 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return null;
             }
             ReturnHomeSession session = currentSession;
+            adoptConfiguredCommitForInterruption(
+                    session, windowElement, "directCancel");
+            UnifiedNativePendingInterruptionSnapshot earlyPending =
+                    session == null ? null
+                            : session.unifiedNativePendingInterruption.get();
+            if (!configLocked && session != null
+                    && !session.nativeAnimationStarted
+                    && earlyPending != null) {
+                synchronized (earlyPending.configLock) {
+                    return prepareNativeDirectCancel(
+                            windowElement, args, true);
+                }
+            }
             if (session == null || session.finished.get() != 0
                     || !session.nativeHandoffStarted
-                    || !session.nativeAnimationStarted
                     || session.stateManager == null
                     || session.nativeWindowElement != windowElement
-                    || session.nativeAnimationIdentity == null
-                    || !isReturnHomeNativeCloseType(session.nativeAnimationType)) {
+                    || session.nativeAnimationIdentity == null) {
                 return null;
             }
 
@@ -11780,16 +18850,32 @@ public final class MiuiBackGestureHook extends XposedModule {
                     readField(windowElement, "couldExecuteShellAnimEnd"));
             boolean callbackClear =
                     readField(windowElement, "mShellTransitionCallback") == null;
+            boolean verifiedClose = session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && currentIdentity
+                    == session.nativeAnimationIdentity
+                    && session.nativeAnimationType.equals(currentType)
+                    && isReturnHomeNativeCloseType(currentType);
+            UnifiedNativePendingInterruptionSnapshot
+                    pendingCommitInterruption =
+                    session.unifiedNativePendingInterruption.get();
+            boolean pendingCommit = !session.nativeAnimationStarted
+                    && isExactUnifiedPendingInterruption(
+                    session, pendingCommitInterruption,
+                    currentElement, currentIdentity,
+                    currentType, true);
             boolean valid = currentSession == session
                     && session.generation > 0L
                     && session.stateManager == stateManager
                     && currentElement == windowElement
                     && currentIdentity == session.nativeAnimationIdentity
-                    && session.nativeAnimationType.equals(currentType)
+                    && (verifiedClose || pendingCommit)
                     && samePendingIcon && running && !reusable
                     && mainAnimPending && validSurface
                     && !canceled && !surfaceCanceled && !surfaceCancelExecuted
-                    && !listenerDisabled && useShellListener
+                    && (pendingCommit
+                    ? listenerDisabled : !listenerDisabled)
+                    && useShellListener
                     && couldExecuteShellEnd && callbackClear;
             if (!valid) {
                 log(Log.WARN, TAG,
@@ -11801,6 +18887,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + (currentIdentity == session.nativeAnimationIdentity)
                                 + ", type=" + currentType
                                 + ", expectedType=" + session.nativeAnimationType
+                                + ", verifiedClose=" + verifiedClose
+                                + ", pendingCommit=" + pendingCommit
+                                + ", verifiedClose=" + verifiedClose
+                                + ", pendingCommit=" + pendingCommit
                                 + ", samePendingIcon=" + samePendingIcon
                                 + ", running=" + running
                                 + ", reusable=" + reusable
@@ -11817,11 +18907,55 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", callbackClear=" + callbackClear);
                 return null;
             }
+            if (pendingCommit) {
+                synchronized (pendingCommitInterruption.configLock) {
+                    adoptConfiguredCommitForInterruption(
+                            currentSession, windowElement,
+                            "directCancelLocked");
+                    if (currentSession == session
+                            && session.nativeAnimationStarted) {
+                        return prepareNativeDirectCancel(
+                                windowElement, args, true);
+                    }
+                    Object lockedElement = invokeAnyMethod(
+                            stateManager, "getCurrentWindowElement",
+                            new Object[0]);
+                    Object lockedIdentity = invokeAnyMethod(
+                            windowElement, "getAnimSymbol",
+                            new Object[0]);
+                    Object lockedTypeObject = invokeAnyMethod(
+                            windowElement, "getCurrentAnimType",
+                            new Object[0]);
+                    String lockedType = lockedTypeObject instanceof Enum<?>
+                            ? ((Enum<?>) lockedTypeObject).name()
+                            : String.valueOf(lockedTypeObject);
+                    int mutation =
+                            pendingCommitInterruption.mutation.get();
+                    if (!isExactUnifiedPendingInterruption(
+                            session, pendingCommitInterruption,
+                            lockedElement, lockedIdentity,
+                            lockedType, true)
+                            || (mutation
+                            != UnifiedNativePendingInterruptionSnapshot
+                            .MUTATION_DIRECT_CANCEL
+                            && !pendingCommitInterruption.mutation
+                            .compareAndSet(
+                                    UnifiedNativePendingInterruptionSnapshot
+                                    .MUTATION_NONE,
+                                    UnifiedNativePendingInterruptionSnapshot
+                                    .MUTATION_DIRECT_CANCEL))) {
+                        return null;
+                    }
+                }
+            }
 
             ReturnHomeDirectCancelToken token =
                     new ReturnHomeDirectCancelToken(session, stateManager,
                             windowElement, session.nativeAnimationIdentity,
-                            pendingIcon, originalCallback);
+                            pendingIcon, originalCallback,
+                            pendingCommit
+                                    ? pendingCommitInterruption
+                                    : null);
             Object wrappedCallback = Proxy.newProxyInstance(
                     callbackClass.getClassLoader(),
                     new Class<?>[]{callbackClass},
@@ -11853,6 +18987,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     "Prepared direct same-icon Xiaomi CLOSE handoff"
                             + ", generation=" + session.generation
                             + ", type=" + currentType
+                            + ", pendingCommit=" + pendingCommit
                             + ", animationIdentity="
                             + shortObject(token.animationIdentity)
                             + ", windowElement=" + shortObject(windowElement)
@@ -11941,17 +19076,30 @@ public final class MiuiBackGestureHook extends XposedModule {
                             "mShellTransitionCallback") == null;
             boolean validSurface = Boolean.TRUE.equals(invokeAnyMethod(
                     token.windowElement, "hasValidSurface", new Object[0]));
+            boolean verifiedClose = session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && session.nativeAnimationIdentity
+                    == token.animationIdentity
+                    && session.nativeAnimationType.equals(currentType)
+                    && isReturnHomeNativeCloseType(currentType);
+            UnifiedNativePendingInterruptionSnapshot
+                    pendingCommitInterruption =
+                    token.pendingCommitInterruption;
+            boolean pendingCommit = pendingCommitInterruption != null
+                    && !session.nativeAnimationStarted
+                    && isExactUnifiedPendingInterruption(
+                    session, pendingCommitInterruption,
+                    currentElement, currentIdentity,
+                    currentType, false);
             boolean valid = currentSession == session
                     && session.finished.get() == 0
                     && session.generation == token.generation
                     && session.stateManager == token.stateManager
                     && session.nativeWindowElement == token.windowElement
-                    && session.nativeAnimationStarted
                     && session.nativeAnimationIdentity == token.animationIdentity
                     && currentElement == token.windowElement
                     && currentIdentity == token.animationIdentity
-                    && session.nativeAnimationType.equals(currentType)
-                    && isReturnHomeNativeCloseType(currentType)
+                    && (verifiedClose || pendingCommit)
                     && samePendingIcon && canceled
                     && !surfaceCanceled && !surfaceCancelExecuted
                     && !listenerDisabled && !useShellListener
@@ -11970,6 +19118,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", sameIdentity="
                                 + (currentIdentity == token.animationIdentity)
                                 + ", type=" + currentType
+                                + ", verifiedClose=" + verifiedClose
+                                + ", pendingCommit=" + pendingCommit
                                 + ", samePendingIcon=" + samePendingIcon
                                 + ", canceled=" + canceled
                                 + ", surfaceCanceled=" + surfaceCanceled
@@ -11987,6 +19137,18 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ReturnHomeDirectCancelToken.PHASE_PENDING,
                     ReturnHomeDirectCancelToken.PHASE_FINISHED_NOTIFIED)) {
                 return;
+            }
+            if (pendingCommit
+                    && !consumeUnifiedPendingInterruption(
+                    session, pendingCommitInterruption,
+                    "directCancelCallback")) {
+                token.phase.set(ReturnHomeDirectCancelToken.PHASE_CLEANED);
+                pendingDirectCancel.compareAndSet(token, null);
+                return;
+            }
+            if (session.unifiedNativePreviewOwned
+                    && !pendingCommit) {
+                session.unifiedNativeCleanupVerified = true;
             }
             if (!session.finished.compareAndSet(0, 1)) {
                 token.phase.set(ReturnHomeDirectCancelToken.PHASE_CLEANED);
@@ -12099,6 +19261,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object callbackStateManager = readField(listener, "this$0");
                 Object currentIdentity = invokeAnyMethod(
                         token.windowElement, "getAnimSymbol", new Object[0]);
+                boolean pendingCommit =
+                        token.pendingCommitInterruption != null
+                                && token.pendingCommitInterruption.phase.get()
+                                == UnifiedNativePendingInterruptionSnapshot
+                                .PHASE_CONSUMED
+                                && token.pendingCommitInterruption.animToEpoch
+                                == token.session
+                                .unifiedNativeActiveAnimToEpoch;
                 boolean valid = token.session.finished.get() == 1
                         && token.session.stateManager == token.stateManager
                         && token.session.nativeWindowElement == token.windowElement
@@ -12106,8 +19276,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                         == token.animationIdentity
                         && callbackStateManager == token.stateManager
                         && currentIdentity == token.animationIdentity
-                        && isReturnHomeNativeCloseType(
-                        token.session.nativeAnimationType);
+                        && (pendingCommit
+                        || isReturnHomeNativeCloseType(
+                        token.session.nativeAnimationType));
                 if (!valid) {
                     log(Log.WARN, TAG,
                             "Rejected direct same-icon Xiaomi CLOSE end"
@@ -12120,6 +19291,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", sameIdentity="
                                     + (currentIdentity
                                     == token.animationIdentity)
+                                    + ", pendingCommit=" + pendingCommit
                                     + ", type="
                                     + token.session.nativeAnimationType);
                     return;
@@ -12210,16 +19382,153 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        void onNativeAnimationEnd(Object listener, Object animationIdentity) {
-            finishNativeDirectCancelOnAnimationEnd(listener, animationIdentity);
+        void captureNativeAnimationEndBeforeListener(
+                Object listener, Object animationIdentity) {
             ReturnHomeSession session = currentSession;
             if (session == null || session.finished.get() != 0
-                    || !session.nativeAnimationStarted
-                    || session.nativeAnimationIdentity != animationIdentity) {
+                    || !session.unifiedNativePreviewOwned
+                    || animationIdentity
+                    != session.unifiedNativeAnimationIdentity) {
                 return;
+            }
+            UnifiedNativeFinishSnapshot snapshot =
+                    captureUnifiedNativeFinishSnapshot(
+                            session, listener, animationIdentity);
+            UnifiedNativeFinishSnapshot previous;
+            while (true) {
+                previous = session.unifiedNativeFinishSnapshot.get();
+                if (previous != null
+                        && previous.phase.get()
+                        == UnifiedNativeFinishSnapshot.PHASE_PENDING
+                        && previous.animationIdentity == animationIdentity
+                        && previous.animToEpoch == snapshot.animToEpoch
+                        && isExactUnifiedNativeFinishSnapshot(
+                        session, previous)) {
+                    snapshot.phase.set(
+                            UnifiedNativeFinishSnapshot.PHASE_INVALID);
+                    log(Log.INFO, TAG,
+                            "Preserved first exact Xiaomi finish state across duplicate StateManager end"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", type="
+                                    + previous.actualType
+                                    + ", animToEpoch="
+                                    + previous.animToEpoch
+                                    + ", duplicateSameElement="
+                                    + (snapshot.currentElement
+                                    == session.nativeWindowElement)
+                                    + ", duplicateExactTarget="
+                                    + snapshot.exactTarget);
+                    return;
+                }
+                if (session.unifiedNativeFinishSnapshot.compareAndSet(
+                        previous, snapshot)) {
+                    break;
+                }
+            }
+            if (previous != null && previous != snapshot) {
+                previous.phase.compareAndSet(
+                        UnifiedNativeFinishSnapshot.PHASE_PENDING,
+                        UnifiedNativeFinishSnapshot.PHASE_INVALID);
+            }
+            log(Log.INFO, TAG,
+                    "Captured Xiaomi finish state before StateManager listener"
+                            + ", generation=" + session.generation
+                            + ", type=" + snapshot.actualType
+                            + ", sameStateManager="
+                            + (snapshot.callbackStateManager
+                            == session.stateManager)
+                            + ", sameElement="
+                            + (snapshot.currentElement
+                            == session.nativeWindowElement)
+                            + ", sameIdentity="
+                            + (snapshot.currentAnimationIdentity
+                            == session.unifiedNativeAnimationIdentity)
+                            + ", exactTarget="
+                            + snapshot.exactTarget
+                            + ", running=" + snapshot.running
+                            + ", finishComplete="
+                            + snapshot.finishComplete
+                            + ", fullscreen=" + snapshot.fullscreen,
+                    snapshot.failure);
+        }
+
+        boolean onNativeAnimationEnd(
+                Object listener, Object animationIdentity) {
+            finishNativeDirectCancelOnAnimationEnd(listener, animationIdentity);
+            ReturnHomeSession session = currentSession;
+            if (session == null) {
+                return false;
             }
             try {
                 Object callbackStateManager = readField(listener, "this$0");
+                if (session.finished.get() == 0
+                        && session.unifiedNativePreviewOwned
+                        && callbackStateManager == session.stateManager
+                        && animationIdentity
+                        == session.unifiedNativeAnimationIdentity) {
+                    UnifiedNativeFinishSnapshot snapshot =
+                            session.unifiedNativeFinishSnapshot.get();
+                    if (snapshot == null
+                            || snapshot.animationIdentity
+                            != animationIdentity) {
+                        log(Log.ERROR, TAG,
+                                "Missing Xiaomi pre-listener finish snapshot; retained owner"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", animationIdentity="
+                                        + shortObject(animationIdentity));
+                        return true;
+                    }
+                    if (session.unifiedNativeCancelPending) {
+                        session.unifiedNativeCancelEndObserved = true;
+                        log(Log.INFO, TAG,
+                                "Captured unified Xiaomi cancel finish before target clear"
+                                        + ", generation="
+                                        + session.generation
+                                        + ", type="
+                                        + snapshot.actualType
+                                        + ", exactTarget="
+                                        + snapshot.exactTarget
+                                        + ", fullscreen="
+                                        + snapshot.fullscreen
+                                        + ", animationIdentity="
+                                        + shortObject(animationIdentity));
+                        handler.post(() ->
+                                consumeUnifiedNativeFinishSnapshot(
+                                        session,
+                                        "unifiedCancelEnd"));
+                        return true;
+                    }
+                    session.unifiedNativeCommitEndObserved = true;
+                    log(Log.INFO, TAG,
+                            "Captured unified Xiaomi commit finish before target clear"
+                                    + ", generation="
+                                    + session.generation
+                                    + ", type="
+                                    + snapshot.actualType
+                                    + ", commitPending="
+                                    + session.unifiedNativeCommitPending
+                                    + ", nativeStarted="
+                                    + session.nativeAnimationStarted
+                                    + ", exactTarget="
+                                    + snapshot.exactTarget
+                                    + ", finishComplete="
+                                    + snapshot.finishComplete
+                                    + ", animationIdentity="
+                                    + shortObject(animationIdentity));
+                    handler.post(() ->
+                            consumeUnifiedNativeFinishSnapshot(
+                                    session,
+                                    "unifiedNativeAnimationEnd"));
+                    return true;
+                }
+                if (session.finished.get() != 0
+                        || !session.nativeAnimationStarted
+                        || session.nativeAnimationIdentity
+                        != animationIdentity) {
+                    return false;
+                }
                 Object currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement, "getAnimSymbol", new Object[0]);
                 String typeName = session.nativeAnimationType;
@@ -12234,7 +19543,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", sameIdentity="
                             + (currentIdentity == animationIdentity)
                             + ", type=" + typeName);
-                    return;
+                    return false;
                 }
                 log(Log.INFO, TAG, "Accepted Xiaomi predictive return end"
                         + ", generation=" + session.generation
@@ -12243,7 +19552,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to verify Xiaomi CLOSE animation end"
                         + ", generation=" + session.generation, throwable);
-                return;
+                return false;
             }
             // The hooked listener's original body may already replace StateManager's current
             // element before this after-hook runs. The stored WindowElement and exact animation
@@ -12255,11 +19564,35 @@ public final class MiuiBackGestureHook extends XposedModule {
                     finishSession(session, "nativeAnimationEnd", false);
                 }
             });
+            return true;
         }
 
         private void finishSession(ReturnHomeSession session, String reason,
                                    boolean restoreSurface) {
-            if (session == null || !session.finished.compareAndSet(0, 1)) {
+            if (session == null) {
+                return;
+            }
+            if (session.unifiedNativePreviewOwned
+                    && !session.unifiedNativeCleanupVerified) {
+                if (!session.nativeHandoffStarted
+                        && !session.unifiedNativeCommitPending
+                        && !session.nativeAnimationStarted) {
+                    startUnifiedNativeCancel(
+                            session, "finish:" + reason);
+                }
+                log(Log.WARN, TAG,
+                        "Deferred runner finish behind Xiaomi native owner"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason
+                                + ", commitPending="
+                                + session.unifiedNativeCommitPending
+                                + ", cancelPending="
+                                + session.unifiedNativeCancelPending
+                                + ", nativeStarted="
+                                + session.nativeAnimationStarted);
+                return;
+            }
+            if (!session.finished.compareAndSet(0, 1)) {
                 return;
             }
             freezePreviewProgress(session, "finish:" + reason);
@@ -12274,7 +19607,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session, reason, restoreSurface));
                 return;
             }
-            if (restoreSurface && session.previewInitialized) {
+            if (restoreSurface && session.previewInitialized
+                    && !session.unifiedNativePreviewOwned) {
                 session.currentRect.set(session.startRect);
                 session.currentCornerRadius = session.startCornerRadius;
                 applyPreviewTransform(session, session.currentRect,
@@ -12290,7 +19624,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             freezePreviewProgress(session, "cleanup:" + reason);
-            if (restoreSurface && session.previewInitialized) {
+            if (restoreSurface && session.previewInitialized
+                    && !session.unifiedNativePreviewOwned) {
                 session.currentRect.set(session.startRect);
                 session.currentCornerRadius = session.startCornerRadius;
                 applyPreviewTransform(session, session.currentRect,
@@ -12340,6 +19675,81 @@ public final class MiuiBackGestureHook extends XposedModule {
             session.nativeGeometrySnapshot.set(null);
             session.nativeWindowAnimContext = null;
             session.localHandoffToken = null;
+            UnifiedNativeCommitTransitionToken commitTransition =
+                    session.unifiedNativeCommitTransition;
+            if (commitTransition != null) {
+                commitTransition.phase.set(
+                        UnifiedNativeCommitTransitionToken.PHASE_INVALID);
+            }
+            session.unifiedNativeCommitTransition = null;
+            UnifiedNativeStandardCommitToken standardCommit =
+                    session.unifiedNativeStandardCommit;
+            if (standardCommit != null) {
+                standardCommit.phase.set(
+                        UnifiedNativeStandardCommitToken.PHASE_INVALID);
+            }
+            session.unifiedNativeStandardCommit = null;
+            StandardReturnHomeCommitSignal pendingStandard =
+                    pendingStandardCommitSignal.get();
+            if (pendingStandard != null
+                    && pendingStandard.launcherSessionGeneration
+                    == session.generation) {
+                pendingStandardCommitSignal.compareAndSet(
+                        pendingStandard, null);
+            }
+            session.unifiedNativeExternalTerminationAttempt = 0L;
+            session.unifiedNativeExternalTerminationReason = null;
+            session.unifiedNativeConfiguredAnimTo.set(null);
+            invalidateUnifiedPendingInterruption(
+                    session, "cleanup:" + reason);
+            UnifiedNativeProvisionalCommitSnapshot provisionalCommit =
+                    session.unifiedNativeProvisionalCommit.getAndSet(null);
+            if (provisionalCommit != null
+                    && provisionalCommit.phase.get()
+                    != UnifiedNativeProvisionalCommitSnapshot.PHASE_ADOPTED) {
+                provisionalCommit.phase.set(
+                        UnifiedNativeProvisionalCommitSnapshot.PHASE_INVALID);
+            }
+            UnifiedNativeTerminalFailureSnapshot terminalFailure =
+                    session.unifiedNativeTerminalFailure.getAndSet(null);
+            if (terminalFailure != null) {
+                Runnable terminalGuard = terminalFailure.cleanupGuard;
+                if (terminalGuard != null) {
+                    handler.removeCallbacks(terminalGuard);
+                }
+                if (terminalFailure.phase.get()
+                        != UnifiedNativeTerminalFailureSnapshot.PHASE_COMPLETED) {
+                    terminalFailure.phase.set(
+                            UnifiedNativeTerminalFailureSnapshot.PHASE_INVALID);
+                }
+            }
+            session.unifiedNativeCancelAnimParams = null;
+            for (Map.Entry<Object,
+                    ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken>>
+                    entry : pendingUnifiedNativeFinishDispatches.entrySet()) {
+                ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken>
+                        queue = entry.getValue();
+                for (UnifiedNativeFinishDispatchToken dispatch : queue) {
+                    if (dispatch.session == session) {
+                        queue.remove(dispatch);
+                    }
+                }
+                if (queue.isEmpty()) {
+                    pendingUnifiedNativeFinishDispatches.remove(
+                            entry.getKey(), queue);
+                }
+            }
+            UnifiedNativeFinishSnapshot finishSnapshot =
+                    session.unifiedNativeFinishSnapshot.getAndSet(null);
+            if (finishSnapshot != null
+                    && finishSnapshot.phase.get()
+                    == UnifiedNativeFinishSnapshot.PHASE_PENDING) {
+                finishSnapshot.phase.set(
+                        UnifiedNativeFinishSnapshot.PHASE_INVALID);
+            }
+            session.unifiedNativeCleanupVerified = true;
+            session.unifiedNativeTargetSet = null;
+            session.unifiedNativeClipHelper = null;
             try {
                 session.transaction.close();
             } catch (Throwable ignored) {
@@ -12363,7 +19773,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", generation=" + session.generation
                     + ", reason=" + reason
                     + ", nativeHandoff=" + session.nativeHandoffStarted
-                    + ", nativeStarted=" + session.nativeAnimationStarted);
+                    + ", nativeStarted=" + session.nativeAnimationStarted
+                    + ", unifiedOwner="
+                    + session.unifiedNativePreviewOwned);
+            finishDeferredMiuiHomeReturnHomeController(
+                    MiuiHomeReturnHomeController.this, reason);
         }
 
         private void notifyRemoteAnimationFinished(IBinder callback, String reason) {
@@ -12628,6 +20042,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             final AtomicInteger startGeometrySeed =
                     new AtomicInteger(SEED_PENDING);
             volatile SurfaceControl.Transaction startTransaction;
+            volatile Object pendingAnimParams;
 
             ReturnHomeElementLeashReuseToken(
                     ReturnHomeSession session, Object windowElement,
@@ -12658,15 +20073,21 @@ public final class MiuiBackGestureHook extends XposedModule {
             final Object stateManager;
             final Object windowElement;
             final Object animationIdentity;
+            final UnifiedNativePendingInterruptionSnapshot
+                    pendingCommitInterruption;
 
             ReturnHomeCloseInterruptionToken(
                     ReturnHomeSession session, Object stateManager,
-                    Object windowElement, Object animationIdentity) {
+                    Object windowElement, Object animationIdentity,
+                    UnifiedNativePendingInterruptionSnapshot
+                            pendingCommitInterruption) {
                 this.generation = session.generation;
                 this.session = session;
                 this.stateManager = stateManager;
                 this.windowElement = windowElement;
                 this.animationIdentity = animationIdentity;
+                this.pendingCommitInterruption =
+                        pendingCommitInterruption;
             }
         }
 
@@ -12682,6 +20103,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             final Object animationIdentity;
             final Object pendingIcon;
             final Object originalCallback;
+            final UnifiedNativePendingInterruptionSnapshot
+                    pendingCommitInterruption;
             final AtomicInteger phase = new AtomicInteger(PHASE_PENDING);
             volatile Object wrappedCallback;
             volatile Runnable cleanupGuard;
@@ -12689,7 +20112,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             ReturnHomeDirectCancelToken(
                     ReturnHomeSession session, Object stateManager,
                     Object windowElement, Object animationIdentity,
-                    Object pendingIcon, Object originalCallback) {
+                    Object pendingIcon, Object originalCallback,
+                    UnifiedNativePendingInterruptionSnapshot
+                            pendingCommitInterruption) {
                 this.generation = session.generation;
                 this.session = session;
                 this.stateManager = stateManager;
@@ -12697,6 +20122,397 @@ public final class MiuiBackGestureHook extends XposedModule {
                 this.animationIdentity = animationIdentity;
                 this.pendingIcon = pendingIcon;
                 this.originalCallback = originalCallback;
+                this.pendingCommitInterruption =
+                        pendingCommitInterruption;
+            }
+        }
+
+        private final class UnifiedNativePendingInterruptionSnapshot {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_CONSUMED = 1;
+            static final int PHASE_INVALID = 2;
+            static final int MUTATION_NONE = 0;
+            static final int MUTATION_DIRECT_CANCEL = 1;
+            static final int MUTATION_CANCEL_SURFACE = 2;
+            static final int CONFIG_PENDING = 0;
+            static final int CONFIG_ACK_APPLIED = 1;
+            static final int CONFIG_ACK_SKIPPED = 2;
+            static final int CONFIG_INVALID = 3;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object animParams;
+            final Object ownerToken;
+            final Object configLock;
+            final long animToEpoch;
+            final long ownerAttempt;
+            final String requestedType;
+            final AtomicInteger phase =
+                    new AtomicInteger(PHASE_PENDING);
+            final AtomicInteger mutation =
+                    new AtomicInteger(MUTATION_NONE);
+            final AtomicInteger configDisposition =
+                    new AtomicInteger(CONFIG_PENDING);
+
+            UnifiedNativePendingInterruptionSnapshot(
+                    ReturnHomeSession session, Object animParams,
+                    Object ownerToken, long animToEpoch,
+                    long ownerAttempt, String requestedType) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = session.nativeWindowElement;
+                this.animationIdentity =
+                        session.unifiedNativeAnimationIdentity;
+                this.animParams = animParams;
+                this.ownerToken = ownerToken;
+                this.configLock = ownerToken
+                        instanceof UnifiedNativeStandardCommitToken
+                        ? ((UnifiedNativeStandardCommitToken)
+                        ownerToken).configLock
+                        : ((UnifiedNativeCommitTransitionToken)
+                        ownerToken).configLock;
+                this.animToEpoch = animToEpoch;
+                this.ownerAttempt = ownerAttempt;
+                this.requestedType = requestedType;
+            }
+        }
+
+        private final class UnifiedNativeCommitTransitionToken {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_ENTERING = 1;
+            static final int PHASE_ENTERED = 2;
+            static final int PHASE_CONSUMED = 3;
+            static final int PHASE_ADOPTED = 4;
+            static final int PHASE_INVALID = 5;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object remoteTransitionParams;
+            final Object compat;
+            final Object helper;
+            final Object transitionToken;
+            final Object transitionInfo;
+            final int transitionDebugId;
+            final Object configLock = new Object();
+            final AtomicInteger configHookState =
+                    new AtomicInteger(UNIFIED_CONFIG_HOOK_PENDING);
+            final AtomicInteger phase =
+                    new AtomicInteger(PHASE_PENDING);
+            final AtomicReference<Object> animParams =
+                    new AtomicReference<>();
+            volatile long animToEpoch;
+
+            UnifiedNativeCommitTransitionToken(
+                    ReturnHomeSession session, Object windowElement,
+                    Object animationIdentity,
+                    Object remoteTransitionParams,
+                    Object compat, Object helper,
+                    Object transitionToken, Object transitionInfo,
+                    int transitionDebugId) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+                this.remoteTransitionParams = remoteTransitionParams;
+                this.compat = compat;
+                this.helper = helper;
+                this.transitionToken = transitionToken;
+                this.transitionInfo = transitionInfo;
+                this.transitionDebugId = transitionDebugId;
+            }
+        }
+
+        private final class UnifiedNativeStandardCommitToken {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_ENTERING = 1;
+            static final int PHASE_ENTERED = 2;
+            static final int PHASE_CONSUMED = 3;
+            static final int PHASE_ADOPTED = 4;
+            static final int PHASE_INVALID = 5;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final StandardReturnHomeCommitSignal signal;
+            final Object configLock = new Object();
+            final AtomicInteger configHookState =
+                    new AtomicInteger(UNIFIED_CONFIG_HOOK_PENDING);
+            final AtomicInteger phase = new AtomicInteger(PHASE_PENDING);
+            final AtomicReference<Object> animParams = new AtomicReference<>();
+            volatile long ownerAttempt;
+            volatile long animToEpoch;
+
+            UnifiedNativeStandardCommitToken(
+                    ReturnHomeSession session,
+                    StandardReturnHomeCommitSignal signal) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = session.nativeWindowElement;
+                this.animationIdentity =
+                        session.unifiedNativeAnimationIdentity;
+                this.signal = signal;
+            }
+        }
+
+        private final class UnifiedNativeConfiguredAnimToSnapshot {
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object animParams;
+            final Object ownerToken;
+            final long animToEpoch;
+            final String animationType;
+            final boolean cancel;
+            final boolean running;
+            final boolean finishComplete;
+
+            UnifiedNativeConfiguredAnimToSnapshot(
+                    ReturnHomeSession session, Object animParams,
+                    Object ownerToken, long animToEpoch,
+                    String animationType, boolean cancel,
+                    boolean running, boolean finishComplete) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = session.nativeWindowElement;
+                this.animationIdentity =
+                        session.unifiedNativeAnimationIdentity;
+                this.animParams = animParams;
+                this.ownerToken = ownerToken;
+                this.animToEpoch = animToEpoch;
+                this.animationType = animationType;
+                this.cancel = cancel;
+                this.running = running;
+                this.finishComplete = finishComplete;
+            }
+        }
+
+        private final class UnifiedNativeTerminalFailureSnapshot {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_CANCELLING = 1;
+            static final int PHASE_COMPLETED = 2;
+            static final int PHASE_INVALID = 3;
+            static final int FINISH_STAGE_NONE = 0;
+            static final int FINISH_STAGE_SOURCE_SKIPPED = 1;
+            static final int FINISH_STAGE_APPLY_SKIPPED = 2;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final Object animParams;
+            final Object ownerToken;
+            final long animToEpoch;
+            final boolean cancel;
+            final boolean pendingCommitTermination;
+            final boolean pendingCommitStateCleared;
+            final String reason;
+            final Throwable failure;
+            final AtomicInteger phase =
+                    new AtomicInteger(PHASE_PENDING);
+            final AtomicInteger finishStage = new AtomicInteger();
+            volatile Runnable cleanupGuard;
+
+            UnifiedNativeTerminalFailureSnapshot(
+                    ReturnHomeSession session, Object animParams,
+                    Object ownerToken, long animToEpoch,
+                    boolean cancel,
+                    boolean pendingCommitTermination,
+                    boolean pendingCommitStateCleared,
+                    String reason,
+                    Throwable failure) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = session.nativeWindowElement;
+                this.animationIdentity =
+                        session.unifiedNativeAnimationIdentity;
+                this.animParams = animParams;
+                this.ownerToken = ownerToken;
+                this.animToEpoch = animToEpoch;
+                this.cancel = cancel;
+                this.pendingCommitTermination =
+                        pendingCommitTermination;
+                this.pendingCommitStateCleared =
+                        pendingCommitStateCleared;
+                this.reason = reason;
+                this.failure = failure == null
+                        ? new IllegalStateException(reason)
+                        : failure;
+                if (reason.startsWith("finishSourceFailure:")) {
+                    finishStage.set(FINISH_STAGE_SOURCE_SKIPPED);
+                } else if (reason.startsWith(
+                        "finishApplyFailure:")) {
+                    finishStage.set(FINISH_STAGE_APPLY_SKIPPED);
+                }
+            }
+
+            void markFinishSourceSkipped() {
+                finishStage.set(FINISH_STAGE_SOURCE_SKIPPED);
+            }
+
+            void markFinishApplySkipped() {
+                finishStage.compareAndSet(
+                        FINISH_STAGE_NONE,
+                        FINISH_STAGE_APPLY_SKIPPED);
+            }
+        }
+
+        private final class UnifiedNativeFinishDispatchToken {
+            final long dispatchId;
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final UnifiedNativeConfiguredAnimToSnapshot configured;
+            final boolean allowed;
+
+            UnifiedNativeFinishDispatchToken(
+                    long dispatchId, ReturnHomeSession session,
+                    Object windowElement, Object animationIdentity,
+                    UnifiedNativeConfiguredAnimToSnapshot configured,
+                    boolean allowed) {
+                this.dispatchId = dispatchId;
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+                this.configured = configured;
+                this.allowed = allowed;
+            }
+        }
+
+        private final class UnifiedNativeProvisionalCommitSnapshot {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_ADOPTING = 1;
+            static final int PHASE_ADOPTED = 2;
+            static final int PHASE_INVALID = 3;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object windowElement;
+            final Object animationIdentity;
+            final UnifiedNativeConfiguredAnimToSnapshot configured;
+            final UnifiedNativeStandardCommitToken standardToken;
+            final UnifiedNativeCommitTransitionToken transitionToken;
+            final UnifiedNativeRetargetInspection inspection;
+            final long ownerAttempt;
+            final long animToEpoch;
+            final String animationType;
+            final AtomicInteger phase =
+                    new AtomicInteger(PHASE_PENDING);
+
+            UnifiedNativeProvisionalCommitSnapshot(
+                    ReturnHomeSession session,
+                    UnifiedNativeConfiguredAnimToSnapshot configured,
+                    UnifiedNativeStandardCommitToken standardToken,
+                    UnifiedNativeCommitTransitionToken transitionToken,
+                    UnifiedNativeRetargetInspection inspection) {
+                this.generation = session.generation;
+                this.session = session;
+                this.windowElement = session.nativeWindowElement;
+                this.animationIdentity =
+                        session.unifiedNativeAnimationIdentity;
+                this.configured = configured;
+                this.standardToken = standardToken;
+                this.transitionToken = transitionToken;
+                this.inspection = inspection;
+                this.ownerAttempt = inspection.attempt;
+                this.animToEpoch = configured.animToEpoch;
+                this.animationType = inspection.actualType;
+            }
+        }
+
+        private final class UnifiedNativeFinishSnapshot {
+            static final int PHASE_PENDING = 0;
+            static final int PHASE_CONSUMED = 1;
+            static final int PHASE_INVALID = 2;
+
+            final long generation;
+            final ReturnHomeSession session;
+            final Object stateManager;
+            final Object windowElement;
+            final Object callbackStateManager;
+            final Object currentElement;
+            final Object animationIdentity;
+            final Object currentAnimationIdentity;
+            final String actualType;
+            final boolean exactTarget;
+            final boolean running;
+            final boolean finishComplete;
+            final boolean fullscreen;
+            final long animToEpoch;
+            final UnifiedNativeCommitTransitionToken commitTransition;
+            final Throwable failure;
+            final AtomicInteger phase =
+                    new AtomicInteger(PHASE_PENDING);
+
+            UnifiedNativeFinishSnapshot(
+                    ReturnHomeSession session,
+                    Object callbackStateManager,
+                    Object currentElement,
+                    Object animationIdentity,
+                    Object currentAnimationIdentity,
+                    String actualType, boolean exactTarget,
+                    boolean running, boolean finishComplete,
+                    boolean fullscreen, long animToEpoch,
+                    UnifiedNativeCommitTransitionToken commitTransition,
+                    Throwable failure) {
+                this.generation = session.generation;
+                this.session = session;
+                this.stateManager = session.stateManager;
+                this.windowElement = session.nativeWindowElement;
+                this.callbackStateManager = callbackStateManager;
+                this.currentElement = currentElement;
+                this.animationIdentity = animationIdentity;
+                this.currentAnimationIdentity =
+                        currentAnimationIdentity;
+                this.actualType = actualType;
+                this.exactTarget = exactTarget;
+                this.running = running;
+                this.finishComplete = finishComplete;
+                this.fullscreen = fullscreen;
+                this.animToEpoch = animToEpoch;
+                this.commitTransition = commitTransition;
+                this.failure = failure;
+            }
+        }
+
+        private final class UnifiedNativeRetargetInspection {
+            final long attempt;
+            final String requestedType;
+            final String actualType;
+            final Object animationIdentity;
+            final boolean sameAnimation;
+            final boolean exactTarget;
+            final boolean running;
+            final boolean finishComplete;
+            final boolean fullscreen;
+            final UnifiedNativeCommitTransitionToken commitTransition;
+            final Throwable failure;
+
+            UnifiedNativeRetargetInspection(
+                    long attempt, String requestedType, String actualType,
+                    Object animationIdentity, boolean sameAnimation,
+                    boolean exactTarget, boolean running,
+                    boolean finishComplete, boolean fullscreen,
+                    UnifiedNativeCommitTransitionToken commitTransition,
+                    Throwable failure) {
+                this.attempt = attempt;
+                this.requestedType = requestedType;
+                this.actualType = actualType;
+                this.animationIdentity = animationIdentity;
+                this.sameAnimation = sameAnimation;
+                this.exactTarget = exactTarget;
+                this.running = running;
+                this.finishComplete = finishComplete;
+                this.fullscreen = fullscreen;
+                this.commitTransition = commitTransition;
+                this.failure = failure;
             }
         }
 
@@ -12707,6 +20523,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             final Object[] wallpapers;
             final Object[] nonApps;
             final IBinder finishedCallback;
+            final MiuiHomeAcceptedInputToken acceptedInputIdentity;
             final AtomicInteger finished = new AtomicInteger();
             final AtomicInteger cleaned = new AtomicInteger();
             final Rect startRect = new Rect();
@@ -12719,6 +20536,25 @@ public final class MiuiBackGestureHook extends XposedModule {
             final AtomicInteger progressReset = new AtomicInteger();
             final AtomicReference<ReturnHomeNativeGeometrySnapshot>
                     nativeGeometrySnapshot = new AtomicReference<>();
+            final AtomicLong unifiedNativeRetargetAttempts =
+                    new AtomicLong();
+            final AtomicLong unifiedNativeAnimToEpochs =
+                    new AtomicLong();
+            final AtomicReference<UnifiedNativeFinishSnapshot>
+                    unifiedNativeFinishSnapshot = new AtomicReference<>();
+            final AtomicReference<UnifiedNativeConfiguredAnimToSnapshot>
+                    unifiedNativeConfiguredAnimTo = new AtomicReference<>();
+            final AtomicReference<UnifiedNativeTerminalFailureSnapshot>
+                    unifiedNativeTerminalFailure =
+                    new AtomicReference<>();
+            final AtomicReference<UnifiedNativePendingInterruptionSnapshot>
+                    unifiedNativePendingInterruption =
+                    new AtomicReference<>();
+            final AtomicReference<UnifiedNativeProvisionalCommitSnapshot>
+                    unifiedNativeProvisionalCommit =
+                    new AtomicReference<>();
+            final AtomicBoolean unifiedNativeCommitReady =
+                    new AtomicBoolean();
             final Object nativeGeometryApplyLock = new Object();
             Object closingTarget;
             Object openingTarget;
@@ -12737,7 +20573,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             float previewProgressDistancePx;
             float lastInputProgress;
             float lastSmoothedProgress;
-            float lastLoggedPreviewProgress = -1.0f;
             volatile boolean progressFrozen;
             boolean progressAnimatorStarted;
             boolean progressAnimatorFailed;
@@ -12748,14 +20583,42 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean nativeAnimationStarted;
             boolean nativeContinuationVerified;
             boolean nativeGeometryFailureLogged;
+            boolean unifiedNativePreviewOwned;
+            boolean unifiedNativeCancelPending;
+            boolean unifiedNativeCancelRetargeted;
+            boolean unifiedNativeCancelEndObserved;
+            boolean unifiedNativeCommitPending;
+            boolean unifiedNativeCommitEndObserved;
+            boolean unifiedNativeProviderCommitAdopted;
+            boolean unifiedNativeCleanupVerified;
+            int unifiedNativeTaskId = -1;
+            int unifiedNativeCurrentRotation;
+            int unifiedNativeHomeRotation;
             Object stateManager;
             Object nativeWindowElement;
             Object nativeWindowAnimContext;
             Object nativePublishedStatus;
             Object nativeAnimationIdentity;
             String nativeAnimationType;
+            Object unifiedNativeAnimationIdentity;
+            UnifiedNativeCommitTransitionToken
+                    unifiedNativeCommitTransition;
+            UnifiedNativeStandardCommitToken
+                    unifiedNativeStandardCommit;
+            volatile long unifiedNativeCommitAttempt;
+            volatile long unifiedNativeCancelAttempt;
+            volatile long unifiedNativeCancelTimeoutAttempt;
+            volatile long unifiedNativeExternalTerminationAttempt;
+            volatile long unifiedNativeActiveAnimToEpoch;
+            volatile long unifiedNativeCancelAnimToEpoch;
+            volatile String unifiedNativeCommitRequestedType;
+            volatile String unifiedNativeExternalTerminationReason;
+            Object unifiedNativeTargetSet;
+            Object unifiedNativeClipHelper;
+            Object unifiedNativeCancelAnimParams;
             MiuiHomeLocalHandoffToken localHandoffToken;
             Runnable nativeTimeout;
+            Runnable unifiedNativeCancelTimeout;
             Runnable cancelFinishGuard;
             ValueAnimator cancelAnimator;
             Object previewBackdropStateManager;
@@ -12793,17 +20656,18 @@ public final class MiuiBackGestureHook extends XposedModule {
             int previewBlurPublishedRadius;
             float previewBlurPublishedDimming;
             boolean previewBlurInterruptedHomeSpring;
-            int previewBlurDiagnosticStage = -1;
 
             ReturnHomeSession(long generation, int transit, Object[] apps,
                               Object[] wallpapers, Object[] nonApps,
-                              IBinder finishedCallback) {
+                              IBinder finishedCallback,
+                              MiuiHomeAcceptedInputToken acceptedInputIdentity) {
                 this.generation = generation;
                 this.transit = transit;
                 this.apps = apps;
                 this.wallpapers = wallpapers;
                 this.nonApps = nonApps;
                 this.finishedCallback = finishedCallback;
+                this.acceptedInputIdentity = acceptedInputIdentity;
                 BackProgressAnimator animator = null;
                 try {
                     if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -13104,6 +20968,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     resetCandidate();
                     return true;
                 }
+                driver.bindAcceptedInput(token);
                 log(Log.INFO, TAG, "Matched MiuiHome accepted input token"
                         + ", eventId=" + token.eventId
                         + ", downTime=" + token.downTime
@@ -13231,10 +21096,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         private EdgeWidthSnapshot edgeWidths() {
             return readEdgeWidthSnapshot(edgeBackGestureHandler,
                     context.getResources().getDisplayMetrics().density);
-        }
-
-        private int edgeTouchWidth(int edge) {
-            return edgeWidths().touchWidth(edge);
         }
 
         private float currentDisplayWidth() {
@@ -13701,6 +21562,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean launcherDrawerGesture;
         private boolean launcherEditingGesture;
         private boolean recentsVisualOnlyGesture;
+        private MiuiHomeAcceptedInputToken acceptedInputIdentity;
         private int activeEdge;
         private float downX;
         private float downY;
@@ -13716,6 +21578,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
             this.backAnimationImpl = newBackAnimationImpl;
             this.controller = readField(newBackAnimationImpl, "this$0");
+        }
+
+        void bindAcceptedInput(MiuiHomeAcceptedInputToken token) {
+            if (gestureActive && token != null
+                    && token.generation
+                    == systemUiInputArbiterGeneration) {
+                acceptedInputIdentity = token;
+            }
         }
 
         private boolean handleTouch(MotionEvent event, int edge,
@@ -13956,11 +21826,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
             triggerBack = trigger;
+            MiuiHomeAcceptedInputToken releaseInputIdentity =
+                    acceptedInputIdentity;
             boolean queued = queueShellReleaseTransaction(
                     event.getRawX(), event.getRawY(), releaseDistance,
                     thresholdCrossed, trigger, activeEdge,
                     launcherOverviewGesture, launcherDrawerGesture,
-                    launcherEditingGesture);
+                    launcherEditingGesture, releaseInputIdentity);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "SystemUI gesture driver release queued=" + queued
                     + ", requestedTrigger=" + trigger
@@ -14000,6 +21872,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             pendingLauncherOpenBreakGeneration = 0L;
             pendingLauncherOpenBreakAttemptId = 0L;
+            clearSystemUiReturnHomeCommitIdentity(
+                    controller, "driverDetach");
             clearLocalGestureState();
         }
 
@@ -14224,7 +22098,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean queued = queueShellReleaseTransaction(
                     downX, downY, 0.0f, false, false, activeEdge,
                     launcherOverviewGesture, launcherDrawerGesture,
-                    launcherEditingGesture);
+                    launcherEditingGesture, null);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "Rejected Shell navigation cancellation queued=" + queued
                             + ", requestedTrigger=false"
@@ -14265,6 +22139,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherDrawerGesture = false;
             launcherEditingGesture = false;
             recentsVisualOnlyGesture = false;
+            acceptedInputIdentity = null;
             thresholdCrossed = false;
             nativePanelActive = false;
             triggerBack = false;
@@ -14287,6 +22162,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (controller != finishedController) {
                 return;
             }
+            clearSystemUiReturnHomeCommitIdentity(
+                    finishedController, "shellFinished:" + reason);
             if (gestureActive) {
                 if (recentsVisualOnlyGesture) {
                     log(Log.INFO, TAG,
@@ -14307,7 +22184,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                        int releaseEdge,
                                                        boolean recentsCallback,
                                                        boolean drawerCallback,
-                                                       boolean editingCallback) {
+                                                       boolean editingCallback,
+                                                       MiuiHomeAcceptedInputToken
+                                                               inputIdentity) {
             Object releaseController = controller;
             try {
                 Object shellExecutor = readField(releaseController, "mShellExecutor");
@@ -14318,7 +22197,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 ((Executor) shellExecutor).execute(() -> finishGestureOnShellExecutor(
                         releaseController, rawX, rawY, releaseDistance,
                         dispatchFinalProgress, requestedTrigger, releaseEdge,
-                        recentsCallback, drawerCallback, editingCallback));
+                        recentsCallback, drawerCallback, editingCallback,
+                        inputIdentity));
                 return true;
             } catch (Throwable throwable) {
                 // A release must never fall back to mutating controller/tracker state from
@@ -14337,7 +22217,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                   int releaseEdge,
                                                   boolean recentsCallback,
                                                   boolean drawerCallback,
-                                                  boolean editingCallback) {
+                                                  boolean editingCallback,
+                                                  MiuiHomeAcceptedInputToken
+                                                          inputIdentity) {
             Object tracker = null;
             try {
                 tracker = invokeAnyMethod(releaseController,
@@ -14368,17 +22250,19 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "mBackNavigationInfo");
                 BackNavigationInfo info = infoObject instanceof BackNavigationInfo
                         ? (BackNavigationInfo) infoObject : null;
+                int focusedTaskId = -1;
                 if (actualTrigger && info != null) {
                     Object observer = readField(releaseController,
                             "mBackTransitionObserver");
-                    Object focusedTaskId = invokeAnyMethod(info,
+                    Object focusedTaskIdObject = invokeAnyMethod(info,
                             "getFocusedTaskId", new Object[0]);
-                    if (!(focusedTaskId instanceof Number)) {
+                    if (!(focusedTaskIdObject instanceof Number)) {
                         throw new IllegalStateException("getFocusedTaskId returned "
-                                + shortObject(focusedTaskId));
+                                + shortObject(focusedTaskIdObject));
                     }
                     writeField(observer, "mFocusedTaskId",
-                            Integer.valueOf(((Number) focusedTaskId).intValue()));
+                            Integer.valueOf(((Number) focusedTaskIdObject).intValue()));
+                    focusedTaskId = ((Number) focusedTaskIdObject).intValue();
                 }
                 writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
                 writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
@@ -14391,6 +22275,41 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", actualTrigger=" + actualTrigger
                             + ", edge=" + releaseEdge);
                     return;
+                }
+                if (actualTrigger && info != null
+                        && info.getType() == TYPE_RETURN_TO_HOME) {
+                    if (focusedTaskId < 0 || inputIdentity == null
+                            || inputIdentity.generation
+                            != systemUiInputArbiterGeneration) {
+                        log(Log.ERROR, TAG,
+                                "Could not bind committed return-home to accepted DOWN"
+                                        + ", taskId=" + focusedTaskId
+                                        + ", input="
+                                        + shortObject(inputIdentity)
+                                        + ", inputGeneration="
+                                        + (inputIdentity == null ? 0L
+                                        : inputIdentity.generation)
+                                        + ", arbiterGeneration="
+                                        + systemUiInputArbiterGeneration);
+                    } else {
+                        SystemUiReturnHomeCommitIdentity identity =
+                                new SystemUiReturnHomeCommitIdentity(
+                                        releaseController,
+                                        focusedTaskId, inputIdentity);
+                        SystemUiReturnHomeCommitIdentity replaced =
+                                systemUiReturnHomeCommitIdentity
+                                        .getAndSet(identity);
+                        log(Log.INFO, TAG,
+                                "Bound committed return-home to accepted DOWN"
+                                        + ", taskId=" + focusedTaskId
+                                        + ", eventId="
+                                        + inputIdentity.eventId
+                                        + ", downTime="
+                                        + inputIdentity.downTime
+                                        + ", replacedTaskId="
+                                        + (replaced == null ? -1
+                                        : replaced.taskId));
+                    }
                 }
                 if (info == null) {
                     // Unlike stock's legacy fallback, a null navigation from this deferred
