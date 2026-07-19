@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.3-unified-owner-native-provider";
+            "systemui-aosp-back-0.6.6-optional-wallpaper-prepare";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -750,6 +750,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         final int transitionType;
         final int changeMode;
         final boolean backGestureAnimated;
+        final AtomicInteger acceptedBoundaryComposition =
+                new AtomicInteger();
 
         ReturnHomeCommitComposition(Object handler, Object controller,
                                     ReturnHomeComposition composition,
@@ -6937,17 +6939,22 @@ public final class MiuiBackGestureHook extends XposedModule {
             int closingTaskId = composition.closingTaskId;
             int openingTaskId = composition.openingTaskId;
             Object changesObject = invokeAnyMethod(info, "getChanges", new Object[0]);
-            if (!(changesObject instanceof List<?>)
-                    || ((List<?>) changesObject).size() != 3) {
+            if (!(changesObject instanceof List<?>)) {
                 return result;
             }
+            List<?> changes = (List<?>) changesObject;
+            int changeCount = changes.size();
+            if (changeCount != 2 && changeCount != 3) {
+                return result;
+            }
+            int expectedWallpaperMatchCount = changeCount - 2;
             Object matchingChange = null;
             int matchingMode = -1;
             int closingMatchCount = 0;
             int homeMatchCount = 0;
             int wallpaperMatchCount = 0;
             boolean unexpectedChange = false;
-            for (Object change : (List<?>) changesObject) {
+            for (Object change : changes) {
                 Object taskInfo = invokeAnyMethod(
                         change, "getTaskInfo", new Object[0]);
                 int taskId = readIntFieldOrDefault(taskInfo, "taskId", -1);
@@ -6988,7 +6995,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
             }
             if (matchingChange == null || closingMatchCount != 1
-                    || homeMatchCount != 1 || wallpaperMatchCount != 1
+                    || homeMatchCount != 1
+                    || wallpaperMatchCount != expectedWallpaperMatchCount
                     || unexpectedChange) {
                 return result;
             }
@@ -7030,7 +7038,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.INFO, TAG,
                     "Corrected Xiaomi predictive return-home prepare role"
                             + ", taskId=" + closingTaskId
-                            + ", mode=" + matchingMode + "->" + normalizedMode);
+                            + ", mode=" + matchingMode + "->" + normalizedMode
+                            + ", wallpaperPresent="
+                            + (wallpaperMatchCount == 1));
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
                     "Failed Xiaomi predictive return-home prepare role correction",
@@ -7083,9 +7093,23 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + nested.transitionDebugId);
             }
         }
+        Object[] routedArgs = null;
+        if (candidate != null) {
+            try {
+                Object wrappedFinishCallback =
+                        wrapAcceptedReturnHomeFinishCallback(candidate);
+                routedArgs = chain.getArgs().toArray();
+                routedArgs[5] = wrappedFinishCallback;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Could not arm accepted return-home commit composition",
+                        throwable);
+            }
+        }
         Object result;
         try {
-            result = chain.proceed();
+            result = routedArgs == null
+                    ? chain.proceed() : chain.proceed(routedArgs);
         } finally {
             if (finishTransferArmed
                     && returnHomeFinishTransferCandidate.get()
@@ -7137,14 +7161,24 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && changeLeashValid && closingLeashValid
                     && openingLeashValid;
             if (accepted) {
-                try (SurfaceControl.Transaction transaction =
-                             new SurfaceControl.Transaction()) {
-                    // This reparent is intentionally after the original handler has accepted
-                    // the merge. The exact rejected CLOSE+IS_ELEMENT boundary is handled by
-                    // the separate prepared-finish/start atomic composition path below.
-                    transaction.reparent(candidate.changeLeash,
-                            composition.closingLeash);
-                    transaction.apply();
+                boolean composedInStartTransaction =
+                        candidate.acceptedBoundaryComposition.get() == 2;
+                if (!composedInStartTransaction) {
+                    // Preserve the established correction if the exact accepted callback
+                    // boundary cannot be wrapped on a future Shell build. This fallback is
+                    // intentionally diagnostic: two applies can be presented in different
+                    // frames, so the supported path above must report atomic composition.
+                    try (SurfaceControl.Transaction transaction =
+                                 new SurfaceControl.Transaction()) {
+                        transaction.reparent(candidate.changeLeash,
+                                composition.closingLeash);
+                        transaction.apply();
+                    }
+                    log(Log.WARN, TAG,
+                            "Fell back to post-apply return-home commit composition"
+                                    + ", taskId=" + composition.closingTaskId
+                                    + ", boundaryPhase="
+                                    + candidate.acceptedBoundaryComposition.get());
                 }
                 log(Log.INFO, TAG,
                         "Corrected accepted predictive return-home commit composition"
@@ -7155,7 +7189,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", changeMode=" + candidate.changeMode
                                 + ", changeLeash=" + candidate.changeLeash
                                 + ", closingLeash="
-                                + composition.closingLeash);
+                                + composition.closingLeash
+                                + ", atomicStartTransaction="
+                                + composedInStartTransaction);
                 publishStandardReturnHomeCommit(
                         composition.closingTaskId,
                         readTransitionDebugId(candidate.transitionInfo),
@@ -7167,6 +7203,97 @@ public final class MiuiBackGestureHook extends XposedModule {
                     throwable);
         }
         return result;
+    }
+
+    private Object wrapAcceptedReturnHomeFinishCallback(
+            ReturnHomeCommitComposition candidate) throws Exception {
+        ClassLoader classLoader = candidate.handler.getClass().getClassLoader();
+        Class<?> callbackClass = Class.forName(
+                "com.android.wm.shell.transition.Transitions$TransitionFinishCallback",
+                false, classLoader);
+        if (!callbackClass.isInstance(candidate.finishCallback)) {
+            throw new IllegalStateException("Unexpected transition finish callback: "
+                    + shortObject(candidate.finishCallback));
+        }
+        return Proxy.newProxyInstance(callbackClass.getClassLoader(),
+                new Class<?>[]{callbackClass},
+                (proxy, method, invocationArgs) -> {
+                    if (method.getDeclaringClass() == Object.class) {
+                        return headlessUpdaterResult(
+                                proxy, method, invocationArgs);
+                    }
+                    if ("onTransitionFinished".equals(method.getName())
+                            && method.getParameterCount() == 1
+                            && candidate.acceptedBoundaryComposition
+                            .compareAndSet(0, 1)) {
+                        try {
+                            composeAcceptedReturnHomeCommit(candidate);
+                            candidate.acceptedBoundaryComposition.set(2);
+                        } catch (Throwable throwable) {
+                            candidate.acceptedBoundaryComposition.set(3);
+                            log(Log.WARN, TAG,
+                                    "Failed accepted return-home start-transaction composition"
+                                            + ", taskId="
+                                            + candidate.composition.closingTaskId
+                                            + ", transitionDebugId="
+                                            + readTransitionDebugId(
+                                            candidate.transitionInfo),
+                                    throwable);
+                        }
+                    }
+                    try {
+                        return method.invoke(candidate.finishCallback,
+                                invocationArgs);
+                    } catch (InvocationTargetException exception) {
+                        Throwable cause = exception.getCause();
+                        throw cause == null ? exception : cause;
+                    }
+                });
+    }
+
+    private void composeAcceptedReturnHomeCommit(
+            ReturnHomeCommitComposition candidate) throws Exception {
+        ReturnHomeComposition composition = candidate.composition;
+        Object currentApps = readField(candidate.controller, "mApps");
+        Object navigationInfo = readField(candidate.controller,
+                "mBackNavigationInfo");
+        Object navigationType = navigationInfo == null ? null
+                : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+        boolean exact = "wmshell.main".equals(Thread.currentThread().getName())
+                && currentApps == composition.appsIdentity
+                && navigationType instanceof Number
+                && ((Number) navigationType).intValue()
+                == TYPE_RETURN_TO_HOME
+                && Boolean.TRUE.equals(readField(candidate.handler,
+                "mCloseTransitionRequested"))
+                && readField(candidate.handler, "mPrepareOpenTransition")
+                == candidate.mergeTarget
+                && readField(candidate.handler, "mOpenTransitionInfo") == null
+                && readField(candidate.handler, "mOnAnimationFinishCallback")
+                == candidate.previousAnimationFinishCallback
+                && candidate.startTransaction
+                instanceof SurfaceControl.Transaction
+                && candidate.changeLeash.isValid()
+                && composition.closingLeash.isValid()
+                && composition.openingLeash.isValid();
+        if (!exact) {
+            throw new IllegalStateException(
+                    "return-home ownership changed at accepted callback");
+        }
+        // Xiaomi's current BackTransitionHandler calls this finish callback only after its
+        // commit predicates have accepted the merge and immediately before applying the same
+        // start Transaction. Append the AOSP closing-parent correction at that boundary so
+        // SurfaceFlinger can never present the unparented fullscreen change in between.
+        ((SurfaceControl.Transaction) candidate.startTransaction).reparent(
+                candidate.changeLeash, composition.closingLeash);
+        log(Log.INFO, TAG,
+                "Composed accepted predictive return-home commit in original start transaction"
+                        + ", taskId=" + composition.closingTaskId
+                        + ", homeTaskId=" + composition.openingTaskId
+                        + ", transitionDebugId="
+                        + readTransitionDebugId(candidate.transitionInfo)
+                        + ", changeLeash=" + candidate.changeLeash
+                        + ", closingLeash=" + composition.closingLeash);
     }
 
     private ReturnHomeCommitComposition captureReturnHomeCommitComposition(
@@ -7225,7 +7352,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 info, "getType", new Object[0]);
         int transitionType = transitionTypeObject instanceof Number
                 ? ((Number) transitionTypeObject).intValue() : -1;
-        if (transitionType != TRANSIT_TO_BACK) {
+        boolean supportedClosingType = transitionType == TRANSIT_CLOSE
+                || transitionType == TRANSIT_TO_BACK;
+        if (!supportedClosingType) {
             log(Log.INFO, TAG,
                     "Skipped predictive return-home commit composition: "
                             + "unexpected transition type=" + transitionType);
@@ -7263,7 +7392,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     new Object[]{Integer.valueOf(FLAG_BACK_GESTURE_ANIMATED)}));
         }
         if (matchCount != 1 || matchingChange == null
-                || matchingMode != TRANSIT_TO_BACK
+                || matchingMode != transitionType
                 || !backGestureAnimated || elementChangePresent) {
             log(Log.INFO, TAG,
                     "Skipped predictive return-home commit composition: "
