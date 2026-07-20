@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.17-r26-predictive-spring-end-hold";
+            "systemui-aosp-back-0.6.17-r27-stream-suppression-taskfragment";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -22005,7 +22005,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean triggerBack;
         private boolean shellGestureStarted;
         private boolean shellGestureStartDeferred;
-        private boolean gestureSuppressed;
+        private volatile boolean gestureSuppressed;
         private boolean legacyInterruptGesture;
         private Object legacyRunningOpenInfo;
         private boolean launcherOpenBreakGesture;
@@ -22648,6 +22648,16 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             clearSystemUiReturnHomeCommitIdentity(
                     finishedController, "shellFinished:" + reason);
+            if (gestureSuppressed) {
+                // This DOWN was rejected while the previous Shell navigation was still busy.
+                // Finishing that navigation must not reopen the already-rejected physical
+                // stream: NativeBackInputMonitor still owns its candidate until UP/CANCEL and
+                // would otherwise pilfer a later MOVE before noticing this driver was cleared.
+                log(Log.INFO, TAG,
+                        "Preserved suppressed SystemUI back stream after Shell completion"
+                                + ", reason=" + reason);
+                return;
+            }
             if (gestureActive) {
                 if (recentsVisualOnlyGesture) {
                     log(Log.INFO, TAG,
