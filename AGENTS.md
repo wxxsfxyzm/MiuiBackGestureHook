@@ -274,7 +274,13 @@ Return-to-home rules:
   accepts its `setToOld` boundary, before the new OPEN starts; do not cancel or wait for the
   old floating-icon tail. Route a non-reusable same-icon Local CLOSE only through Xiaomi's
   existing parallel branch under exact identity guards; never fabricate Recents state or a
-  controller, or invoke the real-Recents reversal path.
+  controller, or invoke the real-Recents reversal path. After that exact old-list boundary, a
+  module-owned element without a native recent transition must not be reset and reused as the
+  replacement OPEN. Correct `StateManager.isOldElementReuseful(...)` only when its original
+  result is `true` and the same main-Looper launch turn still matches the StateManager, old
+  element, animation identity, clicked View, old-list membership, CLOSE type, and completed
+  surface cancellation. Preserve original `false` results and genuine desktop native reuse;
+  let Xiaomi create the fresh element and request its normal remote OPEN.
 - Keep preview blur, shortcut-layer, and wallpaper state on MiuiHome's main Looper under
   exact generation and object ownership. Commit transfers that state to Xiaomi;
   cancellation restores only unchanged module-owned state after the application preview is
