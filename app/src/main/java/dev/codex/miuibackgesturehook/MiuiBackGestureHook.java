@@ -5578,7 +5578,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         try {
-            Object taskFragment = invokeAnyMethod(target, "getTaskFragment", new Object[0]);
+            // BackWindowAnimationAdaptor.mTarget is a WindowContainer. Match its native
+            // createRemoteAnimationTarget() conversion: Task itself is a TaskFragment,
+            // while getTaskFragment() is only the ActivityRecord/WindowState parent lookup.
+            Object taskFragment = invokeAnyMethod(target, "asTaskFragment", new Object[0]);
             if (taskFragment == null) {
                 return;
             }
