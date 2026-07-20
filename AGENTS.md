@@ -249,10 +249,15 @@ Return-to-home rules:
   the exact current geometry and corner radius through Xiaomi's own handoff status.
   Application pixels remain on the real closing task Surface; do not introduce a screenshot
   replacement, module-owned icon/window crossfade, forced alpha, or layer manipulation.
-- Keep the preview `WindowElement` and its `RectFSpringAnim` running across commit. Enter
-  Xiaomi's complete native closing provider with the original runner targets, then allow
-  Xiaomi's native `CLOSE_TO_HOME -> CLOSE_TO_ELEMENT` retarget on that same animation;
-  do not stop, replace, or restart the spring at the commit boundary.
+- Keep the preview `WindowElement` and its `RectFSpringAnim` running across commit. Standard
+  CLOSE remains driven by its authenticated Shell signal. For the exact rejected element-close
+  shape, enter Xiaomi's complete native closing provider only at the fully validated element
+  transition boundary, then allow the native `CLOSE_TO_HOME -> CLOSE_TO_ELEMENT` retarget on
+  that same animation; do not stop, replace, or restart the spring at commit.
+- Preserve Xiaomi's paired floating-icon lifecycle at that element boundary. Allow the provider
+  to initialize the unique target-matching `FloatingIconView2`, suppress only that temporary
+  view's drawing and visibility, and let Xiaomi's native reset/show/recycle path restore the real
+  launcher icon. Do not set `RectFParams.ignoreIcon` or hide the source `AppIcon`.
 - Once the exact Xiaomi CLOSE starts, retain the Shell runner and remote targets until its
   matching native end or a verified launcher-interruption boundary. Do not restore or
   release the preview Surface over a captured native animation.
