@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.17-r27-stream-suppression-taskfragment";
+            "systemui-aosp-back-0.6.18-r28-drawer-same-icon-fresh-open";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -1069,6 +1069,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadMiuiHomePermissionMergeHook = false;
         boolean hadMiuiHomeReturnHomeCancelSurfaceHook = false;
         boolean hadMiuiHomeReturnHomeSameIconParallelHook = false;
+        boolean hadMiuiHomeReturnHomeFreshOpenHook = false;
         boolean hadMiuiHomeReturnHomeCancelDirectHook = false;
         boolean hadMiuiHomeReturnHomeSetToOldHook = false;
         boolean hadMiuiHomeDrawerStateHook = false;
@@ -1174,6 +1175,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("miui_home_return_home_same_icon_parallel".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeReturnHomeSameIconParallelHook = true;
+                } else if ("miui_home_return_home_fresh_open".equals(
+                        oldHandle.getId())) {
+                    hadMiuiHomeReturnHomeFreshOpenHook = true;
                 } else if ("miui_home_return_home_cancel_direct".equals(
                         oldHandle.getId())) {
                     hadMiuiHomeReturnHomeCancelDirectHook = true;
@@ -1432,6 +1436,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!hadMiuiHomeReturnHomeSameIconParallelHook) {
                     hookMiuiHomeReturnHomeSameIconParallel(hotReloadClassLoader);
                 }
+                if (!hadMiuiHomeReturnHomeFreshOpenHook) {
+                    hookMiuiHomeReturnHomeFreshOpen(hotReloadClassLoader);
+                }
                 if (!hadMiuiHomeReturnHomeCancelDirectHook) {
                     hookMiuiHomeReturnHomeDirectCancel(hotReloadClassLoader);
                 }
@@ -1612,6 +1619,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("miui_home_return_home_same_icon_parallel".equals(hookId)) {
             return this::routeMiuiHomeReturnHomeSameIconParallel;
+        }
+        if ("miui_home_return_home_fresh_open".equals(hookId)) {
+            return this::forceMiuiHomeReturnHomeFreshOpen;
         }
         if ("miui_home_return_home_cancel_direct".equals(hookId)) {
             return this::wrapMiuiHomeReturnHomeDirectCancel;
@@ -1885,6 +1895,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     Collections.emptySet());
             hookMiuiHomeReturnHomeCloseInterruption(classLoader, true, true);
             hookMiuiHomeReturnHomeSameIconParallel(classLoader);
+            hookMiuiHomeReturnHomeFreshOpen(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
             hookMiuiHomeDrawerState(classLoader);
             hookMiuiHomeEditingState(classLoader);
@@ -1903,6 +1914,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", mirrorsDrawerState=true"
                     + ", mirrorsLauncherEditingState=true"
                     + ", mirrorsLauncherOpenBreakState=true"
+                    + ", repairsNonReusableSameIconOpen=true"
                     + ", usesStandardLauncherBackCallback=true");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install MiuiHome input arbitration", throwable);
@@ -2503,6 +2515,23 @@ public final class MiuiBackGestureHook extends XposedModule {
                 .intercept(this::routeMiuiHomeReturnHomeSameIconParallel));
         log(Log.INFO, TAG,
                 "Hooked Xiaomi same-icon predictive CLOSE parallel routing");
+    }
+
+    private void hookMiuiHomeReturnHomeFreshOpen(ClassLoader classLoader)
+            throws ClassNotFoundException, NoSuchMethodException {
+        Class<?> stateManagerClass = Class.forName(
+                MIUI_HOME_STATE_MANAGER, false, classLoader);
+        Class<?> windowElementClass = Class.forName(
+                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
+        Method isOldElementReuseful = stateManagerClass.getDeclaredMethod(
+                "isOldElementReuseful", windowElementClass,
+                Intent.class, View.class);
+        isOldElementReuseful.setAccessible(true);
+        recordHookHandle(hook(isOldElementReuseful)
+                .setId("miui_home_return_home_fresh_open")
+                .intercept(this::forceMiuiHomeReturnHomeFreshOpen));
+        log(Log.INFO, TAG,
+                "Hooked Xiaomi non-reusable same-icon fresh OPEN selection");
     }
 
     private void hookMiuiHomeDrawerState(ClassLoader classLoader)
@@ -3749,6 +3778,32 @@ public final class MiuiBackGestureHook extends XposedModule {
         // moves it to the old list, and starts FastLaunch OPEN from the native callback.
         routedArgs[1] = Boolean.FALSE;
         return chain.proceed(routedArgs);
+    }
+
+    private Object forceMiuiHomeReturnHomeFreshOpen(
+            XposedInterface.Chain chain) throws Throwable {
+        Object originalResult = chain.proceed();
+        if (!Boolean.TRUE.equals(originalResult)) {
+            return originalResult;
+        }
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        if (controller == null) {
+            return originalResult;
+        }
+        try {
+            if (controller.shouldForceFreshOpenAfterSameIconClose(
+                    chain.getThisObject(), chain.getArg(0), chain.getArg(2))) {
+                return Boolean.FALSE;
+            }
+        } catch (Throwable throwable) {
+            // Xiaomi already selected its stock old-element behavior. Any inspection failure
+            // must preserve that result instead of turning an unrelated launcher click into a
+            // fresh remote transition.
+            log(Log.WARN, TAG,
+                    "Failed to inspect Xiaomi same-icon fresh OPEN selection",
+                    throwable);
+        }
+        return originalResult;
     }
 
     private Object wrapMiuiHomeReturnHomeDirectCancel(
@@ -9146,6 +9201,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 new ReturnHomeAnimationRunner();
         private final AtomicReference<ReturnHomeCloseInterruptionToken>
                 pendingCloseInterruption = new AtomicReference<>();
+        private final AtomicReference<ReturnHomeFreshOpenToken>
+                pendingFreshOpen = new AtomicReference<>();
         private final AtomicReference<ReturnHomeDirectCancelToken>
                 pendingDirectCancel = new AtomicReference<>();
         private final AtomicReference<ReturnHomeElementLeashReuseToken>
@@ -9246,6 +9303,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!deferredControllerReplacement) {
                 deferredControllerReplacement = true;
                 attached = false;
+                invalidatePendingFreshOpen("deferredControllerReplacement:" + reason);
                 discardPendingStartEvent();
                 pendingProgressEvent = null;
                 pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
@@ -9296,6 +9354,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         void detach(boolean clearShell, String reason) {
             attached = false;
             invalidatePendingCloseInterruption(null, "detach:" + reason);
+            invalidatePendingFreshOpen("detach:" + reason);
             invalidatePendingDirectCancel(null, "detach:" + reason, true);
             invalidateElementTransitionContinuity(
                     null, "detach:" + reason, true);
@@ -19157,6 +19216,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                         && !pendingCommit) {
                     session.unifiedNativeCleanupVerified = true;
                 }
+                armFreshOpenAfterSameIconClose(
+                        session, stateManager, windowElement,
+                        token.animationIdentity, currentType);
                 // Xiaomi has completed the exact old CLOSE callback, while its outer icon-click
                 // callback has not yet created or requested the new FastLaunch OPEN. Release the
                 // prepared Shell transition here so its finish transaction cannot land on top of
@@ -19167,6 +19229,224 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.WARN, TAG,
                         "Failed to verify interrupted return-home completion boundary"
                                 + ", generation=" + session.generation, throwable);
+            }
+        }
+
+        private void armFreshOpenAfterSameIconClose(
+                ReturnHomeSession session, Object stateManager,
+                Object windowElement, Object animationIdentity,
+                String currentType) {
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || currentSession != session
+                    || session.finished.get() != 0
+                    || session.stateManager != stateManager
+                    || session.nativeWindowElement != windowElement
+                    || session.nativeAnimationIdentity != animationIdentity
+                    || !"CLOSE_TO_HOME".equals(currentType)) {
+                return;
+            }
+            try {
+                Object currentElement = invokeAnyMethod(
+                        stateManager, "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        windowElement, "getAnimSymbol", new Object[0]);
+                Object launcherTarget = invokeAnyMethod(
+                        windowElement, "getLauncherTargetView", new Object[0]);
+                Object pendingReference = invokeAnyMethod(
+                        stateManager, "getPendingIconViewWeakRef", new Object[0]);
+                Object pendingIcon = pendingReference instanceof WeakReference<?>
+                        ? ((WeakReference<?>) pendingReference).get() : null;
+                Object oldListObject = readField(
+                        stateManager, "windowElementOldList");
+                boolean oldElementRecorded = oldListObject instanceof List<?>
+                        && ((List<?>) oldListObject).contains(windowElement);
+                boolean hasRecentTransition = Boolean.TRUE.equals(
+                        invokeAnyMethod(windowElement,
+                                "hasRecentTransition", new Object[0]));
+                boolean reusable = Boolean.TRUE.equals(
+                        invokeAnyMethod(windowElement,
+                                "isReusefulAnimRunning", new Object[0]));
+                boolean surfaceCanceled = Boolean.TRUE.equals(
+                        readField(windowElement, "mSurfaceCanceled"));
+                boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                        readField(windowElement, "mSurfaceCanceledExecute"));
+                boolean canceled = Boolean.TRUE.equals(
+                        readField(windowElement, "mCanceled"));
+                boolean listenerDisabled = Boolean.TRUE.equals(
+                        readField(windowElement, "mDisableStateManagerListener"));
+                boolean valid = currentElement == windowElement
+                        && currentIdentity == animationIdentity
+                        && pendingIcon instanceof View
+                        && launcherTarget == pendingIcon
+                        && oldElementRecorded
+                        && !hasRecentTransition && !reusable
+                        && surfaceCanceled && surfaceCancelExecuted
+                        && canceled && listenerDisabled;
+                if (!valid) {
+                    log(Log.INFO, TAG,
+                            "Preserved Xiaomi old-element OPEN selection"
+                                    + ", generation=" + session.generation
+                                    + ", sameElement="
+                                    + (currentElement == windowElement)
+                                    + ", sameIdentity="
+                                    + (currentIdentity == animationIdentity)
+                                    + ", sameClickedView="
+                                    + (launcherTarget == pendingIcon)
+                                    + ", oldElementRecorded="
+                                    + oldElementRecorded
+                                    + ", hasRecentTransition="
+                                    + hasRecentTransition
+                                    + ", reusable=" + reusable
+                                    + ", surfaceCanceled="
+                                    + surfaceCanceled
+                                    + ", surfaceCancelExecuted="
+                                    + surfaceCancelExecuted
+                                    + ", canceled=" + canceled
+                                    + ", listenerDisabled="
+                                    + listenerDisabled);
+                    return;
+                }
+                ReturnHomeFreshOpenToken freshOpen =
+                        new ReturnHomeFreshOpenToken(
+                                session, stateManager, windowElement,
+                                animationIdentity, (View) pendingIcon);
+                ReturnHomeFreshOpenToken replaced =
+                        pendingFreshOpen.getAndSet(freshOpen);
+                if (replaced != null) {
+                    log(Log.WARN, TAG,
+                            "Replaced stale Xiaomi fresh-OPEN token"
+                                    + ", oldGeneration="
+                                    + replaced.generation
+                                    + ", newGeneration="
+                                    + freshOpen.generation);
+                }
+                handler.post(() -> expirePendingFreshOpen(freshOpen));
+                log(Log.INFO, TAG,
+                        "Armed Xiaomi fresh OPEN after non-reusable same-icon CLOSE"
+                                + ", generation=" + session.generation
+                                + ", type=" + currentType
+                                + ", animationIdentity="
+                                + shortObject(animationIdentity)
+                                + ", windowElement="
+                                + shortObject(windowElement)
+                                + ", clickedView="
+                                + shortObject(pendingIcon));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to arm Xiaomi same-icon fresh OPEN"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        boolean shouldForceFreshOpenAfterSameIconClose(
+                Object stateManager, Object oldWindowElement,
+                Object clickedView) throws Throwable {
+            ReturnHomeFreshOpenToken token = pendingFreshOpen.get();
+            if (token == null || Looper.myLooper() != Looper.getMainLooper()
+                    || token.stateManager != stateManager
+                    || token.windowElement != oldWindowElement
+                    || token.clickedView != clickedView) {
+                return false;
+            }
+            Object currentElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    oldWindowElement, "getAnimSymbol", new Object[0]);
+            Object currentTypeObject = invokeAnyMethod(
+                    oldWindowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object launcherTarget = invokeAnyMethod(
+                    oldWindowElement, "getLauncherTargetView", new Object[0]);
+            Object oldListObject = readField(
+                    stateManager, "windowElementOldList");
+            boolean oldElementRecorded = oldListObject instanceof List<?>
+                    && ((List<?>) oldListObject).contains(oldWindowElement);
+            boolean hasRecentTransition = Boolean.TRUE.equals(
+                    invokeAnyMethod(oldWindowElement,
+                            "hasRecentTransition", new Object[0]));
+            boolean reusable = Boolean.TRUE.equals(
+                    invokeAnyMethod(oldWindowElement,
+                            "isReusefulAnimRunning", new Object[0]));
+            boolean surfaceCanceled = Boolean.TRUE.equals(
+                    readField(oldWindowElement, "mSurfaceCanceled"));
+            boolean surfaceCancelExecuted = Boolean.TRUE.equals(
+                    readField(oldWindowElement, "mSurfaceCanceledExecute"));
+            boolean canceled = Boolean.TRUE.equals(
+                    readField(oldWindowElement, "mCanceled"));
+            boolean listenerDisabled = Boolean.TRUE.equals(
+                    readField(oldWindowElement,
+                            "mDisableStateManagerListener"));
+            boolean valid = pendingFreshOpen.get() == token
+                    && currentElement == oldWindowElement
+                    && currentIdentity == token.animationIdentity
+                    && "CLOSE_TO_HOME".equals(currentType)
+                    && launcherTarget == clickedView
+                    && oldElementRecorded
+                    && !hasRecentTransition && !reusable
+                    && surfaceCanceled && surfaceCancelExecuted
+                    && canceled && listenerDisabled;
+            if (!valid) {
+                pendingFreshOpen.compareAndSet(token, null);
+                log(Log.WARN, TAG,
+                        "Rejected stale Xiaomi fresh-OPEN token"
+                                + ", generation=" + token.generation
+                                + ", sameElement="
+                                + (currentElement == oldWindowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity == token.animationIdentity)
+                                + ", type=" + currentType
+                                + ", sameClickedView="
+                                + (launcherTarget == clickedView)
+                                + ", oldElementRecorded="
+                                + oldElementRecorded
+                                + ", hasRecentTransition="
+                                + hasRecentTransition
+                                + ", reusable=" + reusable
+                                + ", surfaceCanceled="
+                                + surfaceCanceled
+                                + ", surfaceCancelExecuted="
+                                + surfaceCancelExecuted
+                                + ", canceled=" + canceled
+                                + ", listenerDisabled="
+                                + listenerDisabled);
+                return false;
+            }
+            int invocation = token.invocations.incrementAndGet();
+            log(Log.INFO, TAG,
+                    "Forced Xiaomi fresh OPEN for non-reusable same-icon CLOSE"
+                            + ", generation=" + token.generation
+                            + ", invocation=" + invocation
+                            + ", animationIdentity="
+                            + shortObject(token.animationIdentity)
+                            + ", windowElement="
+                            + shortObject(token.windowElement)
+                            + ", clickedView="
+                            + shortObject(token.clickedView));
+            return true;
+        }
+
+        private void expirePendingFreshOpen(ReturnHomeFreshOpenToken token) {
+            if (pendingFreshOpen.compareAndSet(token, null)) {
+                log(Log.INFO, TAG,
+                        "Expired Xiaomi same-icon fresh-OPEN token"
+                                + ", generation=" + token.generation
+                                + ", invocations="
+                                + token.invocations.get());
+            }
+        }
+
+        private void invalidatePendingFreshOpen(String reason) {
+            ReturnHomeFreshOpenToken token = pendingFreshOpen.getAndSet(null);
+            if (token != null) {
+                log(Log.INFO, TAG,
+                        "Invalidated Xiaomi same-icon fresh-OPEN token"
+                                + ", generation=" + token.generation
+                                + ", invocations="
+                                + token.invocations.get()
+                                + ", reason=" + reason);
             }
         }
 
@@ -20502,6 +20782,26 @@ public final class MiuiBackGestureHook extends XposedModule {
                 this.animationIdentity = animationIdentity;
                 this.pendingCommitInterruption =
                         pendingCommitInterruption;
+            }
+        }
+
+        private final class ReturnHomeFreshOpenToken {
+            final long generation;
+            final Object stateManager;
+            final Object windowElement;
+            final Object animationIdentity;
+            final View clickedView;
+            final AtomicInteger invocations = new AtomicInteger();
+
+            ReturnHomeFreshOpenToken(
+                    ReturnHomeSession session, Object stateManager,
+                    Object windowElement, Object animationIdentity,
+                    View clickedView) {
+                this.generation = session.generation;
+                this.stateManager = stateManager;
+                this.windowElement = windowElement;
+                this.animationIdentity = animationIdentity;
+                this.clickedView = clickedView;
             }
         }
 
