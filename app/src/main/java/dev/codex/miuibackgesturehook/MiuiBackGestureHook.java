@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.17-r25-native-provider-icon-cleanup";
+            "systemui-aosp-back-0.6.17-r26-predictive-spring-end-hold";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -16797,6 +16797,44 @@ public final class MiuiBackGestureHook extends XposedModule {
             invokeAnyMethod(executor, "execute", new Object[]{runnable});
         }
 
+        private void setUnifiedNativePreviewSpringEndEnabled(
+                ReturnHomeSession session, boolean enabled,
+                String reason) throws Throwable {
+            if (session == null || session.nativeWindowElement == null) {
+                throw new IllegalStateException(
+                        "missing Xiaomi predictive WindowElement");
+            }
+            if ((enabled && !session.unifiedNativePreviewSpringEndHeld)
+                    || (!enabled
+                    && session.unifiedNativePreviewSpringEndHeld)) {
+                return;
+            }
+            Object callbackCollection = invokeAnyMethod(
+                    session.nativeWindowElement,
+                    "getSetAnimEndEnableCallbacks", new Object[0]);
+            if (!(callbackCollection instanceof List<?>)
+                    || ((List<?>) callbackCollection).isEmpty()) {
+                throw new IllegalStateException(
+                        "missing Xiaomi animation-end callbacks");
+            }
+            // Mark a hold before dispatch so a partial failure is retried as an enable.
+            if (!enabled) {
+                session.unifiedNativePreviewSpringEndHeld = true;
+            }
+            for (Object callback : (List<?>) callbackCollection) {
+                invokeAnyMethod(callback, "invoke",
+                        new Object[]{Boolean.valueOf(enabled)});
+            }
+            session.unifiedNativePreviewSpringEndHeld = !enabled;
+            log(Log.INFO, TAG,
+                    (enabled ? "Released" : "Held")
+                            + " Xiaomi predictive spring natural end"
+                            + ", generation=" + session.generation
+                            + ", callbacks="
+                            + ((List<?>) callbackCollection).size()
+                            + ", reason=" + reason);
+        }
+
         private Object wrapNativeAnimationTargets(Object[] targets)
                 throws Exception {
             Class<?> compatClass = Class.forName(
@@ -17039,6 +17077,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                     throw new IllegalStateException(
                             "new Xiaomi WindowElement is not idle");
                 }
+                // Xiaomi exposes this callback set to keep every WindowElement animator
+                // logically running while a native owner must survive a stationary phase.
+                // Its closing provider restores the same callbacks before retargeting;
+                // cancellation restores them explicitly below.
+                setUnifiedNativePreviewSpringEndEnabled(
+                        session, false, "previewStart");
                 if (!driveUnifiedNativePreviewFrame(session, true)) {
                     throw new IllegalStateException(
                             "failed first Xiaomi CLOSE_TO_DRAG frame");
@@ -17388,6 +17432,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session, true, "cancelEntry:" + reason);
                 scheduleUnifiedNativeCancelTimeout(
                         session, cancelAnimToEpoch, reason);
+                setUnifiedNativePreviewSpringEndEnabled(
+                        session, true, "cancelEntry:" + reason);
                 animToEntered = true;
                 invokeAnyMethod(session.nativeWindowElement,
                         "animTo", new Object[]{cancelParams});
@@ -18026,8 +18072,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session.nativeWindowElement,
                         "isAnimRunning", new Object[0]));
                 if (!running) {
-                    armUnifiedLocalHandoffStatus(
-                            session, "standardShellCommit");
+                    throw new IllegalStateException(
+                            "held Xiaomi predictive spring became idle"
+                                    + " before standard CLOSE");
                 }
                 Object compatApps = wrapNativeAnimationTargets(
                         session.apps);
@@ -18037,6 +18084,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "onClosingWindowTransitionExecute",
                         new Object[]{compatApps, compatNonApps,
                                 null, Boolean.FALSE});
+                session.unifiedNativePreviewSpringEndHeld = false;
                 session.previewBlurProviderReturned = true;
                 session.previewBackdropProviderReturned = true;
                 log(Log.INFO, TAG,
@@ -18146,6 +18194,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     == session.unifiedNativeAnimationIdentity)
                                     + ", type=" + currentType);
                 }
+                if (!Boolean.TRUE.equals(invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "isAnimRunning", new Object[0]))) {
+                    throw new IllegalStateException(
+                            "held Xiaomi predictive spring became idle"
+                                    + " before native provider");
+                }
 
                 long providerAnimToEpoch = beginUnifiedAnimToEpoch(
                         session, "nativeProviderCommit");
@@ -18157,6 +18212,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "onClosingWindowTransitionExecute",
                         new Object[]{compatApps, compatNonApps,
                                 null, Boolean.FALSE});
+                session.unifiedNativePreviewSpringEndHeld = false;
 
                 Object providerElement = invokeAnyMethod(
                         session.stateManager,
@@ -20090,6 +20146,18 @@ public final class MiuiBackGestureHook extends XposedModule {
                 finishSnapshot.phase.set(
                         UnifiedNativeFinishSnapshot.PHASE_INVALID);
             }
+            if (session.unifiedNativePreviewSpringEndHeld) {
+                try {
+                    setUnifiedNativePreviewSpringEndEnabled(
+                            session, true, "cleanup:" + reason);
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Failed to restore Xiaomi predictive spring end"
+                                    + ", generation=" + session.generation
+                                    + ", reason=" + reason,
+                            throwable);
+                }
+            }
             session.unifiedNativeCleanupVerified = true;
             session.unifiedNativeTargetSet = null;
             session.unifiedNativeClipHelper = null;
@@ -20927,6 +20995,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean nativeContinuationVerified;
             boolean nativeGeometryFailureLogged;
             boolean unifiedNativePreviewOwned;
+            boolean unifiedNativePreviewSpringEndHeld;
             boolean unifiedNativeCancelPending;
             boolean unifiedNativeCancelRetargeted;
             boolean unifiedNativeCancelEndObserved;
