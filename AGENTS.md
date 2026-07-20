@@ -254,6 +254,11 @@ Return-to-home rules:
   shape, enter Xiaomi's complete native closing provider only at the fully validated element
   transition boundary, then allow the native `CLOSE_TO_HOME -> CLOSE_TO_ELEMENT` retarget on
   that same animation; do not stop, replace, or restart the spring at commit.
+- Hold that preview spring's natural end through Xiaomi's own
+  `getSetAnimEndEnableCallbacks()` while the module is driving `CLOSE_TO_DRAG`. Restore the
+  callbacks before cancellation; a successful native closing-provider call adopts and re-enables
+  them. Cleanup must restore a still-held callback set, and an unexpectedly idle spring before
+  either native provider is a failed handoff rather than permission to rearm another owner.
 - Preserve Xiaomi's paired floating-icon lifecycle at that element boundary. Allow the provider
   to initialize the unique target-matching `FloatingIconView2`, suppress only that temporary
   view's drawing and visibility, and let Xiaomi's native reset/show/recycle path restore the real
@@ -292,6 +297,10 @@ System-server compatibility rules:
 - Navigation-done cleanup may call `clearBackAnimations(false)` only after a committed
   navigation when the handler is still composed and both prepared-open and prepared-close
   transition fields are null. Leave normal transition-owned cleanup untouched.
+- When exposing an opening predictive-back target, convert
+  `BackWindowAnimationAdaptor.mTarget` with `WindowContainer.asTaskFragment()`, matching native
+  remote-target creation. Do not substitute `getTaskFragment()`: a `Task` is itself the required
+  `TaskFragment`, while that method is only a parent lookup for child containers.
 - Change a committed return-home window from `USE_OPACITY` to `ALLOW` only when the original
   mode is `USE_OPACITY`, its standard Activity is no longer visible-requested and cannot
   receive touch, the last back type is `TYPE_RETURN_TO_HOME`, and ownership is proven by
@@ -333,7 +342,9 @@ pipeline:
   pilfer and start deferred Shell navigation together at `8dp`. Native GestureStub touch
   regions and redirect state remain authoritative while its legacy processor stays
   neutralized. When Shell is busy, the current behavior suppresses the new SystemUI gesture;
-  it does not implement AOSP `mQueuedTracker` semantics.
+  it does not implement AOSP `mQueuedTracker` semantics. Keep that exact physical stream
+  suppressed across Shell cleanup until its own `ACTION_UP` or `ACTION_CANCEL`; never reopen or
+  late-pilfer it after the navigation that caused the rejection finishes.
 - Release handling reflectively reproduces the relevant `onGestureFinished()` transaction
   but does not call the complete private AOSP method. Preserve the Shell-executor ownership
   and runner-state rules above unless new evidence justifies changing this boundary.
