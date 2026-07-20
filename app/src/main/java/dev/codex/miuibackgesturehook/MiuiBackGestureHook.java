@@ -85,7 +85,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.11-return-home-handoff-fixes";
+            "systemui-aosp-back-0.6.17-r25-native-provider-icon-cleanup";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
@@ -2671,13 +2671,19 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean prepared = false;
         if (controller != null) {
             try {
-                controller.observeUnifiedCommitTransition(
-                        chain.getThisObject(), chain.getArg(0));
                 prepared = controller.prepareElementTransitionContinuity(
                         chain.getThisObject(), chain.getArg(0));
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
                         "Failed to inspect Xiaomi element CLOSE takeover",
+                        throwable);
+            }
+            try {
+                controller.observeUnifiedCommitTransition(
+                        chain.getThisObject(), chain.getArg(0));
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to observe Xiaomi element commit transition",
                         throwable);
             }
         }
@@ -2756,6 +2762,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         Object result = chain.proceed();
         if (controller != null) {
+            try {
+                controller.hideElementBoundaryProviderFloatingIcon(
+                        chain.getThisObject(), params);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to hide transient Xiaomi provider icon",
+                        throwable);
+            }
             controller.markUnifiedCommitAnimToReturned(
                     chain.getThisObject(), params);
             try {
@@ -13326,6 +13340,17 @@ public final class MiuiBackGestureHook extends XposedModule {
                     || ((Rect) elementEndBounds).equals(session.startRect)) {
                 return false;
             }
+            if (provisionalCandidate) {
+                session.unifiedNativeProviderBoundaryDebugId = infoDebugId;
+                try {
+                    if (startUnifiedNativeProviderCommit(session)) {
+                        verifiedCandidate = true;
+                        provisionalCandidate = false;
+                    }
+                } finally {
+                    session.unifiedNativeProviderBoundaryDebugId = -1;
+                }
+            }
             Object stateManager = session.stateManager;
             Object currentElement = invokeAnyMethod(
                     stateManager, "getCurrentWindowElement", new Object[0]);
@@ -13378,6 +13403,91 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + session.nativeAnimationType
                             + ", provisional=" + provisionalCandidate);
             return true;
+        }
+
+        void hideElementBoundaryProviderFloatingIcon(
+                Object windowElement, Object params) throws Throwable {
+            ReturnHomeSession session = currentSession;
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null
+                    || session.nativeWindowElement != windowElement
+                    || session.unifiedNativeProviderBoundaryDebugId < 0
+                    || params == null) {
+                return;
+            }
+            Object typeObject = invokeAnyMethod(
+                    params, "getAnimType", new Object[0]);
+            String typeName = typeObject instanceof Enum<?>
+                    ? ((Enum<?>) typeObject).name()
+                    : String.valueOf(typeObject);
+            Object currentTypeObject = invokeAnyMethod(
+                    windowElement, "getCurrentAnimType", new Object[0]);
+            String currentType = currentTypeObject instanceof Enum<?>
+                    ? ((Enum<?>) currentTypeObject).name()
+                    : String.valueOf(currentTypeObject);
+            Object currentIdentity = invokeAnyMethod(
+                    windowElement, "getAnimSymbol", new Object[0]);
+            Object targetView = invokeAnyMethod(
+                    params, "getTargetView", new Object[0]);
+            if ((!"CLOSE_TO_HOME".equals(typeName)
+                    && !"CLOSE_TO_HOME_CENTER".equals(typeName))
+                    || !typeName.equals(currentType)
+                    || currentIdentity
+                    != session.unifiedNativeAnimationIdentity
+                    || targetView == null) {
+                return;
+            }
+            Object context = invokeAnyMethod(
+                    windowElement, "getWindowAnimContext", new Object[0]);
+            Object floatingIcons = context == null ? null
+                    : invokeAnyMethod(
+                    context, "getFloatingIcons", new Object[0]);
+            if (floatingIcons == null
+                    || !floatingIcons.getClass().isArray()) {
+                throw new IllegalStateException(
+                        "Xiaomi provider has no floating-icon array");
+            }
+            int count = Array.getLength(floatingIcons);
+            Object candidate = null;
+            for (int i = 0; i < count; i++) {
+                Object floatingIcon = Array.get(floatingIcons, i);
+                if (floatingIcon == null
+                        || !"com.miui.home.recents.views.FloatingIconView2"
+                        .equals(floatingIcon.getClass().getName())
+                        || !Boolean.TRUE.equals(invokeAnyMethod(
+                        floatingIcon, "isInit", new Object[0]))
+                        || invokeAnyMethod(floatingIcon,
+                        "getAnimTarget", new Object[0]) != targetView) {
+                    continue;
+                }
+                if (candidate != null) {
+                    throw new IllegalStateException(
+                            "Xiaomi provider has multiple matching floating icons"
+                                    + ", arrayLength=" + count);
+                }
+                candidate = floatingIcon;
+            }
+            if (!(candidate instanceof View)) {
+                throw new IllegalStateException(
+                        "Xiaomi provider has no matching floating icon"
+                                + ", arrayLength=" + count);
+            }
+            View floatingIconView = (View) candidate;
+            invokeAnyMethod(candidate, "setIsDrawIcon",
+                    new Object[]{Boolean.FALSE});
+            floatingIconView.setVisibility(View.INVISIBLE);
+            if (!Boolean.FALSE.equals(invokeAnyMethod(
+                    candidate, "isDrawIcon", new Object[0]))
+                    || floatingIconView.getVisibility() != View.INVISIBLE) {
+                throw new IllegalStateException(
+                        "Xiaomi floating icon remained drawable");
+            }
+            log(Log.INFO, TAG,
+                    "Retained native Xiaomi floating-icon lifecycle without drawing"
+                            + ", generation=" + session.generation
+                            + ", transitionDebugId="
+                            + session.unifiedNativeProviderBoundaryDebugId
+                            + ", type=" + typeName);
         }
 
         void rearmElementLeashAfterNativeClear(Object helper)
@@ -18194,22 +18304,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", ready=true");
                     return;
                 }
-                // Enter Xiaomi's complete native closing provider with the original runner
-                // targets before the real element transition arrives. The provider binds Home
-                // and the floating-icon layer, while LocalWindowAnimImplementor retargets the
-                // same running RectFSpringAnim. The later CLOSE_TO_ELEMENT transition can then
-                // use Xiaomi's normal CLOSE_TO_HOME -> CLOSE_TO_ELEMENT path without changing
-                // Surface or animation ownership.
-                log(Log.INFO, TAG,
-                        "Entering Xiaomi full native closing provider on unified owner"
-                                + ", generation=" + session.generation
-                                + ", animationIdentity="
-                                + shortObject(
-                                session.unifiedNativeAnimationIdentity)
-                                + ", rect=" + session.currentRect);
-                if (startUnifiedNativeProviderCommit(session)) {
-                    return;
-                }
+                // A standard close is admitted by its authenticated Shell signal. An exact
+                // element close enters the provider at its validated transition boundary.
                 Runnable timeout = () ->
                         classifyUnifiedCommitTransitionTimeout(session);
                 session.nativeTimeout = timeout;
@@ -20841,6 +20937,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             int unifiedNativeTaskId = -1;
             int unifiedNativeCurrentRotation;
             int unifiedNativeHomeRotation;
+            int unifiedNativeProviderBoundaryDebugId = -1;
             Object stateManager;
             Object nativeWindowElement;
             Object nativeWindowAnimContext;
