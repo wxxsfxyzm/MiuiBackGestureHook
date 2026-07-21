@@ -224,14 +224,25 @@ Remote-animation rules:
   trigger, read the active tracker's actual trigger, update focused-task/tracker state,
   inspect the runner, and finish or enter post-commit there. The SystemUI input Looper must
   not read or mutate these Shell-owned fields directly.
-- On a committed gesture, publish `BackNavigationInfo.getFocusedTaskId()` to the Shell back
-  transition observer before post-commit. A missing or explicitly cancelled runner may
-  finish directly; a waiting runner must wait, and a ready runner must enter post-commit.
+- On a committed gesture with non-null navigation, publish
+  `BackNavigationInfo.getFocusedTaskId()` to the Shell back transition observer before
+  post-commit. A missing or explicitly cancelled runner may finish directly; a waiting
+  runner must wait, and a ready runner must enter post-commit.
 - Treat reflection failures while reading remote runner state as unknown. Keep the tracker
   finished and wait for Shell's animation timeout instead of finishing navigation early.
 - A released gesture whose runner is waiting must remain finished and wait for animation
-  start. Null navigation must cancel and clean with `finishBackNavigation(false)` without a
-  fallback key.
+  start. Preserve AOSP's legacy null-navigation behavior only for an ordinary in-app stream
+  whose exact MiuiHome accepted-DOWN identity, driver attachment epoch, and Shell controller
+  are still current and whose own `onGestureStarted(...)` changed a proven-false
+  `mReceivedNullNavigationInfo` into `true` while producing a null `BackNavigationInfo`. Keep
+  that physical stream and the native panel; on the Shell executor, publish
+  `INVALID_TASK_ID` to the back transition observer and inject
+  exactly one BACK DOWN/UP pair only when the ordered native tracker commits and the fixed
+  `48dp` condition also passes, then finish navigation with the same trigger. Cancellation
+  sends no key. Launcher Overview, shade, drawer, editing and
+  other callback-only probes, Shell-busy or stale state, unaccepted/redirected streams,
+  reflection uncertainty, and every other null-navigation path still cancel and clean with
+  `finishBackNavigation(false)` without a fallback key.
 - Do not swap closing/entering targets or transform leashes, and do not force
   alpha/visibility/layer order without new evidence for that exact fault.
 - Use SystemUI's native `BackPanelController` indicator. Avoid Xiaomi/MiuiHome arrow paths
