@@ -1,4 +1,31 @@
 <resources>
-    <string name="app_name">Miui Back Gesture Hook</string>
-    <string name="module_description">Hooks Xiaomi back gesture behavior with LSPosed API 102.</string>
+    <string name="app_name" translatable="false">Miui Back Gesture Hook</string>
+    <string name="module_description" translatable="false">Hooks Xiaomi back gesture behavior with LSPosed API 102.</string>
+    <string name="predictive_back_title">Enable predictive back</string>
+    <string name="predictive_back_search">Search apps</string>
+    <string name="predictive_back_warning_title">Compatibility notes</string>
+    <string name="predictive_back_warning_body">This setting opts selected apps into the complete predictive-back protocol. Single-activity apps, WebViews, Compose Navigation, and custom routers may handle in-app back incorrectly and return directly to Home. Enable it only for apps you have tested.</string>
+    <string name="predictive_back_restart_note">Changes apply after the target app is fully restarted. No target app is hooked.</string>
+    <string name="predictive_back_service_loading">Connecting to LSPosed…</string>
+    <string name="predictive_back_service_unavailable">LSPosed service is unavailable, so the selection cannot be read or changed. The running hook keeps its last valid configuration.</string>
+    <string name="predictive_back_config_error">Could not read the LSPosed configuration. The list is read-only; the running hook keeps its last valid configuration.</string>
+    <string name="predictive_back_save_error">Could not save the selection. The previous configuration is unchanged.</string>
+    <string name="predictive_back_apps_error">Could not load the installed app list.</string>
+    <string name="predictive_back_loading_apps">Loading apps…</string>
+    <string name="predictive_back_no_apps">No matching apps</string>
+    <string name="predictive_back_unavailable_app">Saved selection; app is currently unavailable</string>
+    <string name="back">Back</string>
+    <string name="more_options">More options</string>
+    <string name="toggle_dropdown">Toggle dropdown</string>
+    <string name="pull_to_refresh_hint1">Pull down to refresh</string>
+    <string name="pull_to_refresh_hint2">Release to refresh</string>
+    <string name="pull_to_refresh_hint3">Refreshing…</string>
+    <string name="pull_to_refresh_hint4">Refreshed successfully</string>
+    <string name="sort_by_label">Label</string>
+    <string name="sort_by_package_name">Package Name</string>
+    <string name="sort_by_install_time">Install Time</string>
+    <string name="sort_by_reverse_order">Reverse order</string>
+    <string name="sort_by_selected_first">Selected go first</string>
+    <string name="sort_by_show_system_app">Display system app</string>
+    <string name="sort_by_show_package_name">Display package name</string>
 </resources>

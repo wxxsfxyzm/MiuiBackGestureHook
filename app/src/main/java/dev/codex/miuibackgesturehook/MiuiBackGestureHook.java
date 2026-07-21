@@ -11,6 +11,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -85,9 +86,14 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.18-r28-drawer-same-icon-fresh-open";
+            "systemui-aosp-back-0.6.19-r33-native-opt-in-refresh-state";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
+    private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
+            "android.window.WindowOnBackInvokedDispatcher";
+    private static final int APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG = 0x8;
+    private static final int ACTIVITY_PREDICTIVE_BACK_ENABLE_FLAG = 0x4;
+    private static final int ACTIVITY_PREDICTIVE_BACK_DISABLE_FLAG = 0x8;
     private static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
     private static final int UNIFIED_CONFIG_HOOK_RUNNING = 1;
     private static final int UNIFIED_CONFIG_HOOK_COMPLETED = 2;
@@ -420,6 +426,9 @@ public final class MiuiBackGestureHook extends XposedModule {
     private volatile String pendingMiuiHomeReturnHomeReason;
     private volatile boolean miuiHomeSystemUiInputArbiterReady;
     private volatile long miuiHomeSystemUiInputArbiterGeneration;
+    private volatile SharedPreferences predictiveBackPreferences;
+    private volatile boolean predictiveBackPreferencesFailureLogged;
+    private volatile boolean predictiveBackApplicationMetadataFailureLogged;
     private String processName;
     private boolean nativePluginDiagnosticsLogged;
     private volatile Field defaultTransitionAnimationsField;
@@ -1045,6 +1054,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         boolean hadNavigationBarControllerRemoveHook = false;
         boolean hadNavigationBarControllerModeHook = false;
         boolean hadBackNavigationDoneHook = false;
+        boolean hadPredictiveOptInSystemServerHook = false;
         boolean hadMiuiHomeGestureStubShowHook = false;
         boolean hadMiuiHomeGestureInputArbiterHook = false;
         boolean hadMiuiHomeRecentsStateHook = false;
@@ -1089,7 +1099,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
             try {
                 String oldHookId = oldHandle.getId();
-                if (oldHookId != null && oldHookId.startsWith("server_")) {
+                if (oldHookId != null && (oldHookId.startsWith("server_")
+                        || "predictive_opt_in_system_server".equals(oldHookId))) {
                     hadAnyServerHook = true;
                 }
                 if ("server_back_window_start_animation".equals(oldHandle.getId())) {
@@ -1115,6 +1126,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } else if ("server_back_navigation_done_cleanup".equals(
                         oldHandle.getId())) {
                     hadBackNavigationDoneHook = true;
+                } else if ("server_predictive_opt_in_metadata".equals(
+                        oldHandle.getId())
+                        || "predictive_opt_in_system_server".equals(
+                        oldHandle.getId())) {
+                    hadPredictiveOptInSystemServerHook = true;
                 } else if ("miui_home_gesture_stub_show".equals(oldHandle.getId())) {
                     hadMiuiHomeGestureStubShowHook = true;
                 } else if ("miui_home_gesture_input_arbiter".equals(
@@ -1250,11 +1266,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                 || hadAnyServerHook;
         if (shouldInstallServerHooks && replaced == 0) {
             installSystemServerHooks(null);
-        }
-        if (shouldInstallServerHooks
+        } else if (shouldInstallServerHooks
                 && (!hadBackWindowStartHook || !hadPrepareTransitionHook
                 || !hadBackNavigationDoneHook
-                || !hadReturnHomeTouchOcclusionHook)) {
+                || !hadReturnHomeTouchOcclusionHook
+                || !hadPredictiveOptInSystemServerHook)) {
             ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
             if (serverClassLoader != null) {
                 if (!hadBackWindowStartHook) {
@@ -1268,6 +1284,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 if (!hadReturnHomeTouchOcclusionHook) {
                     hookReturnHomeTouchOcclusion(serverClassLoader);
+                }
+                if (!hadPredictiveOptInSystemServerHook) {
+                    hookPredictiveBackOptInMetadata(serverClassLoader);
                 }
             }
         }
@@ -1682,6 +1701,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         if ("server_return_home_touch_occlusion".equals(hookId)) {
             return this::allowCommittedReturnHomeTouchThrough;
+        }
+        if ("server_predictive_opt_in_metadata".equals(hookId)
+                || "predictive_opt_in_system_server".equals(hookId)) {
+            return this::injectSelectedPredictiveBackMetadata;
         }
         if (hookId.startsWith("server_security_sidebar_transient_bars_")) {
             return this::interceptSecuritySidebarTransientBars;
@@ -5237,6 +5260,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             hookTaskFragmentPromotionCompatibility(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
+            hookPredictiveBackOptInMetadata(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookBackWindowStartAnimation(serverClassLoader);
             hookScheduleAnimationPrepareTransition(serverClassLoader);
@@ -5245,6 +5269,140 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + BUILD_MARK + ", hooks=" + hookHandles.size());
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to install system_server hooks", throwable);
+        }
+    }
+
+    private void hookPredictiveBackOptInMetadata(ClassLoader classLoader) {
+        try {
+            Class<?> dispatcherClass = Class.forName(
+                    WINDOW_ON_BACK_INVOKED_DISPATCHER, false, classLoader);
+            for (Method method : dispatcherClass.getDeclaredMethods()) {
+                if (!"isOnBackInvokedCallbackEnabled".equals(method.getName())
+                        || method.getParameterCount() != 3
+                        || !"android.content.pm.ActivityInfo".equals(
+                        method.getParameterTypes()[0].getName())
+                        || !"android.content.pm.ApplicationInfo".equals(
+                        method.getParameterTypes()[1].getName())) {
+                    continue;
+                }
+                method.setAccessible(true);
+                recordHookHandle(hook(method)
+                        .setId("server_predictive_opt_in_metadata")
+                        .intercept(this::injectSelectedPredictiveBackMetadata));
+                log(Log.INFO, TAG, "Hooked predictive-back opt-in metadata"
+                        + ", owner=system_server"
+                        + ", policy=selectedApplications"
+                        + ", preferencesGroup=" + PredictiveBackPreferences.GROUP);
+                return;
+            }
+            log(Log.WARN, TAG,
+                    "Predictive-back opt-in check not found in system_server");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook selected predictive-back metadata", throwable);
+        }
+    }
+
+    private Object injectSelectedPredictiveBackMetadata(XposedInterface.Chain chain)
+            throws Throwable {
+        Object activityInfoArgument = chain.getArg(0);
+        if (!(activityInfoArgument instanceof ActivityInfo)) {
+            return chain.proceed();
+        }
+        ActivityInfo activityInfo = (ActivityInfo) activityInfoArgument;
+        String packageName = activityInfo.packageName;
+        if (packageName == null || packageName.isEmpty()
+                || !isPredictiveBackOptInSelected(packageName)) {
+            return chain.proceed();
+        }
+        Boolean applicationOptInEnabled = readApplicationPredictiveBackOptInEnabled(
+                chain.getArg(1));
+        if (applicationOptInEnabled == null) {
+            return chain.proceed();
+        }
+        if (applicationOptInEnabled.booleanValue()) {
+            log(Log.INFO, TAG, "Ignored stale predictive-back selection"
+                    + ", package=" + packageName
+                    + ", reason=applicationAlreadyOptedIn");
+            return chain.proceed();
+        }
+
+        Integer originalFlags = null;
+        Integer effectiveFlags = null;
+        try {
+            originalFlags = Integer.valueOf(
+                    ((Number) readField(activityInfo, "privateFlags")).intValue());
+            effectiveFlags = Integer.valueOf(
+                    (originalFlags.intValue()
+                            & ~ACTIVITY_PREDICTIVE_BACK_DISABLE_FLAG)
+                            | ACTIVITY_PREDICTIVE_BACK_ENABLE_FLAG);
+            writeField(activityInfo, "privateFlags", effectiveFlags);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to inject selected predictive-back metadata"
+                    + ", package=" + packageName
+                    + ", activity=" + shortObject(activityInfo), throwable);
+            return chain.proceed();
+        }
+
+        Object result = chain.proceed();
+        int priority = Boolean.TRUE.equals(result) ? Log.INFO : Log.WARN;
+        log(priority, TAG, "Selected predictive-back metadata result"
+                + ", package=" + packageName
+                + ", activity=" + shortObject(activityInfo)
+                + ", activityFlags=" + originalFlags + "->" + effectiveFlags
+                + ", effectiveDecision=" + result
+                + ", applicationInfoMutated=false"
+                + ", restartRequiredForChanges=true");
+        return result;
+    }
+
+    private Boolean readApplicationPredictiveBackOptInEnabled(Object applicationInfo) {
+        if (applicationInfo == null) {
+            return null;
+        }
+        try {
+            int privateFlagsExt = ((Number) readField(
+                    applicationInfo, "privateFlagsExt")).intValue();
+            predictiveBackApplicationMetadataFailureLogged = false;
+            return Boolean.valueOf(
+                    (privateFlagsExt & APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG) != 0);
+        } catch (Throwable throwable) {
+            if (!predictiveBackApplicationMetadataFailureLogged) {
+                predictiveBackApplicationMetadataFailureLogged = true;
+                log(Log.WARN, TAG,
+                        "Could not inspect application predictive-back metadata"
+                                + ", policy=preservePlatformDecision",
+                        throwable);
+            }
+            return null;
+        }
+    }
+
+    private boolean isPredictiveBackOptInSelected(String packageName) {
+        try {
+            SharedPreferences preferences = predictiveBackPreferences;
+            if (preferences == null) {
+                synchronized (this) {
+                    preferences = predictiveBackPreferences;
+                    if (preferences == null) {
+                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+                        predictiveBackPreferences = preferences;
+                    }
+                }
+            }
+            Set<String> packages = preferences.getStringSet(
+                    PredictiveBackPreferences.KEY_PACKAGES,
+                    Collections.emptySet());
+            predictiveBackPreferencesFailureLogged = false;
+            return packages != null && packages.contains(packageName);
+        } catch (Throwable throwable) {
+            if (!predictiveBackPreferencesFailureLogged) {
+                predictiveBackPreferencesFailureLogged = true;
+                log(Log.ERROR, TAG, "Predictive-back preferences unavailable"
+                        + ", policy=failClosed"
+                        + ", package=" + packageName, throwable);
+            }
+            return false;
         }
     }
 
