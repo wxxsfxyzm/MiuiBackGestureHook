@@ -191,6 +191,12 @@ Recents ownership rules:
 - Mirror MiuiHome `LauncherState.ALL_APPS` through the same explicit identity-sharing
   broadcast. When the drawer is visible, probe Shell once on `ACTION_DOWN`, accept only its
   standard `TYPE_CALLBACK`, and otherwise leave launcher Home ignored and unpilfered.
+- When NotificationShade or Control Center overlays launcher Home on the default display,
+  snapshot Xiaomi's notification/QS `SysUiState` expansion flags on `ACTION_DOWN` and give
+  that overlay precedence over launcher Overview, drawer, editing, and OPEN interruption.
+  Probe Shell once and accept only `TYPE_CALLBACK`; unreadable, keyguard, bouncer, or
+  screen-pinning state and null/non-callback targets fail closed and remain unpilfered. Do not
+  invoke launcher-local back or shade-collapse APIs directly.
 - Classify launcher Home by the exact top component resolved from MiuiHome's `HOME` or
   `SECONDARY_HOME` entry, not by package name alone. MiuiHome-owned settings and other sibling
   Activities use the ordinary SystemUI/Shell back path. On resolution failure, fall back to the
