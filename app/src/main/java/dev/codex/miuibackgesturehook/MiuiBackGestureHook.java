@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.19-r33-native-opt-in-refresh-state";
+            "systemui-aosp-back-0.6.19-r34-launcher-shade-callback";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -283,6 +283,13 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int TYPE_CROSS_ACTIVITY = 2;
     private static final int TYPE_CROSS_TASK = 3;
     private static final int TYPE_CALLBACK = 4;
+    private static final long SYSUI_STATE_MIUI_QUICK_SETTINGS_EXPANDED = 1L << 60;
+    private static final long SYSUI_STATE_MIUI_NOTIFICATION_EXPANDED = 1L << 61;
+    private static final long SYSUI_STATE_MIUI_SHADE_EXPANDED_MASK =
+            SYSUI_STATE_MIUI_QUICK_SETTINGS_EXPANDED
+                    | SYSUI_STATE_MIUI_NOTIFICATION_EXPANDED;
+    private static final long SYSUI_STATE_LOCKED_OR_PINNED_MASK =
+            1L | (1L << 3) | (1L << 6) | (1L << 9);
     private static final int ACTIVITY_TYPE_STANDARD = 1;
     private static final int ACTIVITY_TYPE_HOME = 2;
     private static final int TOUCH_OCCLUSION_MODE_USE_OPACITY = 1;
@@ -21625,6 +21632,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean gestureCandidate;
         private boolean launcherOpenBreakCandidate;
         private long launcherOpenBreakGenerationCandidate;
+        private boolean launcherShadeCandidate;
         private boolean launcherDrawerCandidate;
         private boolean launcherEditingCandidate;
         private boolean miuiHomeInputAccepted;
@@ -21751,6 +21759,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", launcherOpenBreak=" + launcherOpenBreakCandidate
                     + ", launcherOpenBreakGeneration="
                     + launcherOpenBreakGenerationCandidate
+                    + ", launcherShade=" + launcherShadeCandidate
                     + ", launcherDrawer=" + launcherDrawerCandidate
                     + ", launcherEditing=" + launcherEditingCandidate
                     + ", inputModel=miuihome-accepted-token"
@@ -21798,7 +21807,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // Keep the native panel responsive, but leave the real input stream untouched
                 // and never retry this gesture against a later navigation target.
                 if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate)) {
                     resetCandidate();
                     return false;
@@ -21807,7 +21817,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             if (!pilfered && driver.isGestureSuppressed()) {
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
                 return false;
             }
@@ -21819,7 +21830,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
             }
             if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
-                    launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                    launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                    launcherDrawerCandidate,
                     launcherEditingCandidate)) {
                 resetCandidate();
                 return false;
@@ -21838,6 +21850,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (down == null || !driver.handleTouch(down, activeEdge,
                         launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate,
+                        launcherShadeCandidate,
                         launcherDrawerCandidate,
                         launcherEditingCandidate)) {
                     log(Log.INFO, TAG, "MiuiHome accepted DOWN but SystemUI path declined"
@@ -21913,7 +21926,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
                 cancel.recycle();
             } catch (Throwable throwable) {
@@ -21942,17 +21956,20 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // Let BackPanelController finish its local animation. No Shell navigation is
                 // active, and the monitor must not claim this input stream.
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
             } else if (allowTrigger && pilfered) {
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
             } else {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
                 cancel.recycle();
             }
@@ -21971,7 +21988,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
-                        launcherOpenBreakGenerationCandidate, launcherDrawerCandidate,
+                        launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
+                        launcherDrawerCandidate,
                         launcherEditingCandidate);
                 cancel.recycle();
             } catch (Throwable throwable) {
@@ -22035,25 +22053,33 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean launcherPackage = MIUI_HOME.equals(topActivity.getPackageName());
             boolean launcherHome = launcherPackage
                     && isLauncherHomeComponent(topActivity);
+            boolean launcherShade = launcherHome && displayId == 0
+                    && isMiuiShadeExpanded();
             boolean launcherOpenBreak = displayId == 0
+                    && !launcherShade
                     && !miuiOverviewVisible
                     && miuiLauncherOpenBreakAvailable
                     && miuiLauncherOpenBreakGeneration != 0L
                     && launcherOpenBreakCommandsInFlight.get() == 0;
             boolean launcherDrawer = launcherHome
+                    && !launcherShade
                     && miuiDrawerVisible
                     && !miuiOverviewVisible
                     && !launcherOpenBreak;
             boolean launcherEditing = launcherHome
+                    && !launcherShade
                     && miuiLauncherEditing
                     && !miuiOverviewVisible
                     && !launcherOpenBreak
                     && !launcherDrawer;
             if (launcherHome && !miuiOverviewVisible
-                    && !launcherOpenBreak && !launcherDrawer && !launcherEditing) {
+                    && !launcherOpenBreak && !launcherShade
+                    && !launcherDrawer && !launcherEditing) {
                 log(Log.INFO, TAG, "Ignored native back on launcher Home"
                         + ", topActivity=" + topActivity.flattenToShortString()
                         + ", overviewVisible=false"
+                        + ", launcherShade=false"
+                        + ", launcherDrawer=false"
                         + ", launcherEditing=false"
                         + ", launcherOpenBreakAvailable="
                         + miuiLauncherOpenBreakAvailable
@@ -22068,6 +22094,13 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", topActivity=" + topActivity.flattenToShortString()
                         + ", displayId=" + displayId
                         + ", edge=" + edge);
+            }
+            if (launcherShade) {
+                log(Log.INFO, TAG,
+                        "Accepted native back for NotificationShade over MiuiHome Home"
+                                + ", requireShellCallback=true"
+                                + ", displayId=" + displayId
+                                + ", edge=" + edge);
             }
             if (launcherDrawer) {
                 log(Log.INFO, TAG, "Accepted native back in MiuiHome app drawer"
@@ -22125,11 +22158,38 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherOpenBreakCandidate = launcherOpenBreak;
             launcherOpenBreakGenerationCandidate = launcherOpenBreak
                     ? miuiLauncherOpenBreakGeneration : 0L;
+            launcherShadeCandidate = launcherShade;
             launcherDrawerCandidate = launcherDrawer;
             launcherEditingCandidate = launcherEditing;
             // Geometry, attachment, touchability, and redirect acceptance are proved later
             // by the matching token emitted only from MiuiHome's accepted processor boundary.
             return true;
+        }
+
+        private boolean isMiuiShadeExpanded() {
+            try {
+                Object sysUiState = readField(edgeBackGestureHandler, "mSysUiState");
+                Object stateDisplayId = invokeAnyMethod(
+                        sysUiState, "getDisplayId", new Object[0]);
+                Object flagsObject = invokeAnyMethod(sysUiState, "getFlags", new Object[0]);
+                if (!(stateDisplayId instanceof Number)
+                        || ((Number) stateDisplayId).intValue() != displayId
+                        || !(flagsObject instanceof Number)) {
+                    log(Log.WARN, TAG, "Rejected launcher shade state with invalid SysUiState"
+                            + ", stateDisplayId=" + stateDisplayId
+                            + ", monitorDisplayId=" + displayId
+                            + ", flags=" + flagsObject);
+                    return false;
+                }
+                long flags = ((Number) flagsObject).longValue();
+                return (flags & SYSUI_STATE_MIUI_SHADE_EXPANDED_MASK) != 0L
+                        && (flags & SYSUI_STATE_LOCKED_OR_PINNED_MASK) == 0L;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect MIUI notification shade state; preserving Home ignore",
+                        throwable);
+                return false;
+            }
         }
 
         private boolean isNativeBackInputActive() {
@@ -22397,6 +22457,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             launcherOpenBreakCandidate = false;
             launcherOpenBreakGenerationCandidate = 0L;
+            launcherShadeCandidate = false;
             launcherDrawerCandidate = false;
             launcherEditingCandidate = false;
             miuiHomeInputAccepted = false;
@@ -22472,6 +22533,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private long pendingLauncherOpenBreakGeneration;
         private long pendingLauncherOpenBreakAttemptId;
         private boolean launcherOverviewGesture;
+        private boolean launcherShadeGesture;
         private boolean launcherDrawerGesture;
         private boolean launcherEditingGesture;
         private boolean recentsVisualOnlyGesture;
@@ -22504,6 +22566,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean handleTouch(MotionEvent event, int edge,
                                     boolean launcherOpenBreakCandidate,
                                     long launcherOpenBreakGenerationCandidate,
+                                    boolean launcherShadeCandidate,
                                     boolean launcherDrawerCandidate,
                                     boolean launcherEditingCandidate) {
             try {
@@ -22511,6 +22574,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     case MotionEvent.ACTION_DOWN:
                         return onDown(event, edge, launcherOpenBreakCandidate,
                                 launcherOpenBreakGenerationCandidate,
+                                launcherShadeCandidate,
                                 launcherDrawerCandidate, launcherEditingCandidate);
                     case MotionEvent.ACTION_MOVE:
                         return onMove(event);
@@ -22539,6 +22603,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean onDown(MotionEvent event, int edge,
                                boolean launcherOpenBreakCandidate,
                                long launcherOpenBreakGenerationCandidate,
+                               boolean launcherShadeCandidate,
                                boolean launcherDrawerCandidate,
                                boolean launcherEditingCandidate) throws Exception {
             clearLegacyBackGuard("newPhysicalGesture");
@@ -22553,7 +22618,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ? launcherOpenBreakGenerationCandidate : 0L;
             launcherOpenBreakAttemptId = launcherOpenBreakCandidate
                     ? launcherOpenBreakAttemptIds.incrementAndGet() : 0L;
-            launcherOverviewGesture = miuiOverviewVisible;
+            launcherOverviewGesture = miuiOverviewVisible && !launcherShadeCandidate;
+            launcherShadeGesture = launcherShadeCandidate;
             launcherDrawerGesture = launcherDrawerCandidate;
             launcherEditingGesture = launcherEditingCandidate;
             recentsVisualOnlyGesture = false;
@@ -22579,8 +22645,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
                 return true;
             }
-            if (launcherOverviewGesture || launcherDrawerGesture || launcherEditingGesture) {
-                log(Log.INFO, TAG, (launcherOverviewGesture
+            if (launcherOverviewGesture || launcherShadeGesture
+                    || launcherDrawerGesture || launcherEditingGesture) {
+                log(Log.INFO, TAG, (launcherShadeGesture
+                        ? "SystemUI-owned NotificationShade back gesture candidate"
+                        : launcherOverviewGesture
                         ? "SystemUI-owned Recents back gesture candidate"
                         : launcherDrawerGesture
                         ? "SystemUI-owned MiuiHome drawer back gesture candidate"
@@ -22599,7 +22668,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     }
                     gestureActive = false;
                     gestureSuppressed = false;
-                    log(Log.INFO, TAG, (launcherDrawerGesture
+                    log(Log.INFO, TAG, (launcherShadeGesture
+                            ? "Ignored NotificationShade gesture without a callback target"
+                            : launcherDrawerGesture
                             ? "Ignored MiuiHome drawer gesture without a callback target"
                             : launcherEditingGesture
                             ? "Ignored MiuiHome editing gesture without a callback target"
@@ -22617,6 +22688,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.INFO, TAG, "SystemUI gesture driver candidate"
                     + ", shellStartDeferred=" + shellGestureStartDeferred
                     + ", inputModel=miuihome-accepted-token"
+                    + ", launcherShade=" + launcherShadeGesture
                     + ", launcherDrawer=" + launcherDrawerGesture
                     + ", launcherEditing=" + launcherEditingGesture
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
@@ -22688,9 +22760,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + distance);
             } else {
                 invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
-                log(Log.INFO, TAG, launcherOverviewGesture
-                        ? "SystemUI Recents Shell callback threshold crossed, distance="
+                log(Log.INFO, TAG, launcherShadeGesture
+                        ? "SystemUI NotificationShade Shell callback threshold crossed, distance="
                         + distance
+                        : launcherOverviewGesture
+                        ? "SystemUI Recents Shell callback threshold crossed, distance=" + distance
                         : "SystemUI gesture driver intent threshold crossed, distance=" + distance);
             }
         }
@@ -22744,12 +22818,13 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean queued = queueShellReleaseTransaction(
                     event.getRawX(), event.getRawY(), releaseDistance,
                     thresholdCrossed, trigger, activeEdge,
-                    launcherOverviewGesture, launcherDrawerGesture,
+                    launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
                     launcherEditingGesture, releaseInputIdentity);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "SystemUI gesture driver release queued=" + queued
                     + ", requestedTrigger=" + trigger
                     + ", recentsShellCallback=" + launcherOverviewGesture
+                    + ", shadeShellCallback=" + launcherShadeGesture
                     + ", drawerShellCallback=" + launcherDrawerGesture
                     + ", editingShellCallback=" + launcherEditingGesture
                     + ", edge=" + activeEdge);
@@ -22904,7 +22979,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             // even when system_server can already return a valid predictive-back navigation;
             // otherwise Shell starts a new cross-activity animation and misses reverse().
             boolean launcherCallbackOnly = launcherOverviewGesture
-                    || launcherDrawerGesture || launcherEditingGesture;
+                    || launcherShadeGesture || launcherDrawerGesture
+                    || launcherEditingGesture;
             OpenTransitionSnapshot runningOpen = launcherCallbackOnly
                     ? null : findReversibleRunningOpenTransition();
             if (runningOpen != null) {
@@ -22951,7 +23027,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 int navigationType = info instanceof BackNavigationInfo
                         ? ((BackNavigationInfo) info).getType() : -1;
                 if (navigationType != TYPE_CALLBACK) {
-                    log(Log.WARN, TAG, (launcherOverviewGesture
+                    log(Log.WARN, TAG, (launcherShadeGesture
+                            ? "Rejected non-callback NotificationShade Shell target"
+                            : launcherOverviewGesture
                             ? "Rejected stale Recents Shell target"
                             : launcherDrawerGesture
                             ? "Rejected non-callback MiuiHome drawer Shell target"
@@ -22964,7 +23042,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     cleanupRejectedShellGesture();
                     return false;
                 }
-                log(Log.INFO, TAG, (launcherOverviewGesture
+                log(Log.INFO, TAG, (launcherShadeGesture
+                        ? "Resolved NotificationShade Shell callback, type="
+                        : launcherOverviewGesture
                         ? "Resolved Launcher Recents Shell callback, type="
                         : launcherDrawerGesture
                         ? "Resolved MiuiHome drawer Shell callback, type="
@@ -23039,12 +23119,13 @@ public final class MiuiBackGestureHook extends XposedModule {
             // a waiting runner receives cancellation before normal navigation cleanup.
             boolean queued = queueShellReleaseTransaction(
                     downX, downY, 0.0f, false, false, activeEdge,
-                    launcherOverviewGesture, launcherDrawerGesture,
+                    launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
                     launcherEditingGesture, null);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "Rejected Shell navigation cancellation queued=" + queued
                             + ", requestedTrigger=false"
                             + ", recentsProbe=" + launcherOverviewGesture
+                            + ", shadeProbe=" + launcherShadeGesture
                             + ", drawerProbe=" + launcherDrawerGesture
                             + ", editingProbe=" + launcherEditingGesture
                             + ", edge=" + activeEdge);
@@ -23078,6 +23159,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherOpenBreakGeneration = 0L;
             launcherOpenBreakAttemptId = 0L;
             launcherOverviewGesture = false;
+            launcherShadeGesture = false;
             launcherDrawerGesture = false;
             launcherEditingGesture = false;
             recentsVisualOnlyGesture = false;
@@ -23135,6 +23217,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                        boolean requestedTrigger,
                                                        int releaseEdge,
                                                        boolean recentsCallback,
+                                                       boolean shadeCallback,
                                                        boolean drawerCallback,
                                                        boolean editingCallback,
                                                        MiuiHomeAcceptedInputToken
@@ -23149,7 +23232,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 ((Executor) shellExecutor).execute(() -> finishGestureOnShellExecutor(
                         releaseController, rawX, rawY, releaseDistance,
                         dispatchFinalProgress, requestedTrigger, releaseEdge,
-                        recentsCallback, drawerCallback, editingCallback,
+                        recentsCallback, shadeCallback, drawerCallback, editingCallback,
                         inputIdentity));
                 return true;
             } catch (Throwable throwable) {
@@ -23168,6 +23251,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                   boolean requestedTrigger,
                                                   int releaseEdge,
                                                   boolean recentsCallback,
+                                                  boolean shadeCallback,
                                                   boolean drawerCallback,
                                                   boolean editingCallback,
                                                   MiuiHomeAcceptedInputToken
@@ -23181,7 +23265,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ((BackTouchTracker) tracker).update(rawX, rawY);
                 } else {
                     finishShellReleaseWithoutTracker(releaseController,
-                            recentsCallback, drawerCallback, editingCallback);
+                            recentsCallback, shadeCallback, drawerCallback, editingCallback);
                     return;
                 }
                 // BackPanelController posts its terminal ACTIVE/INACTIVE decision through
@@ -23200,7 +23284,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "getActiveTracker", new Object[0]);
                 if (tracker == null) {
                     finishShellReleaseWithoutTracker(releaseController,
-                            recentsCallback, drawerCallback, editingCallback);
+                            recentsCallback, shadeCallback, drawerCallback, editingCallback);
                     return;
                 }
                 boolean actualTrigger = Boolean.TRUE.equals(invokeAnyMethod(
@@ -23297,7 +23381,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ((BackTouchTracker) tracker).reset();
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             "direct-callback", releaseEdge,
-                            recentsCallback, drawerCallback, editingCallback);
+                            recentsCallback, shadeCallback, drawerCallback, editingCallback);
                     return;
                 }
 
@@ -23310,7 +23394,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             runnerState == REMOTE_RUNNER_MISSING
                                     ? "runner-missing" : "runner-cancelled",
-                            releaseEdge, recentsCallback, drawerCallback, editingCallback);
+                            releaseEdge, recentsCallback, shadeCallback,
+                            drawerCallback, editingCallback);
                     return;
                 }
                 if (runnerState == REMOTE_RUNNER_WAITING
@@ -23319,7 +23404,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             runnerState == REMOTE_RUNNER_WAITING
                                     ? "runner-waiting" : "runner-unknown",
-                            releaseEdge, recentsCallback, drawerCallback, editingCallback);
+                            releaseEdge, recentsCallback, shadeCallback,
+                            drawerCallback, editingCallback);
                     return;
                 }
                 if (!actualTrigger && info.getType() == TYPE_RETURN_TO_HOME) {
@@ -23329,7 +23415,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "startPostCommitAnimation", new Object[0]);
                 logShellReleaseResult(info, requestedTrigger, actualTrigger,
                         "post-commit", releaseEdge,
-                        recentsCallback, drawerCallback, editingCallback);
+                        recentsCallback, shadeCallback, drawerCallback, editingCallback);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Complete Shell release transaction failed; cancelling",
                         throwable);
@@ -23449,6 +23535,7 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private void finishShellReleaseWithoutTracker(Object releaseController,
                                                       boolean recentsCallback,
+                                                      boolean shadeCallback,
                                                       boolean drawerCallback,
                                                       boolean editingCallback)
                 throws Exception {
@@ -23497,6 +23584,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             log(Log.WARN, TAG, "Cancelled Shell release without an active tracker"
                     + ", recentsShellCallback=" + recentsCallback
+                    + ", shadeShellCallback=" + shadeCallback
                     + ", drawerShellCallback=" + drawerCallback
                     + ", editingShellCallback=" + editingCallback);
         }
@@ -23549,7 +23637,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ((BackTouchTracker) tracker).reset();
                 } else {
                     finishShellReleaseWithoutTracker(releaseController,
-                            false, false, false);
+                            false, false, false, false);
                 }
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Failed to cancel broken Shell release transaction",
@@ -23562,6 +23650,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                            boolean actualTrigger,
                                            String outcome, int releaseEdge,
                                            boolean recentsCallback,
+                                           boolean shadeCallback,
                                            boolean drawerCallback,
                                            boolean editingCallback) {
             log(Log.INFO, TAG, "Completed Shell release transaction"
@@ -23570,6 +23659,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", actualTrigger=" + actualTrigger
                     + ", outcome=" + outcome
                     + ", recentsShellCallback=" + recentsCallback
+                    + ", shadeShellCallback=" + shadeCallback
                     + ", drawerShellCallback=" + drawerCallback
                     + ", editingShellCallback=" + editingCallback
                     + ", edge=" + releaseEdge);
