@@ -94,6 +94,25 @@ system
 Keep scope minimal. Do not add target applications or further `system_server` cleanup or
 compatibility hooks unless new SystemUI/server evidence requires them.
 
+Predictive opt-in rules:
+
+- The module UI may let the user explicitly select applications for complete predictive-back
+  opt-in. The default selection is empty and configuration failures fail closed. Clearly warn that
+  incompatible single-Activity, WebView, Compose Navigation, or custom-router applications may
+  skip their internal back stack and return directly to Home.
+- Keep selected applications out of the static scope and do not hook their processes. Write the
+  selection through the API-102 Xposed service remote preferences and read it only from the
+  existing `system` scope.
+- Inject only the selected package's current launch `ActivityInfo`: clear its explicit-disable bit
+  and set its explicit-enable bit before the platform opt-in check. Do not modify the shared
+  `ApplicationInfo`. Selection changes apply to newly created Activity instances after the target
+  application is fully restarted.
+- Omit launcher applications whose parsed application-level metadata already opts into predictive
+  back; keep absent, disabled, Activity-only, and mixed declarations visible. Prune stale selections
+  in the UI and independently ignore them in `system_server` so an invisible entry cannot override
+  an Activity-level opt-out. Failure to inspect application metadata in the UI fails open; the
+  corresponding `system_server` failure preserves the platform decision without forcing opt-in.
+
 Hot-reload rules:
 
 - Preserve `autoHotReload=true`. Treat hook IDs as lifecycle keys: whenever a hook is added,
