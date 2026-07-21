@@ -5,7 +5,7 @@
     <string name="predictive_back_search">Search apps</string>
     <string name="predictive_back_warning_title">Compatibility notes</string>
     <string name="predictive_back_warning_body">This setting opts selected apps into the complete predictive-back protocol. Single-activity apps, WebViews, Compose Navigation, and custom routers may handle in-app back incorrectly and return directly to Home. Enable it only for apps you have tested.</string>
-    <string name="predictive_back_restart_note">Changes apply after the target app is fully restarted. No target app is hooked.</string>
+    <string name="predictive_back_restart_note">Changes apply after the target app is fully restarted. No target app is hooked. Apps that already declare app-level predictive-back support are omitted from the list.</string>
     <string name="predictive_back_service_loading">Connecting to LSPosed…</string>
     <string name="predictive_back_service_unavailable">LSPosed service is unavailable, so the selection cannot be read or changed. The running hook keeps its last valid configuration.</string>
     <string name="predictive_back_config_error">Could not read the LSPosed configuration. The list is read-only; the running hook keeps its last valid configuration.</string>
