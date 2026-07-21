@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.6.19-r34-launcher-shade-callback";
+            "systemui-aosp-back-0.6.19-r35-aosp-null-navigation";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -21666,6 +21666,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         void attach() {
             if (!arbiterAttached) {
                 arbiterAttached = true;
+                driver.onInputMonitorAttached();
                 onSystemUiInputMonitorAttached(context);
             }
             log(Log.INFO, TAG, "Native SystemUI back input receiver attached"
@@ -22516,8 +22517,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private final class SystemUiBackGestureDriver {
         private final Context context;
         private final Object edgeBackGestureHandler;
-        private Object controller;
-        private Object backAnimationImpl;
+        private volatile Object controller;
+        private volatile Object backAnimationImpl;
         private boolean gestureActive;
         private boolean thresholdCrossed;
         private boolean nativePanelActive;
@@ -22526,6 +22527,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean shellGestureStartDeferred;
         private volatile boolean gestureSuppressed;
         private boolean legacyInterruptGesture;
+        private boolean aospNullNavigationGesture;
+        private long aospNullNavigationInputEpoch;
+        private Object aospNullNavigationController;
         private Object legacyRunningOpenInfo;
         private boolean launcherOpenBreakGesture;
         private long launcherOpenBreakGeneration;
@@ -22538,6 +22542,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean launcherEditingGesture;
         private boolean recentsVisualOnlyGesture;
         private MiuiHomeAcceptedInputToken acceptedInputIdentity;
+        private final AtomicLong inputMonitorEpoch = new AtomicLong();
+        private volatile boolean inputMonitorAttached;
         private int activeEdge;
         private float downX;
         private float downY;
@@ -22551,8 +22557,21 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
-            this.backAnimationImpl = newBackAnimationImpl;
-            this.controller = readField(newBackAnimationImpl, "this$0");
+            Object newController = readField(newBackAnimationImpl, "this$0");
+            synchronized (backInputLifecycleLock) {
+                if (controller != newController) {
+                    inputMonitorEpoch.incrementAndGet();
+                }
+                this.backAnimationImpl = newBackAnimationImpl;
+                this.controller = newController;
+            }
+        }
+
+        void onInputMonitorAttached() {
+            synchronized (backInputLifecycleLock) {
+                inputMonitorEpoch.incrementAndGet();
+                inputMonitorAttached = true;
+            }
         }
 
         void bindAcceptedInput(MiuiHomeAcceptedInputToken token) {
@@ -22612,6 +22631,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             shellGestureStartDeferred = false;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
+            aospNullNavigationGesture = false;
+            aospNullNavigationInputEpoch = 0L;
+            aospNullNavigationController = null;
             legacyRunningOpenInfo = null;
             launcherOpenBreakGesture = launcherOpenBreakCandidate;
             launcherOpenBreakGeneration = launcherOpenBreakCandidate
@@ -22726,6 +22748,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.INFO, TAG, "Started in-app back path at 8dp intent threshold"
                         + ", shellGestureStarted=" + shellGestureStarted
                         + ", legacyInterrupt=" + legacyInterruptGesture
+                        + ", aospNullNavigation=" + aospNullNavigationGesture
                         + ", edge=" + activeEdge
                         + ", x=" + event.getRawX()
                         + ", y=" + event.getRawY());
@@ -22738,6 +22761,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 crossIntentThreshold(distance);
             }
             if (thresholdCrossed && !legacyInterruptGesture
+                    && !aospNullNavigationGesture
                     && !launcherOpenBreakGesture) {
                 dispatchExplicitProgress(distance);
             }
@@ -22815,11 +22839,17 @@ public final class MiuiBackGestureHook extends XposedModule {
             triggerBack = trigger;
             MiuiHomeAcceptedInputToken releaseInputIdentity =
                     acceptedInputIdentity;
+            Object releaseController = aospNullNavigationGesture
+                    && aospNullNavigationController != null
+                    ? aospNullNavigationController : controller;
             boolean queued = queueShellReleaseTransaction(
+                    releaseController,
                     event.getRawX(), event.getRawY(), releaseDistance,
                     thresholdCrossed, trigger, activeEdge,
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
-                    launcherEditingGesture, releaseInputIdentity);
+                    launcherEditingGesture, aospNullNavigationGesture,
+                    aospNullNavigationInputEpoch,
+                    releaseInputIdentity);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "SystemUI gesture driver release queued=" + queued
                     + ", requestedTrigger=" + trigger
@@ -22827,6 +22857,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", shadeShellCallback=" + launcherShadeGesture
                     + ", drawerShellCallback=" + launcherDrawerGesture
                     + ", editingShellCallback=" + launcherEditingGesture
+                    + ", aospNullNavigation=" + aospNullNavigationGesture
                     + ", edge=" + activeEdge);
             clearLocalGestureState();
             return true;
@@ -22870,6 +22901,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         void detach() {
+            synchronized (backInputLifecycleLock) {
+                inputMonitorAttached = false;
+                inputMonitorEpoch.incrementAndGet();
+            }
             if (pendingLauncherOpenBreakAttemptId != 0L) {
                 decrementLauncherOpenBreakCommandsInFlight();
             }
@@ -22989,38 +23024,108 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.INFO, TAG, "Preferred running Xiaomi OPEN transition before predictive back");
                 return true;
             }
-            syncAospProgressThresholds();
-            invokeAnyMethod(controller, "onGestureStarted",
+
+            Object startController;
+            long startInputEpoch;
+            boolean startInputAttached;
+            synchronized (backInputLifecycleLock) {
+                startController = controller;
+                startInputEpoch = inputMonitorEpoch.get();
+                startInputAttached = inputMonitorAttached;
+            }
+            if (startController == null || startInputEpoch == 0L || !startInputAttached) {
+                log(Log.WARN, TAG, "Rejected gesture without a stable Shell start owner"
+                        + ", controller=" + shortObject(startController)
+                        + ", inputEpoch=" + startInputEpoch
+                        + ", inputAttached=" + startInputAttached);
+                return false;
+            }
+            if (Boolean.TRUE.equals(readField(
+                    startController, "mReceivedNullNavigationInfo"))) {
+                log(Log.WARN, TAG, "Rejected gesture with stale Shell null-navigation state"
+                        + ", state=" + describeShellState(startController));
+                return false;
+            }
+            syncAospProgressThresholds(startController);
+            invokeAnyMethod(startController, "onGestureStarted",
                     new Object[]{Float.valueOf(downX), Float.valueOf(downY),
                             Integer.valueOf(activeEdge)});
-            syncAospProgressThresholds();
-            Object info = readField(controller, "mBackNavigationInfo");
+            syncAospProgressThresholds(startController);
+            Object info = readField(startController, "mBackNavigationInfo");
             boolean receivedNull = Boolean.TRUE.equals(
-                    readField(controller, "mReceivedNullNavigationInfo"));
+                    readField(startController, "mReceivedNullNavigationInfo"));
+            Object currentController;
+            long currentInputEpoch;
+            boolean startOwnerStillCurrent;
+            synchronized (backInputLifecycleLock) {
+                currentController = controller;
+                currentInputEpoch = inputMonitorEpoch.get();
+                startOwnerStillCurrent = inputMonitorAttached
+                        && startController == currentController
+                        && startInputEpoch == currentInputEpoch;
+            }
+            if (!startOwnerStillCurrent) {
+                log(Log.WARN, TAG, "Rejected Shell gesture after start owner changed"
+                        + ", startController=" + shortObject(startController)
+                        + ", currentController=" + shortObject(currentController)
+                        + ", startInputEpoch=" + startInputEpoch
+                        + ", currentInputEpoch=" + currentInputEpoch);
+                cleanupRejectedShellGesture(startController);
+                return false;
+            }
             if (info == null || receivedNull) {
                 log(Log.WARN, TAG, "Shell rejected back navigation"
                         + ", info=" + shortObject(info)
                         + ", receivedNull=" + receivedNull
-                        + ", state=" + describeShellState());
+                        + ", state=" + describeShellState(startController));
                 if (launcherOverviewGesture) {
                     recentsVisualOnlyGesture = true;
                 }
-                cleanupRejectedShellGesture();
-                if (launcherOverviewGesture) {
-                    log(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
-                            + ", mode=visual-only"
-                            + ", retry=false");
+                if (launcherCallbackOnly) {
+                    cleanupRejectedShellGesture(startController);
+                    if (launcherOverviewGesture) {
+                        log(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
+                                + ", mode=visual-only"
+                                + ", retry=false");
+                    }
                     return false;
                 }
-                runningOpen = launcherCallbackOnly
-                        ? null : findReversibleRunningOpenTransition();
+                runningOpen = findReversibleRunningOpenTransition();
                 if (receivedNull && runningOpen != null) {
+                    cleanupRejectedShellGesture(startController);
                     legacyInterruptGesture = true;
                     legacyRunningOpenInfo = runningOpen.transitionInfo;
                     log(Log.INFO, TAG, "Using SystemUI-owned legacy BACK for possible "
                             + "MIUI in-app transition interruption");
                     return true;
                 }
+                boolean authenticatedNullStart = false;
+                if (info == null && receivedNull) {
+                    synchronized (backInputLifecycleLock) {
+                        if (isCurrentAcceptedInputIdentity(
+                                acceptedInputIdentity, activeEdge, startController,
+                                startInputEpoch)) {
+                            // Match stock BackAnimationController: retain this authenticated
+                            // physical stream, let the native panel drive the tracker's terminal
+                            // trigger, and inject one legacy BACK only if release commits.
+                            // Launcher callback probes and Shell-busy rejection never reach this
+                            // branch.
+                            aospNullNavigationGesture = true;
+                            aospNullNavigationInputEpoch = startInputEpoch;
+                            aospNullNavigationController = startController;
+                            shellGestureStarted = true;
+                            authenticatedNullStart = true;
+                        }
+                    }
+                }
+                if (authenticatedNullStart) {
+                    log(Log.INFO, TAG, "Continuing authenticated in-app gesture with AOSP "
+                            + "null-navigation fallback"
+                            + ", input=" + shortObject(acceptedInputIdentity)
+                            + ", edge=" + activeEdge);
+                    return true;
+                }
+                cleanupRejectedShellGesture(startController);
                 return false;
             }
             if (launcherCallbackOnly) {
@@ -23039,7 +23144,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     if (launcherOverviewGesture) {
                         recentsVisualOnlyGesture = true;
                     }
-                    cleanupRejectedShellGesture();
+                    cleanupRejectedShellGesture(startController);
                     return false;
                 }
                 log(Log.INFO, TAG, (launcherShadeGesture
@@ -23078,6 +23183,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (Boolean.TRUE.equals(readField(controller, "mBackGestureStarted"))) {
                     return false;
                 }
+                if (Boolean.TRUE.equals(readField(
+                        controller, "mReceivedNullNavigationInfo"))) {
+                    return false;
+                }
                 if (readField(controller, "mBackNavigationInfo") != null
                         || readField(controller, "mBackAnimationFinishedCallback") != null) {
                     return false;
@@ -23097,20 +23206,28 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private String describeShellState() {
+            return describeShellState(controller);
+        }
+
+        private String describeShellState(Object stateController) {
             try {
-                return "postCommit=" + readField(controller, "mPostCommitAnimationInProgress")
-                        + ", backStarted=" + readField(controller, "mBackGestureStarted")
-                        + ", info=" + shortObject(readField(controller, "mBackNavigationInfo"))
+                return "postCommit=" + readField(
+                        stateController, "mPostCommitAnimationInProgress")
+                        + ", backStarted=" + readField(stateController, "mBackGestureStarted")
+                        + ", info=" + shortObject(readField(
+                        stateController, "mBackNavigationInfo"))
                         + ", finishedCallback=" + shortObject(
-                        readField(controller, "mBackAnimationFinishedCallback"))
-                        + ", current=" + shortObject(readField(controller, "mCurrentTracker"))
-                        + ", queued=" + shortObject(readField(controller, "mQueuedTracker"));
+                        readField(stateController, "mBackAnimationFinishedCallback"))
+                        + ", current=" + shortObject(readField(
+                        stateController, "mCurrentTracker"))
+                        + ", queued=" + shortObject(readField(
+                        stateController, "mQueuedTracker"));
             } catch (Throwable throwable) {
                 return "unavailable:" + throwable.getClass().getSimpleName();
             }
         }
 
-        private void cleanupRejectedShellGesture() {
+        private void cleanupRejectedShellGesture(Object rejectedController) {
             // A prepared adapter may deliver onAnimationStart after onGestureStarted() returns.
             // Finishing navigation here would clear mBackNavigationInfo first; the late adapter
             // callback would then be retained while startSystemAnimation() exits early, leaving
@@ -23118,9 +23235,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             // Shell-owner release transaction so the tracker is finished with trigger=false and
             // a waiting runner receives cancellation before normal navigation cleanup.
             boolean queued = queueShellReleaseTransaction(
+                    rejectedController,
                     downX, downY, 0.0f, false, false, activeEdge,
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
-                    launcherEditingGesture, null);
+                    launcherEditingGesture, false, 0L, null);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "Rejected Shell navigation cancellation queued=" + queued
                             + ", requestedTrigger=false"
@@ -23148,12 +23266,29 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
+        private boolean isCurrentAcceptedInputIdentity(
+                MiuiHomeAcceptedInputToken inputIdentity, int edge,
+                Object expectedController, long expectedInputMonitorEpoch) {
+            return inputIdentity != null
+                    && acceptingBackInputInstalls
+                    && systemUiInputArbiterMonitorCount.get() > 0
+                    && inputMonitorAttached
+                    && expectedInputMonitorEpoch != 0L
+                    && expectedInputMonitorEpoch == inputMonitorEpoch.get()
+                    && expectedController == controller
+                    && inputIdentity.generation == systemUiInputArbiterGeneration
+                    && inputIdentity.edge == edge;
+        }
+
         private void clearLocalGestureState() {
             gestureActive = false;
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
+            aospNullNavigationGesture = false;
+            aospNullNavigationInputEpoch = 0L;
+            aospNullNavigationController = null;
             legacyRunningOpenInfo = null;
             launcherOpenBreakGesture = false;
             launcherOpenBreakGeneration = 0L;
@@ -23211,7 +23346,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private boolean queueShellReleaseTransaction(float rawX, float rawY,
+        private boolean queueShellReleaseTransaction(Object releaseController,
+                                                       float rawX, float rawY,
                                                        float releaseDistance,
                                                        boolean dispatchFinalProgress,
                                                        boolean requestedTrigger,
@@ -23220,9 +23356,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                        boolean shadeCallback,
                                                        boolean drawerCallback,
                                                        boolean editingCallback,
+                                                       boolean aospNullFallback,
+                                                       long aospNullInputEpoch,
                                                        MiuiHomeAcceptedInputToken
                                                                inputIdentity) {
-            Object releaseController = controller;
             try {
                 Object shellExecutor = readField(releaseController, "mShellExecutor");
                 if (!(shellExecutor instanceof Executor)) {
@@ -23233,7 +23370,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         releaseController, rawX, rawY, releaseDistance,
                         dispatchFinalProgress, requestedTrigger, releaseEdge,
                         recentsCallback, shadeCallback, drawerCallback, editingCallback,
-                        inputIdentity));
+                        aospNullFallback, aospNullInputEpoch, inputIdentity));
                 return true;
             } catch (Throwable throwable) {
                 // A release must never fall back to mutating controller/tracker state from
@@ -23254,6 +23391,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                   boolean shadeCallback,
                                                   boolean drawerCallback,
                                                   boolean editingCallback,
+                                                  boolean aospNullFallback,
+                                                  long aospNullInputEpoch,
                                                   MiuiHomeAcceptedInputToken
                                                           inputIdentity) {
             Object tracker = null;
@@ -23294,7 +23433,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", nativeTriggerBeforeThresholdVeto="
                         + nativeTriggerBeforeThresholdVeto
                         + ", actualTrigger=" + actualTrigger);
-                if (dispatchFinalProgress) {
+                if (dispatchFinalProgress && !aospNullFallback) {
                     dispatchExplicitProgressOnShell(releaseController, tracker,
                             releaseDistance);
                 }
@@ -23302,8 +23441,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "mBackNavigationInfo");
                 BackNavigationInfo info = infoObject instanceof BackNavigationInfo
                         ? (BackNavigationInfo) infoObject : null;
+                if (info == null) {
+                    finishNullNavigationOnShellExecutor(
+                            releaseController, tracker, requestedTrigger,
+                            actualTrigger, releaseEdge, aospNullFallback,
+                            aospNullInputEpoch, inputIdentity);
+                    return;
+                }
                 int focusedTaskId = -1;
-                if (actualTrigger && info != null) {
+                if (actualTrigger) {
                     Object observer = readField(releaseController,
                             "mBackTransitionObserver");
                     Object focusedTaskIdObject = invokeAnyMethod(info,
@@ -23328,8 +23474,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", edge=" + releaseEdge);
                     return;
                 }
-                if (actualTrigger && info != null
-                        && info.getType() == TYPE_RETURN_TO_HOME) {
+                if (actualTrigger && info.getType() == TYPE_RETURN_TO_HOME) {
                     if (focusedTaskId < 0 || inputIdentity == null
                             || inputIdentity.generation
                             != systemUiInputArbiterGeneration) {
@@ -23362,18 +23507,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                                         + (replaced == null ? -1
                                         : replaced.taskId));
                     }
-                }
-                if (info == null) {
-                    // Unlike stock's legacy fallback, a null navigation from this deferred
-                    // driver is cancelled and cleaned exactly once with no injected key.
-                    ((BackTouchTracker) tracker).reset();
-                    invokeAnyMethod(releaseController, "finishBackNavigation",
-                            new Object[]{Boolean.FALSE});
-                    log(Log.WARN, TAG, "Cancelled released gesture with null navigation"
-                            + ", requestedTrigger=" + requestedTrigger
-                            + ", actualTrigger=" + actualTrigger
-                            + ", edge=" + releaseEdge);
-                    return;
                 }
                 if (!info.isPrepareRemoteAnimation()) {
                     invokeAnyMethod(releaseController, "invokeOrCancelBack",
@@ -23421,6 +23554,59 @@ public final class MiuiBackGestureHook extends XposedModule {
                         throwable);
                 cancelFailedShellRelease(releaseController, tracker);
             }
+        }
+
+        private void finishNullNavigationOnShellExecutor(
+                Object releaseController, Object tracker,
+                boolean requestedTrigger, boolean actualTrigger,
+                int releaseEdge, boolean aospNullFallback,
+                long aospNullInputEpoch,
+                MiuiHomeAcceptedInputToken inputIdentity) throws Exception {
+            boolean authenticatedFallback;
+            boolean commitLegacyBack;
+            synchronized (backInputLifecycleLock) {
+                authenticatedFallback = aospNullFallback
+                        && isCurrentAcceptedInputIdentity(
+                        inputIdentity, releaseEdge, releaseController,
+                        aospNullInputEpoch);
+                commitLegacyBack = authenticatedFallback
+                        && requestedTrigger && actualTrigger;
+                if (commitLegacyBack) {
+                    Object observer = readField(releaseController,
+                            "mBackTransitionObserver");
+                    writeField(observer, "mFocusedTaskId", Integer.valueOf(-1));
+                }
+                writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
+                writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
+                writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
+                setTrackerState(tracker, "FINISHED");
+                if (Boolean.TRUE.equals(readField(releaseController,
+                        "mPostCommitAnimationInProgress"))) {
+                    log(Log.WARN, TAG,
+                            "Null-navigation release found an existing post-commit animation"
+                                    + ", authenticatedFallback="
+                                    + authenticatedFallback
+                                    + ", actualTrigger=" + actualTrigger
+                                    + ", edge=" + releaseEdge);
+                    return;
+                }
+                ((BackTouchTracker) tracker).reset();
+                if (commitLegacyBack) {
+                    injectLegacyBackKey(releaseController);
+                }
+                invokeAnyMethod(releaseController, "finishBackNavigation",
+                        new Object[]{Boolean.valueOf(commitLegacyBack)});
+            }
+            log(commitLegacyBack ? Log.INFO : Log.WARN, TAG,
+                    "Finished released gesture with null navigation"
+                            + ", requestedTrigger=" + requestedTrigger
+                            + ", actualTrigger=" + actualTrigger
+                            + ", aospFallbackRequested=" + aospNullFallback
+                            + ", authenticatedFallback=" + authenticatedFallback
+                            + ", focusedTaskId="
+                            + (commitLegacyBack ? "-1" : "unchanged")
+                            + ", legacyBackCommitted=" + commitLegacyBack
+                            + ", edge=" + releaseEdge);
         }
 
         private void prepareReturnHomeCancelTransitionCleanup(
@@ -23697,14 +23883,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void syncAospProgressThresholds() {
+        private void syncAospProgressThresholds(Object progressController) {
             try {
                 invokeAnyMethod(edgeBackGestureHandler, "updateDisplaySize$1", new Object[0]);
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to update display size for back progress", throwable);
             }
             try {
-                Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
+                Object tracker = invokeAnyMethod(
+                        progressController, "getActiveTracker", new Object[0]);
                 if (tracker != null) {
                     applyProgressThresholds(tracker);
                 }
@@ -23806,13 +23993,21 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private void injectLegacyBackKey() {
+            injectLegacyBackKey(controller);
+        }
+
+        private void injectLegacyBackKey(Object injectionController) {
+            if (injectionController == null) {
+                log(Log.ERROR, TAG, "Cannot inject legacy BACK without a controller");
+                return;
+            }
             Object previousMarker = moduleLegacyBackInjection.get();
             if (previousMarker == null) {
                 moduleLegacyBackInjection.set(this);
             }
             try {
                 try {
-                    invokeAnyMethod(controller, "injectBackKey", new Object[0]);
+                    invokeAnyMethod(injectionController, "injectBackKey", new Object[0]);
                     log(Log.INFO, TAG, "Injected legacy back key via controller");
                     return;
                 } catch (Throwable throwable) {
@@ -23823,7 +24018,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 boolean downSent = false;
                 try {
-                    invokeAnyMethod(controller, "sendBackEvent",
+                    invokeAnyMethod(injectionController, "sendBackEvent",
                             new Object[]{Integer.valueOf(KEY_ACTION_DOWN)});
                     downSent = true;
                 } catch (Throwable throwable) {
@@ -23831,7 +24026,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 } finally {
                     if (downSent) {
                         try {
-                            invokeAnyMethod(controller, "sendBackEvent",
+                            invokeAnyMethod(injectionController, "sendBackEvent",
                                     new Object[]{Integer.valueOf(KEY_ACTION_UP)});
                             log(Log.INFO, TAG, "Injected legacy back key via sendBackEvent");
                         } catch (Throwable throwable) {
