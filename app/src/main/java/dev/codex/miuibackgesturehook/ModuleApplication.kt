@@ -7,7 +7,6 @@ import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.concurrent.CopyOnWriteArraySet
 
 class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
     override fun onCreate() {
@@ -48,13 +47,12 @@ class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
 
     companion object {
         private val mainHandler = Handler(Looper.getMainLooper())
-        private val listeners = CopyOnWriteArraySet<ServiceStateListener>()
+        private val listeners = mutableSetOf<ServiceStateListener>()
         private val liveServices = ArrayList<XposedService>()
         private val deadServices = Collections.newSetFromMap(
             IdentityHashMap<XposedService, Boolean>(),
         )
 
-        @Volatile
         private var currentService: XposedService? = null
 
         fun addServiceStateListener(
@@ -62,7 +60,7 @@ class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
             notifyImmediately: Boolean,
         ) {
             listeners.add(listener)
-            if (notifyImmediately && listeners.contains(listener)) {
+            if (notifyImmediately) {
                 listener.onServiceStateChanged(currentService)
             }
         }
@@ -72,11 +70,7 @@ class ModuleApplication : Application(), XposedServiceHelper.OnServiceListener {
         }
 
         private fun notifyServiceStateChanged(service: XposedService?) {
-            listeners.forEach { listener ->
-                if (listeners.contains(listener)) {
-                    listener.onServiceStateChanged(service)
-                }
-            }
+            listeners.toList().forEach { it.onServiceStateChanged(service) }
         }
 
         private fun isDead(service: XposedService): Boolean = synchronized(deadServices) {

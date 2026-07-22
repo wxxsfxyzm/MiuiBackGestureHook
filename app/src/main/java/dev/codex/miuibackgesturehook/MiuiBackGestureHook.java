@@ -34,6 +34,7 @@ import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
+import android.util.SparseArray;
 import android.view.Choreographer;
 import android.view.InputChannel;
 import android.view.InputEvent;
@@ -60,6 +61,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -359,13 +361,13 @@ public final class MiuiBackGestureHook extends XposedModule {
             Collections.synchronizedMap(new WeakHashMap<>());
     private final ConcurrentHashMap<Object, OpenTransitionSnapshot> runningOpenTransitions =
             new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ReflectionKey, Field> reflectedFields =
+    private final ConcurrentHashMap<Pair<Class<?>, String>, Field> reflectedFields =
             new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ReflectionKey, Method> reflectedAnyMethods =
+    private final ConcurrentHashMap<Pair<Class<?>, String>, Method> reflectedAnyMethods =
             new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<ReflectionKey, Method> reflectedExactMethods =
+    private final ConcurrentHashMap<Pair<Class<?>, String>, Method> reflectedExactMethods =
             new ConcurrentHashMap<>();
-    private final Set<ReflectionKey> missingReflectedMembers =
+    private final Set<Pair<Class<?>, String>> missingReflectedMembers =
             ConcurrentHashMap.newKeySet();
     private final Object legacyBackGuardLock = new Object();
     private final AtomicLong legacyBackAttemptIds = new AtomicLong();
@@ -465,10 +467,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         final long frameTraceId;
         final int sourceKind;
         private final float[] matrixValues;
-        private final int cropLeft;
-        private final int cropTop;
-        private final int cropRight;
-        private final int cropBottom;
+        private final Rect windowCrop;
         private final float[] surfaceCornerRadii;
 
         ReturnHomeNativeGeometrySnapshot(
@@ -481,10 +480,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.frameTraceId = frameTraceId;
             this.sourceKind = sourceKind;
             this.matrixValues = matrixValues.clone();
-            this.cropLeft = windowCrop.left;
-            this.cropTop = windowCrop.top;
-            this.cropRight = windowCrop.right;
-            this.cropBottom = windowCrop.bottom;
+            this.windowCrop = new Rect(windowCrop);
             this.surfaceCornerRadii = surfaceCornerRadii.clone();
         }
 
@@ -493,7 +489,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         Rect copyWindowCrop() {
-            return new Rect(cropLeft, cropTop, cropRight, cropBottom);
+            return new Rect(windowCrop);
         }
 
         float[] copySurfaceCornerRadii() {
@@ -529,7 +525,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final class OpenTransitionSnapshot {
         final Object token;
         final Object transitionInfo;
-        final int animatorCount;
         final int originalAnimatorCount;
         final Animator[] animators;
         final Executor animExecutor;
@@ -542,7 +537,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                                long generation) {
             this.token = token;
             this.transitionInfo = transitionInfo;
-            this.animatorCount = animators.length;
             this.originalAnimatorCount = originalAnimatorCount;
             this.animators = animators;
             this.animExecutor = animExecutor;
@@ -617,17 +611,13 @@ public final class MiuiBackGestureHook extends XposedModule {
     }
 
     private static final class LauncherOpenMainTask {
-        final Object change;
-        final Object taskInfo;
         final int taskId;
         final int displayId;
         final ComponentName component;
         final Rect bounds;
 
-        LauncherOpenMainTask(Object change, Object taskInfo, int taskId,
-                             int displayId, ComponentName component, Rect bounds) {
-            this.change = change;
-            this.taskInfo = taskInfo;
+        LauncherOpenMainTask(int taskId, int displayId,
+                             ComponentName component, Rect bounds) {
             this.taskId = taskId;
             this.displayId = displayId;
             this.component = component;
@@ -675,10 +665,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     }
 
     private static final class PermissionActivityTransition {
-        final Object infoExpose;
-        final Object transitionInfo;
-        final Object changeExpose;
-        final Object change;
         final Object container;
         final Object parent;
         final SurfaceControl leash;
@@ -691,15 +677,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         final int endDisplayId;
 
         PermissionActivityTransition(
-                Object infoExpose, Object transitionInfo,
-                Object changeExpose, Object change, Object container,
-                Object parent, SurfaceControl leash, ComponentName component,
+                Object container, Object parent, SurfaceControl leash,
+                ComponentName component,
                 Rect startBounds, Rect endBounds, int debugId,
                 int backgroundColor, int startDisplayId, int endDisplayId) {
-            this.infoExpose = infoExpose;
-            this.transitionInfo = transitionInfo;
-            this.changeExpose = changeExpose;
-            this.change = change;
             this.container = container;
             this.parent = parent;
             this.leash = leash;
@@ -735,14 +716,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         final int closingTaskId;
         final int openingTaskId;
         final int displayId;
-        final int closingPrefix;
-        final int openingPrefix;
 
         ReturnHomeComposition(Object appsIdentity, Object closingTarget,
                               Object openingTarget, SurfaceControl closingLeash,
                               SurfaceControl openingLeash, int closingTaskId,
-                              int openingTaskId, int displayId, int closingPrefix,
-                              int openingPrefix) {
+                              int openingTaskId, int displayId) {
             this.appsIdentity = appsIdentity;
             this.closingTarget = closingTarget;
             this.openingTarget = openingTarget;
@@ -751,8 +729,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.closingTaskId = closingTaskId;
             this.openingTaskId = openingTaskId;
             this.displayId = displayId;
-            this.closingPrefix = closingPrefix;
-            this.openingPrefix = openingPrefix;
         }
     }
 
@@ -767,11 +743,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         final Object finishTransaction;
         final Object mergeTarget;
         final Object finishCallback;
-        final Object preparedOpenInfo;
         final Object previousAnimationFinishCallback;
         final int transitionType;
-        final int changeMode;
-        final boolean backGestureAnimated;
         final AtomicInteger acceptedBoundaryComposition =
                 new AtomicInteger();
 
@@ -784,10 +757,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     Object finishTransaction,
                                     Object mergeTarget,
                                     Object finishCallback,
-                                    Object preparedOpenInfo,
                                     Object previousAnimationFinishCallback,
-                                    int transitionType, int changeMode,
-                                    boolean backGestureAnimated) {
+                                    int transitionType) {
             this.handler = handler;
             this.controller = controller;
             this.composition = composition;
@@ -798,12 +769,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.finishTransaction = finishTransaction;
             this.mergeTarget = mergeTarget;
             this.finishCallback = finishCallback;
-            this.preparedOpenInfo = preparedOpenInfo;
             this.previousAnimationFinishCallback =
                     previousAnimationFinishCallback;
             this.transitionType = transitionType;
-            this.changeMode = changeMode;
-            this.backGestureAnimated = backGestureAnimated;
         }
     }
 
@@ -908,40 +876,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private static final class ReflectionKey {
-        final Class<?> owner;
-        final String signature;
-
-        ReflectionKey(Class<?> owner, String signature) {
-            this.owner = owner;
-            this.signature = signature;
-        }
-
-        @Override
-        public boolean equals(Object object) {
-            if (this == object) {
-                return true;
-            }
-            if (!(object instanceof ReflectionKey)) {
-                return false;
-            }
-            ReflectionKey other = (ReflectionKey) object;
-            return owner == other.owner && signature.equals(other.signature);
-        }
-
-        @Override
-        public int hashCode() {
-            return 31 * System.identityHashCode(owner) + signature.hashCode();
-        }
-    }
-
     private static final class ObjectIdentityKey {
         final Object object;
-        final int identityHash;
 
         ObjectIdentityKey(Object object) {
             this.object = object;
-            this.identityHash = System.identityHashCode(object);
         }
 
         @Override
@@ -952,7 +891,7 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         @Override
         public int hashCode() {
-            return identityHash;
+            return System.identityHashCode(object);
         }
     }
 
@@ -969,7 +908,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         MiuiHomeReturnHomeController activeReturnHomeController =
                 miuiHomeReturnHomeController;
         if (activeReturnHomeController != null
-                && activeReturnHomeController.blocksHotReload()) {
+                && activeReturnHomeController.blocksControllerReplacement()) {
             log(Log.WARN, TAG,
                     "Deferred hot reload while Xiaomi owns predictive return-home"
                             + ", process=" + processName
@@ -1027,7 +966,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         for (Map.Entry<Object, NativeBackInputMonitor> entry
                 : new ArrayList<>(nativeInputMonitors.entrySet())) {
             inputState[index][0] = entry.getKey();
-            inputState[index][1] = entry.getValue().backAnimationImpl;
+            inputState[index][1] = entry.getValue().driver.backAnimationImpl;
             index++;
         }
         Object[][] savedHeadlessState =
@@ -1057,190 +996,15 @@ public final class MiuiBackGestureHook extends XposedModule {
     public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
         processName = param.getProcessName();
         int replaced = 0;
-        boolean hadBackWindowStartHook = false;
-        boolean hadPrepareTransitionHook = false;
-        boolean hadReturnHomeTouchOcclusionHook = false;
-        boolean hadNavigationBarGestureInsetsHook = false;
-        boolean hadNavigationBarControllerCreateHook = false;
-        boolean hadNavigationBarControllerRemoveHook = false;
-        boolean hadNavigationBarControllerModeHook = false;
-        boolean hadBackNavigationDoneHook = false;
-        boolean hadPredictiveOptInSystemServerHook = false;
-        boolean hadMiuiHomeGestureStubShowHook = false;
-        boolean hadMiuiHomeGestureInputArbiterHook = false;
-        boolean hadMiuiHomeRecentsStateHook = false;
-        boolean hadMiuiHomeTaskLaunchHook = false;
-        boolean hadMiuiHomeFullscreenStateHook = false;
-        boolean hadMiuiHomeOpenBreakEnableHook = false;
-        boolean hadMiuiHomeOpenBreakAnimationStartHook = false;
-        boolean hadMiuiHomeOpenBreakAnimationEndHook = false;
-        boolean hadMiuiHomeOpenSnapshotTargetsHook = false;
-        boolean hadMiuiHomeReusedCloseOpenHook = false;
-        boolean hadMiuiHomeElementTransitionHook = false;
-        boolean hadMiuiHomeElementLeashRearmHook = false;
-        boolean hadMiuiHomeElementAnimTypeHook = false;
-        boolean hadMiuiHomeAnimToConfigHook = false;
-        boolean hadMiuiHomeFinishDispatchSourceHook = false;
-        boolean hadMiuiHomeFinishDispatchApplyHook = false;
-        boolean hadMiuiHomeTraceOnAnimUpdateHook = false;
-        boolean hadMiuiHomeTraceApplySurfaceParamsHook = false;
-        boolean hadMiuiHomeTraceSetupLeashHook = false;
-        Set<String> hadMiuiHomeSurfaceTransactionTraceHookIds =
-                ConcurrentHashMap.newKeySet();
-        boolean hadMiuiHomePermissionMergeHook = false;
-        boolean hadMiuiHomeReturnHomeCancelSurfaceHook = false;
-        boolean hadMiuiHomeReturnHomeSameIconParallelHook = false;
-        boolean hadMiuiHomeReturnHomeFreshOpenHook = false;
-        boolean hadMiuiHomeReturnHomeCancelDirectHook = false;
-        boolean hadMiuiHomeReturnHomeSetToOldHook = false;
-        boolean hadMiuiHomeDrawerStateHook = false;
-        boolean hadMiuiHomeEditingStateHook = false;
-        boolean hadMiuiHomeReturnHomeInitializeHook = false;
-        boolean hadMiuiHomeReturnHomeLocalHandoffHook = false;
-        boolean hadMiuiHomeReturnHomeWallpaperSetHook = false;
-        boolean hadMiuiHomeReturnHomeWallpaperAnimHook = false;
-        boolean hadDefaultTransitionStartHook = false;
-        boolean hadDefaultTransitionMergeHook = false;
-        boolean hadBackSendEventHook = false;
-        boolean hadBackPrepareReparentHook = false;
-        boolean hadBackCommitCompositionHook = false;
-        boolean hadBackFinishOpenAtomicHook = false;
-        boolean hadAnyServerHook = false;
+        Set<String> oldHookIds = new java.util.HashSet<>();
+        boolean hadServerHook = false;
         ClassLoader hotReloadClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
             try {
                 String oldHookId = oldHandle.getId();
-                if (oldHookId != null && (oldHookId.startsWith("server_")
-                        || "predictive_opt_in_system_server".equals(oldHookId))) {
-                    hadAnyServerHook = true;
-                }
-                if ("server_back_window_start_animation".equals(oldHandle.getId())) {
-                    hadBackWindowStartHook = true;
-                } else if ("server_schedule_animation_prepare_transition".equals(
-                        oldHandle.getId())) {
-                    hadPrepareTransitionHook = true;
-                } else if ("server_return_home_touch_occlusion".equals(
-                        oldHandle.getId())) {
-                    hadReturnHomeTouchOcclusionHook = true;
-                } else if ("systemui_navigation_bar_gesture_insets".equals(
-                        oldHandle.getId())) {
-                    hadNavigationBarGestureInsetsHook = true;
-                } else if ("systemui_navigation_bar_controller_create".equals(
-                        oldHandle.getId())) {
-                    hadNavigationBarControllerCreateHook = true;
-                } else if ("systemui_navigation_bar_controller_remove".equals(
-                        oldHandle.getId())) {
-                    hadNavigationBarControllerRemoveHook = true;
-                } else if ("systemui_navigation_bar_controller_onNavigationModeChanged".equals(
-                        oldHandle.getId())) {
-                    hadNavigationBarControllerModeHook = true;
-                } else if ("server_back_navigation_done_cleanup".equals(
-                        oldHandle.getId())) {
-                    hadBackNavigationDoneHook = true;
-                } else if ("server_predictive_opt_in_metadata".equals(
-                        oldHandle.getId())
-                        || "predictive_opt_in_system_server".equals(
-                        oldHandle.getId())) {
-                    hadPredictiveOptInSystemServerHook = true;
-                } else if ("miui_home_gesture_stub_show".equals(oldHandle.getId())) {
-                    hadMiuiHomeGestureStubShowHook = true;
-                } else if ("miui_home_gesture_input_arbiter".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeGestureInputArbiterHook = true;
-                } else if ("miui_home_recents_actual_state_v2".equals(oldHandle.getId())) {
-                    hadMiuiHomeRecentsStateHook = true;
-                } else if ("miui_home_recents_task_launch".equals(oldHandle.getId())) {
-                    hadMiuiHomeTaskLaunchHook = true;
-                } else if ("miui_home_fullscreen_state".equals(oldHandle.getId())) {
-                    hadMiuiHomeFullscreenStateHook = true;
-                } else if ("miui_home_open_break_enable".equals(oldHandle.getId())) {
-                    hadMiuiHomeOpenBreakEnableHook = true;
-                } else if ("miui_home_open_break_animation_start".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeOpenBreakAnimationStartHook = true;
-                } else if ("miui_home_open_break_animation_end".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeOpenBreakAnimationEndHook = true;
-                } else if ("miui_home_open_snapshot_targets".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeOpenSnapshotTargetsHook = true;
-                } else if ("miui_home_reused_close_open".equals(oldHandle.getId())) {
-                    hadMiuiHomeReusedCloseOpenHook = true;
-                } else if ("miui_home_return_home_element_transition".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeElementTransitionHook = true;
-                } else if ("miui_home_return_home_element_leash_rearm".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeElementLeashRearmHook = true;
-                } else if ("miui_home_return_home_element_anim_type".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeElementAnimTypeHook = true;
-                } else if ("miui_home_return_home_anim_to_config".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeAnimToConfigHook = true;
-                } else if ("miui_home_return_home_finish_dispatch_source".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeFinishDispatchSourceHook = true;
-                } else if ("miui_home_return_home_finish_dispatch_apply".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeFinishDispatchApplyHook = true;
-                } else if ("miui_home_trace_on_anim_update".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeTraceOnAnimUpdateHook = true;
-                } else if ("miui_home_trace_apply_surface_params".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeTraceApplySurfaceParamsHook = true;
-                } else if ("miui_home_trace_transition_setup_leash".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeTraceSetupLeashHook = true;
-                } else if ("miui_home_permission_activity_merge".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomePermissionMergeHook = true;
-                } else if ("miui_home_return_home_cancel_surface".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeCancelSurfaceHook = true;
-                } else if ("miui_home_return_home_same_icon_parallel".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeSameIconParallelHook = true;
-                } else if ("miui_home_return_home_fresh_open".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeFreshOpenHook = true;
-                } else if ("miui_home_return_home_cancel_direct".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeCancelDirectHook = true;
-                } else if ("miui_home_return_home_set_to_old".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeSetToOldHook = true;
-                } else if ("miui_home_drawer_state".equals(oldHandle.getId())) {
-                    hadMiuiHomeDrawerStateHook = true;
-                } else if ("miui_home_editing_state".equals(oldHandle.getId())) {
-                    hadMiuiHomeEditingStateHook = true;
-                } else if ("miui_home_return_home_initialize".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeInitializeHook = true;
-                } else if ("miui_home_return_home_local_handoff".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeLocalHandoffHook = true;
-                } else if ("miui_home_return_home_wallpaper_set".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeWallpaperSetHook = true;
-                } else if ("miui_home_return_home_wallpaper_anim".equals(
-                        oldHandle.getId())) {
-                    hadMiuiHomeReturnHomeWallpaperAnimHook = true;
-                } else if ("systemui_default_transition_start".equals(oldHandle.getId())) {
-                    hadDefaultTransitionStartHook = true;
-                } else if ("systemui_default_transition_merge".equals(oldHandle.getId())) {
-                    hadDefaultTransitionMergeHook = true;
-                } else if ("systemui_back_send_event_guard".equals(oldHandle.getId())) {
-                    hadBackSendEventHook = true;
-                } else if ("systemui_back_prepare_reparent".equals(oldHandle.getId())) {
-                    hadBackPrepareReparentHook = true;
-                } else if ("systemui_back_commit_composition".equals(
-                        oldHandle.getId())) {
-                    hadBackCommitCompositionHook = true;
-                } else if ("systemui_back_finish_open_atomic".equals(
-                        oldHandle.getId())) {
-                    hadBackFinishOpenAtomicHook = true;
+                if (oldHookId != null) {
+                    hadServerHook |= oldHookId.startsWith("server_")
+                            || "predictive_opt_in_system_server".equals(oldHookId);
                 }
                 if (hotReloadClassLoader == null
                         && oldHandle.getExecutable() != null
@@ -1253,15 +1017,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                     XposedInterface.HookHandle replacementHandle =
                             oldHandle.replaceHook(replacement);
                     hookHandles.add(replacementHandle);
+                    if (oldHookId != null) {
+                        oldHookIds.add(oldHookId);
+                    }
                     if ("systemui_back_commit_composition".equals(oldHookId)) {
                         backCommitCompositionHookReady = true;
                     } else if ("systemui_back_finish_open_atomic".equals(
                             oldHookId)) {
                         backFinishOpenAtomicHookReady = true;
-                    }
-                    if (oldHookId != null && oldHookId.startsWith(
-                            "miui_home_trace_surface_transaction_")) {
-                        hadMiuiHomeSurfaceTransactionTraceHookIds.add(oldHookId);
                     }
                     replaced++;
                 } else {
@@ -1274,57 +1037,62 @@ public final class MiuiBackGestureHook extends XposedModule {
         restoreHotReloadInput(param.getSavedInstanceState());
         boolean shouldInstallServerHooks = param.isSystemServer()
                 || "system".equals(processName)
-                || hadAnyServerHook;
+                || hadServerHook;
         if (shouldInstallServerHooks && replaced == 0) {
             installSystemServerHooks(null);
         } else if (shouldInstallServerHooks
-                && (!hadBackWindowStartHook || !hadPrepareTransitionHook
-                || !hadBackNavigationDoneHook
-                || !hadReturnHomeTouchOcclusionHook
-                || !hadPredictiveOptInSystemServerHook)) {
+                && (!oldHookIds.contains("server_back_window_start_animation")
+                || !oldHookIds.contains("server_schedule_animation_prepare_transition")
+                || !oldHookIds.contains("server_back_navigation_done_cleanup")
+                || !oldHookIds.contains("server_return_home_touch_occlusion")
+                || (!oldHookIds.contains("server_predictive_opt_in_metadata")
+                && !oldHookIds.contains("predictive_opt_in_system_server")))) {
             ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
             if (serverClassLoader != null) {
-                if (!hadBackWindowStartHook) {
+                if (!oldHookIds.contains("server_back_window_start_animation")) {
                     hookBackWindowStartAnimation(serverClassLoader);
                 }
-                if (!hadPrepareTransitionHook) {
+                if (!oldHookIds.contains("server_schedule_animation_prepare_transition")) {
                     hookScheduleAnimationPrepareTransition(serverClassLoader);
                 }
-                if (!hadBackNavigationDoneHook) {
+                if (!oldHookIds.contains("server_back_navigation_done_cleanup")) {
                     hookBackNavigationDoneCleanup(serverClassLoader);
                 }
-                if (!hadReturnHomeTouchOcclusionHook) {
+                if (!oldHookIds.contains("server_return_home_touch_occlusion")) {
                     hookReturnHomeTouchOcclusion(serverClassLoader);
                 }
-                if (!hadPredictiveOptInSystemServerHook) {
+                if (!oldHookIds.contains("server_predictive_opt_in_metadata")
+                        && !oldHookIds.contains("predictive_opt_in_system_server")) {
                     hookPredictiveBackOptInMetadata(serverClassLoader);
                 }
             }
         }
-        if (SYSTEM_UI.equals(processName) && !hadNavigationBarGestureInsetsHook
+        if (SYSTEM_UI.equals(processName)
+                && !oldHookIds.contains("systemui_navigation_bar_gesture_insets")
                 && hotReloadClassLoader != null) {
             hookNavigationBarGestureInsets(hotReloadClassLoader);
         }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
-            if (!hadNavigationBarControllerCreateHook) {
+            if (!oldHookIds.contains("systemui_navigation_bar_controller_create")) {
                 hookNavigationBarControllerCreate(hotReloadClassLoader);
             }
-            if (!hadNavigationBarControllerRemoveHook) {
+            if (!oldHookIds.contains("systemui_navigation_bar_controller_remove")) {
                 hookNavigationBarControllerRemove(hotReloadClassLoader);
             }
-            if (!hadNavigationBarControllerModeHook) {
+            if (!oldHookIds.contains(
+                    "systemui_navigation_bar_controller_onNavigationModeChanged")) {
                 hookNavigationBarControllerMode(hotReloadClassLoader);
             }
-            if (!hadDefaultTransitionStartHook) {
+            if (!oldHookIds.contains("systemui_default_transition_start")) {
                 hookDefaultTransitionHandler(hotReloadClassLoader);
             }
-            if (!hadDefaultTransitionMergeHook) {
+            if (!oldHookIds.contains("systemui_default_transition_merge")) {
                 hookDefaultTransitionImplMerge(hotReloadClassLoader);
             }
-            if (!hadBackSendEventHook) {
+            if (!oldHookIds.contains("systemui_back_send_event_guard")) {
                 hookBackAnimationSendBackEvent(hotReloadClassLoader);
             }
-            if (!hadBackPrepareReparentHook) {
+            if (!oldHookIds.contains("systemui_back_prepare_reparent")) {
                 hookBackPrepareTransitionReparent(hotReloadClassLoader);
             }
             if (!backCommitCompositionHookReady) {
@@ -1346,46 +1114,46 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 Class<?> gestureStubClass = Class.forName(MIUI_HOME_GESTURE_STUB, false,
                         hotReloadClassLoader);
-                if (!hadMiuiHomeGestureStubShowHook) {
+                if (!oldHookIds.contains("miui_home_gesture_stub_show")) {
                     hookMiuiHomeGestureStubShow(gestureStubClass);
                 }
-                if (!hadMiuiHomeGestureInputArbiterHook) {
+                if (!oldHookIds.contains("miui_home_gesture_input_arbiter")) {
                     Class<?> processorClass = Class.forName(
                             MIUI_HOME_GESTURE_PROCESSOR, false, hotReloadClassLoader);
                     hookMiuiHomeGestureInputArbiter(processorClass, gestureStubClass);
                 }
-                if (!hadMiuiHomeRecentsStateHook) {
+                if (!oldHookIds.contains("miui_home_recents_actual_state_v2")) {
                     Class<?> recentsContainerClass = Class.forName(
                             MIUI_HOME_RECENTS_CONTAINER, false, hotReloadClassLoader);
                     hookMiuiHomeRecentsActualState(recentsContainerClass);
                 }
-                if (!hadMiuiHomeTaskLaunchHook) {
+                if (!oldHookIds.contains("miui_home_recents_task_launch")) {
                     Class<?> taskViewClass = Class.forName(MIUI_HOME_TASK_VIEW, false,
                             hotReloadClassLoader);
                     hookMiuiHomeRecentsTaskLaunch(taskViewClass);
                 }
-                if (!hadMiuiHomeFullscreenStateHook) {
+                if (!oldHookIds.contains("miui_home_fullscreen_state")) {
                     hookMiuiHomeFullscreenState(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeOpenBreakEnableHook) {
+                if (!oldHookIds.contains("miui_home_open_break_enable")) {
                     Class<?> breakControllerClass = Class.forName(
                             MIUI_HOME_BACK_GESTURE_BREAK_CONTROLLER, false,
                             hotReloadClassLoader);
                     hookMiuiHomeOpenBreakEnable(breakControllerClass);
                 }
-                if (!hadMiuiHomeOpenBreakAnimationStartHook
-                        || !hadMiuiHomeOpenBreakAnimationEndHook) {
+                if (!oldHookIds.contains("miui_home_open_break_animation_start")
+                        || !oldHookIds.contains("miui_home_open_break_animation_end")) {
                     Class<?> listenerClass = Class.forName(
                             MIUI_HOME_WINDOW_ELEMENT_ANIM_LISTENER, false,
                             hotReloadClassLoader);
-                    if (!hadMiuiHomeOpenBreakAnimationStartHook) {
+                    if (!oldHookIds.contains("miui_home_open_break_animation_start")) {
                         hookMiuiHomeOpenBreakAnimationStart(listenerClass);
                     }
-                    if (!hadMiuiHomeOpenBreakAnimationEndHook) {
+                    if (!oldHookIds.contains("miui_home_open_break_animation_end")) {
                         hookMiuiHomeOpenBreakAnimationEnd(listenerClass);
                     }
                 }
-                if (!hadMiuiHomeOpenSnapshotTargetsHook) {
+                if (!oldHookIds.contains("miui_home_open_snapshot_targets")) {
                     try {
                         hookMiuiHomeLauncherOpenSnapshotTargets(
                                 hotReloadClassLoader);
@@ -1395,40 +1163,40 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 throwable);
                     }
                 }
-                if (!hadMiuiHomeReusedCloseOpenHook) {
+                if (!oldHookIds.contains("miui_home_reused_close_open")) {
                     hookMiuiHomeReusedCloseOpen(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeElementTransitionHook
-                        || !hadMiuiHomeElementLeashRearmHook
-                        || !hadMiuiHomeElementAnimTypeHook) {
+                if (!oldHookIds.contains("miui_home_return_home_element_transition")
+                        || !oldHookIds.contains("miui_home_return_home_element_leash_rearm")
+                        || !oldHookIds.contains("miui_home_return_home_element_anim_type")) {
                     try {
                         hookMiuiHomeTransitionContinuity(
                                 hotReloadClassLoader,
-                                !hadMiuiHomeElementTransitionHook,
-                                !hadMiuiHomeElementLeashRearmHook,
-                                !hadMiuiHomeElementAnimTypeHook);
+                                !oldHookIds.contains("miui_home_return_home_element_transition"),
+                                !oldHookIds.contains("miui_home_return_home_element_leash_rearm"),
+                                !oldHookIds.contains("miui_home_return_home_element_anim_type"));
                     } catch (Throwable throwable) {
                         log(Log.WARN, TAG,
                                 "Failed to backfill MiuiHome element continuity",
                                 throwable);
                     }
                 }
-                if (!hadMiuiHomeAnimToConfigHook
-                        || !hadMiuiHomeFinishDispatchSourceHook
-                        || !hadMiuiHomeFinishDispatchApplyHook) {
+                if (!oldHookIds.contains("miui_home_return_home_anim_to_config")
+                        || !oldHookIds.contains("miui_home_return_home_finish_dispatch_source")
+                        || !oldHookIds.contains("miui_home_return_home_finish_dispatch_apply")) {
                     try {
                         hookMiuiHomeUnifiedFinishEpoch(
                                 hotReloadClassLoader,
-                                !hadMiuiHomeAnimToConfigHook,
-                                !hadMiuiHomeFinishDispatchSourceHook,
-                                !hadMiuiHomeFinishDispatchApplyHook);
+                                !oldHookIds.contains("miui_home_return_home_anim_to_config"),
+                                !oldHookIds.contains("miui_home_return_home_finish_dispatch_source"),
+                                !oldHookIds.contains("miui_home_return_home_finish_dispatch_apply"));
                     } catch (Throwable throwable) {
                         log(Log.WARN, TAG,
                                 "Failed to backfill MiuiHome finish-epoch hooks",
                                 throwable);
                     }
                 }
-                if (!hadMiuiHomePermissionMergeHook) {
+                if (!oldHookIds.contains("miui_home_permission_activity_merge")) {
                     try {
                         hookMiuiHomePermissionMerge(hotReloadClassLoader);
                     } catch (Throwable throwable) {
@@ -1437,14 +1205,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 throwable);
                     }
                 }
-                if (!hadMiuiHomeTraceOnAnimUpdateHook
-                        || !hadMiuiHomeTraceApplySurfaceParamsHook) {
+                if (!oldHookIds.contains("miui_home_trace_on_anim_update")
+                        || !oldHookIds.contains("miui_home_trace_apply_surface_params")) {
                     hookMiuiHomeGeometryFrames(
                             hotReloadClassLoader,
-                            !hadMiuiHomeTraceOnAnimUpdateHook,
-                            !hadMiuiHomeTraceApplySurfaceParamsHook);
+                            !oldHookIds.contains("miui_home_trace_on_anim_update"),
+                            !oldHookIds.contains("miui_home_trace_apply_surface_params"));
                 }
-                if (!hadMiuiHomeTraceSetupLeashHook) {
+                if (!oldHookIds.contains("miui_home_trace_transition_setup_leash")) {
                     try {
                         hookMiuiHomeTransitionSetupLeash(
                                 hotReloadClassLoader);
@@ -1454,42 +1222,41 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 throwable);
                     }
                 }
-                hookMiuiHomeStartTransactionApply(
-                        hadMiuiHomeSurfaceTransactionTraceHookIds);
-                if (!hadMiuiHomeReturnHomeCancelSurfaceHook
-                        || !hadMiuiHomeReturnHomeSetToOldHook) {
+                hookMiuiHomeStartTransactionApply(oldHookIds);
+                if (!oldHookIds.contains("miui_home_return_home_cancel_surface")
+                        || !oldHookIds.contains("miui_home_return_home_set_to_old")) {
                     hookMiuiHomeReturnHomeCloseInterruption(
                             hotReloadClassLoader,
-                            !hadMiuiHomeReturnHomeCancelSurfaceHook,
-                            !hadMiuiHomeReturnHomeSetToOldHook);
+                            !oldHookIds.contains("miui_home_return_home_cancel_surface"),
+                            !oldHookIds.contains("miui_home_return_home_set_to_old"));
                 }
-                if (!hadMiuiHomeReturnHomeSameIconParallelHook) {
+                if (!oldHookIds.contains("miui_home_return_home_same_icon_parallel")) {
                     hookMiuiHomeReturnHomeSameIconParallel(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeReturnHomeFreshOpenHook) {
+                if (!oldHookIds.contains("miui_home_return_home_fresh_open")) {
                     hookMiuiHomeReturnHomeFreshOpen(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeReturnHomeCancelDirectHook) {
+                if (!oldHookIds.contains("miui_home_return_home_cancel_direct")) {
                     hookMiuiHomeReturnHomeDirectCancel(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeDrawerStateHook) {
+                if (!oldHookIds.contains("miui_home_drawer_state")) {
                     hookMiuiHomeDrawerState(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeEditingStateHook) {
+                if (!oldHookIds.contains("miui_home_editing_state")) {
                     hookMiuiHomeEditingState(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeReturnHomeInitializeHook) {
+                if (!oldHookIds.contains("miui_home_return_home_initialize")) {
                     hookMiuiHomeReturnHomeInitialize(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeReturnHomeLocalHandoffHook) {
+                if (!oldHookIds.contains("miui_home_return_home_local_handoff")) {
                     hookMiuiHomeReturnHomeLocalHandoff(hotReloadClassLoader);
                 }
-                if (!hadMiuiHomeReturnHomeWallpaperSetHook
-                        || !hadMiuiHomeReturnHomeWallpaperAnimHook) {
+                if (!oldHookIds.contains("miui_home_return_home_wallpaper_set")
+                        || !oldHookIds.contains("miui_home_return_home_wallpaper_anim")) {
                     hookMiuiHomeReturnHomeWallpaperCommands(
                             hotReloadClassLoader,
-                            !hadMiuiHomeReturnHomeWallpaperSetHook,
-                            !hadMiuiHomeReturnHomeWallpaperAnimHook);
+                            !oldHookIds.contains("miui_home_return_home_wallpaper_set"),
+                            !oldHookIds.contains("miui_home_return_home_wallpaper_anim"));
                 }
                 restoreMiuiHomeGestureStubsAfterHotReload(hotReloadClassLoader);
                 refreshMiuiHomeEditingState(
@@ -1511,248 +1278,154 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (hookId == null) {
             return null;
         }
-        if ("systemui_block_miui_gesture_line_progress".equals(hookId)) {
-            return this::interceptMiuiOverviewProxyTransact;
+        switch (hookId) {
+            case "systemui_block_miui_gesture_line_progress":
+                return this::interceptMiuiOverviewProxyTransact;
+            case "systemui_navigation_bar_gesture_insets":
+                return this::restoreNavigationBarGestureInsets;
+            case "systemui_navigation_bar_controller_create":
+                return this::reconcileAfterNavigationBarCreate;
+            case "systemui_navigation_bar_controller_remove":
+                return this::reconcileAfterNavigationBarRemove;
+            case "systemui_navigation_bar_controller_onNavigationModeChanged":
+                return this::reconcileAfterNavigationModeChanged;
+            case "miui_home_gesture_stub_layout_params":
+                return this::restoreMiuiHomeGestureStubTouchableLayout;
+            case "miui_home_gesture_stub_show":
+                return this::restoreMiuiHomeGestureStubShow;
+            case "miui_home_gesture_input_arbiter":
+                return this::arbitrateMiuiHomeAcceptedInput;
+            case "miui_home_recents_actual_state_v2":
+                return this::mirrorMiuiHomeRecentsActualState;
+            case "miui_home_recents_task_launch":
+                return this::mirrorMiuiHomeRecentsTaskLaunch;
+            case "miui_home_fullscreen_state":
+                return this::mirrorMiuiHomeFullscreenState;
+            case "miui_home_open_break_enable":
+                return this::captureMiuiHomeOpenBreakEnable;
+            case "miui_home_open_break_animation_start":
+                return this::mirrorMiuiHomeOpenBreakAnimationStart;
+            case "miui_home_open_break_animation_end":
+                return this::mirrorMiuiHomeOpenBreakAnimationEnd;
+            case "miui_home_open_snapshot_targets":
+                return this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound;
+            case "miui_home_reused_close_open":
+                return this::restoreMiuiHomeReusedCloseOpen;
+            case "miui_home_return_home_element_transition":
+                return this::prepareMiuiHomeElementTransitionContinuity;
+            case "miui_home_return_home_element_leash_rearm":
+                return this::rearmMiuiHomeElementLeashAfterNativeClear;
+            case "miui_home_return_home_element_anim_type":
+                return this::observeMiuiHomeElementAnimType;
+            case "miui_home_return_home_anim_to_config":
+                return this::observeMiuiHomeUnifiedAnimToConfigured;
+            case "miui_home_return_home_finish_dispatch_source":
+                return this::captureMiuiHomeUnifiedFinishDispatch;
+            case "miui_home_return_home_finish_dispatch_apply":
+                return this::guardMiuiHomeUnifiedFinishDispatch;
+            case "miui_home_trace_on_anim_update":
+                return this::captureMiuiHomeNativeGeometry;
+            case "miui_home_trace_apply_surface_params":
+                return this::applyMiuiHomeNativeSurfaceParams;
+            case "miui_home_trace_transition_setup_leash":
+                return this::armMiuiHomeTransitionStartGeometry;
+            case "miui_home_permission_activity_merge":
+                return this::preserveMiuiHomeOpenAcrossPermissionMerge;
+            case "miui_home_return_home_cancel_surface":
+                return this::captureMiuiHomeReturnHomeCloseInterruption;
+            case "miui_home_return_home_same_icon_parallel":
+                return this::routeMiuiHomeReturnHomeSameIconParallel;
+            case "miui_home_return_home_fresh_open":
+                return this::forceMiuiHomeReturnHomeFreshOpen;
+            case "miui_home_return_home_cancel_direct":
+                return this::wrapMiuiHomeReturnHomeDirectCancel;
+            case "miui_home_return_home_set_to_old":
+                return this::finishMiuiHomeReturnHomeCloseInterruption;
+            case "miui_home_drawer_state":
+                return this::mirrorMiuiHomeDrawerState;
+            case "miui_home_editing_state":
+                return this::mirrorMiuiHomeEditingState;
+            case "miui_home_return_home_initialize":
+                return this::registerMiuiHomeReturnHome;
+            case "miui_home_return_home_local_handoff":
+                return this::provideMiuiHomeReturnHomeLocalHandoff;
+            case "miui_home_return_home_wallpaper_set":
+                return this::observeMiuiHomeReturnHomeWallpaperSet;
+            case "miui_home_return_home_wallpaper_anim":
+                return this::observeMiuiHomeReturnHomeWallpaperAnim;
+            case "server_back_promote_to_tf_if_needed":
+                return this::interceptPromoteToTaskFragmentIfNeeded;
+            case "server_back_window_start_animation":
+                return this::prepareOpeningTaskFragment;
+            case "server_schedule_animation_prepare_transition":
+                return this::interceptScheduleAnimationPrepareTransition;
+            case "server_back_navigation_done_cleanup":
+                return this::cleanupSkippedRemoteAnimationOnNavigationDone;
+            case "server_return_home_touch_occlusion":
+                return this::allowCommittedReturnHomeTouchThrough;
+            case "server_predictive_opt_in_metadata":
+            case "predictive_opt_in_system_server":
+                return this::injectSelectedPredictiveBackMetadata;
+            case "systemui_default_transition_start":
+                return this::registerDefaultTransitionHandler;
+            case "systemui_default_transition_merge":
+                return this::trackMiuiOpenCloseMerge;
+            case "systemui_back_send_event_guard":
+                return this::guardDuplicateBackEvent;
+            case "systemui_back_prepare_reparent":
+                return this::correctPredictiveBackPrepareReparent;
+            case "systemui_back_commit_composition":
+                return this::correctPredictiveBackCommitComposition;
+            case "systemui_back_finish_open_atomic":
+                return this::transferReturnHomeFinishIntoCloseStart;
+            case "systemui_edge_back_setBackAnimation":
+                return this::onEdgeBackSetBackAnimation;
+            case "systemui_edge_back_updateIsEnabled":
+                return this::onEdgeBackUpdateIsEnabled;
+            case "systemui_edge_back_onNavigationModeChanged":
+                return this::onEdgeBackNavigationModeChanged;
+            case "shell_back_onBackNavigationInfoReceived":
+                return this::onBackNavigationInfoReceived;
+            case "shell_back_onBackAnimationFinished":
+            case "shell_back_finishBackAnimation":
+                return this::onShellAnimationFinished;
+            case "systemui_navigation_bar_view_insets":
+            case "systemui_navigation_bar_window_state":
+            case "systemui_navigation_bar_show_transient":
+            case "systemui_navigation_bar_abort_transient":
+            case "systemui_navigation_bar_auto_hide":
+            case "systemui_edge_back_task_stack_changed":
+            case "systemui_edge_back_exclusion_changed":
+            case "systemui_edge_back_update_resources":
+            case "miui_home_gesture_stub_touch_region":
+            case "miui_home_recents_actual_state":
+            case "miui_home_return_home_element_retarget":
+            case "miui_home_recents_map_alpha":
+            case "miui_home_trace_update_element_value":
+            case "miui_home_trace_update_all_anim_values":
+            case "miui_home_trace_apply_transform_new":
+            case "miui_home_trace_task_view_primary":
+            case "miui_home_trace_task_view_surface":
+            case "miui_home_trace_schedule_apply_directly":
+            case "miui_home_trace_transition_create_leash":
+            case "miui_home_return_home_window_alpha":
+            case "miui_home_return_home_native_frame":
+            case "systemui_default_animation_reverse_frames":
+                // Neutralize retired hooks until the next process restart.
+                return XposedInterface.Chain::proceed;
+            default:
+                break;
         }
-        if ("systemui_navigation_bar_gesture_insets".equals(hookId)) {
-            return this::restoreNavigationBarGestureInsets;
-        }
-        if ("systemui_navigation_bar_controller_create".equals(hookId)) {
-            return this::reconcileAfterNavigationBarCreate;
-        }
-        if ("systemui_navigation_bar_controller_remove".equals(hookId)) {
-            return this::reconcileAfterNavigationBarRemove;
-        }
-        if ("systemui_navigation_bar_controller_onNavigationModeChanged".equals(
-                hookId)) {
-            return this::reconcileAfterNavigationModeChanged;
-        }
-        if ("systemui_navigation_bar_view_insets".equals(hookId)
-                || "systemui_navigation_bar_window_state".equals(hookId)
-                || "systemui_navigation_bar_show_transient".equals(hookId)
-                || "systemui_navigation_bar_abort_transient".equals(hookId)
-                || "systemui_navigation_bar_auto_hide".equals(hookId)
-                || "systemui_edge_back_task_stack_changed".equals(hookId)
-                || "systemui_edge_back_exclusion_changed".equals(hookId)
-                || "systemui_edge_back_update_resources".equals(hookId)) {
-            // These lifecycle hooks existed only to refresh the retired SystemUI shield.
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_gesture_stub_layout_params".equals(hookId)) {
-            return this::restoreMiuiHomeGestureStubTouchableLayout;
-        }
-        if ("miui_home_gesture_stub_show".equals(hookId)) {
-            return this::restoreMiuiHomeGestureStubShow;
-        }
-        if ("miui_home_gesture_stub_touch_region".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_gesture_input_arbiter".equals(hookId)) {
-            return this::arbitrateMiuiHomeAcceptedInput;
-        }
-        if ("miui_home_recents_actual_state".equals(hookId)) {
-            // v91/v92 hooked the background PowerKeeper notification lambda, which did not
-            // retain the RecentsContainer instance needed for native back dispatch.
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_recents_actual_state_v2".equals(hookId)) {
-            return this::mirrorMiuiHomeRecentsActualState;
-        }
-        if ("miui_home_recents_task_launch".equals(hookId)) {
-            return this::mirrorMiuiHomeRecentsTaskLaunch;
-        }
-        if ("miui_home_fullscreen_state".equals(hookId)) {
-            return this::mirrorMiuiHomeFullscreenState;
-        }
-        if ("miui_home_open_break_enable".equals(hookId)) {
-            return this::captureMiuiHomeOpenBreakEnable;
-        }
-        if ("miui_home_open_break_animation_start".equals(hookId)) {
-            return this::mirrorMiuiHomeOpenBreakAnimationStart;
-        }
-        if ("miui_home_open_break_animation_end".equals(hookId)) {
-            return this::mirrorMiuiHomeOpenBreakAnimationEnd;
-        }
-        if ("miui_home_open_snapshot_targets".equals(hookId)) {
-            return this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound;
-        }
-        if ("miui_home_reused_close_open".equals(hookId)) {
-            return this::restoreMiuiHomeReusedCloseOpen;
-        }
-        if ("miui_home_return_home_element_transition".equals(hookId)) {
-            return this::prepareMiuiHomeElementTransitionContinuity;
-        }
-        if ("miui_home_return_home_element_leash_rearm".equals(hookId)) {
-            return this::rearmMiuiHomeElementLeashAfterNativeClear;
-        }
-        if ("miui_home_return_home_element_anim_type".equals(hookId)) {
-            return this::observeMiuiHomeElementAnimType;
-        }
-        if ("miui_home_return_home_anim_to_config".equals(hookId)) {
-            return this::observeMiuiHomeUnifiedAnimToConfigured;
-        }
-        if ("miui_home_return_home_finish_dispatch_source".equals(hookId)) {
-            return this::captureMiuiHomeUnifiedFinishDispatch;
-        }
-        if ("miui_home_return_home_finish_dispatch_apply".equals(hookId)) {
-            return this::guardMiuiHomeUnifiedFinishDispatch;
-        }
-        if ("miui_home_return_home_element_retarget".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_recents_map_alpha".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_on_anim_update".equals(hookId)) {
-            return this::captureMiuiHomeNativeGeometry;
-        }
-        if ("miui_home_trace_update_element_value".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_update_all_anim_values".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_apply_transform_new".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_apply_surface_params".equals(hookId)) {
-            return this::applyMiuiHomeNativeSurfaceParams;
-        }
-        if ("miui_home_trace_task_view_primary".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_task_view_surface".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_schedule_apply_directly".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_transition_create_leash".equals(hookId)) {
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_trace_transition_setup_leash".equals(hookId)) {
-            return this::armMiuiHomeTransitionStartGeometry;
-        }
-        if (hookId.startsWith(
-                "miui_home_trace_island_protocol_")) {
-            return XposedInterface.Chain::proceed;
-        }
-        if (hookId.startsWith(
-                "miui_home_trace_surface_transaction_")) {
+        if (hookId.startsWith("miui_home_trace_surface_transaction_")) {
             return this::applyMiuiHomeStartGeometry;
-        }
-        if ("miui_home_permission_activity_merge".equals(hookId)) {
-            return this::preserveMiuiHomeOpenAcrossPermissionMerge;
-        }
-        if ("miui_home_return_home_cancel_surface".equals(hookId)) {
-            return this::captureMiuiHomeReturnHomeCloseInterruption;
-        }
-        if ("miui_home_return_home_same_icon_parallel".equals(hookId)) {
-            return this::routeMiuiHomeReturnHomeSameIconParallel;
-        }
-        if ("miui_home_return_home_fresh_open".equals(hookId)) {
-            return this::forceMiuiHomeReturnHomeFreshOpen;
-        }
-        if ("miui_home_return_home_cancel_direct".equals(hookId)) {
-            return this::wrapMiuiHomeReturnHomeDirectCancel;
-        }
-        if ("miui_home_return_home_set_to_old".equals(hookId)) {
-            return this::finishMiuiHomeReturnHomeCloseInterruption;
-        }
-        if ("miui_home_drawer_state".equals(hookId)) {
-            return this::mirrorMiuiHomeDrawerState;
-        }
-        if ("miui_home_editing_state".equals(hookId)) {
-            return this::mirrorMiuiHomeEditingState;
-        }
-        if ("miui_home_return_home_initialize".equals(hookId)) {
-            return this::registerMiuiHomeReturnHome;
-        }
-        if ("miui_home_return_home_local_handoff".equals(hookId)) {
-            return this::provideMiuiHomeReturnHomeLocalHandoff;
-        }
-        if ("miui_home_return_home_window_alpha".equals(hookId)) {
-            // The retired alpha override must stay transparent so Xiaomi's stock mapAlpha
-            // curve owns the intended window-to-icon handoff.
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_return_home_native_frame".equals(hookId)) {
-            // Retire the observation-only per-frame probe without retaining its reflection
-            // and logging cost across API 102 hot reload.
-            return XposedInterface.Chain::proceed;
-        }
-        if ("miui_home_return_home_wallpaper_set".equals(hookId)) {
-            return this::observeMiuiHomeReturnHomeWallpaperSet;
-        }
-        if ("miui_home_return_home_wallpaper_anim".equals(hookId)) {
-            return this::observeMiuiHomeReturnHomeWallpaperAnim;
-        }
-        if (hookId.startsWith("miui_home_block_gesture_window_")) {
-            // v88 blocked BaseRecentsImpl.addBackStubWindow(), leaving its gesture-stub
-            // fields null and short-circuiting unrelated NavStubView visibility updates.
-            return XposedInterface.Chain::proceed;
-        }
-        if (hookId.startsWith("miui_home_")
-                || "systemui_default_animation_reverse_frames".equals(hookId)) {
-            // Retired experiments may still exist during API 102 hot reload. Replace them with
-            // transparent hooks until the next process restart instead of retaining old behavior.
-            return XposedInterface.Chain::proceed;
-        }
-        if ("server_back_promote_to_tf_if_needed".equals(hookId)) {
-            return this::interceptPromoteToTaskFragmentIfNeeded;
-        }
-        if ("server_back_window_start_animation".equals(hookId)) {
-            return this::prepareOpeningTaskFragment;
-        }
-        if ("server_schedule_animation_prepare_transition".equals(hookId)) {
-            return this::interceptScheduleAnimationPrepareTransition;
-        }
-        if ("server_back_navigation_done_cleanup".equals(hookId)) {
-            return this::cleanupSkippedRemoteAnimationOnNavigationDone;
-        }
-        if ("server_return_home_touch_occlusion".equals(hookId)) {
-            return this::allowCommittedReturnHomeTouchThrough;
-        }
-        if ("server_predictive_opt_in_metadata".equals(hookId)
-                || "predictive_opt_in_system_server".equals(hookId)) {
-            return this::injectSelectedPredictiveBackMetadata;
         }
         if (hookId.startsWith("server_security_sidebar_transient_bars_")) {
             return this::interceptSecuritySidebarTransientBars;
         }
-        if ("systemui_default_transition_start".equals(hookId)) {
-            return this::registerDefaultTransitionHandler;
-        }
-        if ("systemui_default_transition_merge".equals(hookId)) {
-            return this::trackMiuiOpenCloseMerge;
-        }
-        if ("systemui_back_send_event_guard".equals(hookId)) {
-            return this::guardDuplicateBackEvent;
-        }
-        if ("systemui_back_prepare_reparent".equals(hookId)) {
-            return this::correctPredictiveBackPrepareReparent;
-        }
-        if ("systemui_back_commit_composition".equals(hookId)) {
-            return this::correctPredictiveBackCommitComposition;
-        }
-        if ("systemui_back_finish_open_atomic".equals(hookId)) {
-            return this::transferReturnHomeFinishIntoCloseStart;
-        }
-        if ("systemui_edge_back_setBackAnimation".equals(hookId)) {
-            return this::onEdgeBackSetBackAnimation;
-        }
-        if ("systemui_edge_back_updateIsEnabled".equals(hookId)) {
-            return this::onEdgeBackUpdateIsEnabled;
-        }
-        if ("systemui_edge_back_onNavigationModeChanged".equals(hookId)) {
-            return this::onEdgeBackNavigationModeChanged;
-        }
-        if ("shell_back_onBackNavigationInfoReceived".equals(hookId)) {
-            return this::onBackNavigationInfoReceived;
-        }
-        if ("shell_back_onBackAnimationFinished".equals(hookId)
-                || "shell_back_finishBackAnimation".equals(hookId)) {
-            return this::onShellAnimationFinished;
+        if (hookId.startsWith("miui_home_trace_island_protocol_")
+                || hookId.startsWith("miui_home_block_gesture_window_")
+                || hookId.startsWith("miui_home_")) {
+            return XposedInterface.Chain::proceed;
         }
         return null;
     }
@@ -2357,44 +2030,27 @@ public final class MiuiBackGestureHook extends XposedModule {
                 "Installed MiuiHome transition start-geometry hook");
     }
 
+    @SuppressLint("SoonBlockedPrivateApi")
     private void hookMiuiHomeStartTransactionApply(
             Set<String> existingHookIds) {
-        int expected = 0;
-        int installed = 0;
-        for (Method method : SurfaceControl.Transaction.class
-                .getDeclaredMethods()) {
-            if (!"apply".equals(method.getName())
-                    || method.getParameterCount() != 1
-                    || method.getParameterTypes()[0] != boolean.class) {
-                continue;
-            }
-            String hookId = miuiHomeStartTransactionHookId(method);
-            expected++;
-            if (existingHookIds != null
-                    && existingHookIds.contains(hookId)) {
-                continue;
-            }
-            try {
-                method.setAccessible(true);
-                recordHookHandle(hook(method)
-                        .setId(hookId)
-                        .intercept(this::applyMiuiHomeStartGeometry));
-                installed++;
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG,
-                        "Failed to hook MiuiHome start transaction apply"
-                                + ", method=" + method.toGenericString()
-                                + ", hookId=" + hookId,
-                        throwable);
-            }
+        String hookPrefix = "miui_home_trace_surface_transaction_";
+        if (existingHookIds != null && existingHookIds.stream()
+                .anyMatch(id -> id.startsWith(hookPrefix))) {
+            return;
         }
-        log(Log.INFO, TAG,
-                "Installed MiuiHome start transaction apply hooks"
-                        + ", expected=" + expected
-                        + ", existing="
-                        + (existingHookIds == null
-                        ? 0 : existingHookIds.size())
-                        + ", installed=" + installed);
+        try {
+            Method method = SurfaceControl.Transaction.class.getDeclaredMethod(
+                    "apply", boolean.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId(hookPrefix + "apply_boolean")
+                    .intercept(this::applyMiuiHomeStartGeometry));
+            log(Log.INFO, TAG,
+                    "Installed MiuiHome start transaction apply hook");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to hook MiuiHome start transaction apply", throwable);
+        }
     }
 
     private static final class ReturnHomeFinishTransferCandidate {
@@ -2471,17 +2127,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             this.transitionDebugId = transitionDebugId;
             this.preparedDebugId = preparedDebugId;
         }
-    }
-
-    private String miuiHomeStartTransactionHookId(Method method) {
-        StringBuilder signature = new StringBuilder(method.getName());
-        for (Class<?> parameter : method.getParameterTypes()) {
-            signature.append(':').append(parameter.getName());
-        }
-        return "miui_home_trace_surface_transaction_"
-                + method.getName() + "_"
-                + method.getParameterCount() + "_"
-                + Integer.toHexString(signature.toString().hashCode());
     }
 
     private void hookMiuiHomeReturnHomeCloseInterruption(
@@ -3271,11 +2916,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         Object currentIdentity = invokeAnyMethod(
                 windowElement, "getAnimSymbol", new Object[0]);
-        Object currentTypeObject = invokeAnyMethod(
-                windowElement, "getCurrentAnimType", new Object[0]);
-        String currentType = currentTypeObject instanceof Enum<?>
-                ? ((Enum<?>) currentTypeObject).name()
-                : String.valueOf(currentTypeObject);
+        String currentType = readNativeAnimationType(windowElement);
         boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                 windowElement, "isAnimRunning", new Object[0]));
         if (currentIdentity != animationIdentity || !running
@@ -3491,7 +3132,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return null;
             }
             candidate = new LauncherOpenMainTask(
-                    change, taskInfo, taskId, displayId, component,
+                    taskId, displayId, component,
                     new Rect((Rect) boundsObject));
         }
         return candidate;
@@ -3647,7 +3288,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         Object backgroundObject = invokeAnyMethod(
                 changeExpose, "getBackgroundColor", new Object[0]);
         return new PermissionActivityTransition(
-                infoExpose, transitionInfo, changeExpose, change,
                 container, parent, (SurfaceControl) leashObject,
                 (ComponentName) componentObject, startBounds, endBounds,
                 debugId,
@@ -3902,10 +3542,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean openRunning = sameElement && Boolean.TRUE.equals(invokeAnyMethod(
                     openingElement, "isOpenAnimRunning", new Object[0]));
             Object currentAnimType = sameElement
-                    ? invokeAnyMethod(openingElement, "getCurrentAnimType", new Object[0])
-                    : null;
+                    ? invokeAnyMethod(openingElement,
+                    "getCurrentAnimType", new Object[0]) : null;
             boolean openFromHome = currentAnimType instanceof Enum<?>
-                    && "OPEN_FROM_HOME".equals(((Enum<?>) currentAnimType).name());
+                    && "OPEN_FROM_HOME".equals(
+                    ((Enum<?>) currentAnimType).name());
             if (!openRunning || !openFromHome) {
                 log(Log.WARN, TAG, "Did not restore reused CLOSE-to-OPEN break state"
                         + ", sameElement=" + sameElement
@@ -4214,13 +3855,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         try {
             String[] packages = context.getPackageManager().getPackagesForUid(uid);
-            if (packages != null) {
-                for (String packageName : packages) {
-                    if (SYSTEM_UI.equals(packageName)) {
-                        return true;
-                    }
-                }
-            }
+            return packages != null && Arrays.asList(packages).contains(SYSTEM_UI);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to validate SystemUI command sender uid=" + uid,
                     throwable);
@@ -4502,8 +4137,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         MiuiHomeReturnHomeController existing = miuiHomeReturnHomeController;
-        if (existing != null && existing.isAttachedTo(shellBackAnimation)) {
-            existing.updateContext(context);
+        if (existing != null && existing.attached
+                && existing.shellBackAnimation == shellBackAnimation) {
+            if (context != null) {
+                existing.context = context.getApplicationContext();
+            }
             miuiHomeReturnHomeBinder = shellBackAnimation;
             log(Log.INFO, TAG, "Kept existing MiuiHome return-to-home runner"
                     + ", reason=" + reason
@@ -4587,7 +4225,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             MiuiHomeReturnHomeController retiredController, String reason) {
         if (retiredController == null
                 || miuiHomeReturnHomeController != retiredController
-                || !retiredController.isDeferredControllerReplacement()
+                || !retiredController.deferredControllerReplacement
                 || retiredController.currentSession != null
                 || !retiredController
                 .pendingUnifiedInterruptedAnimToConfigs.isEmpty()) {
@@ -5362,15 +5000,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             return chain.proceed();
         }
 
-        Integer originalFlags = null;
-        Integer effectiveFlags = null;
+        int originalFlags;
+        int effectiveFlags;
         try {
-            originalFlags = Integer.valueOf(
-                    ((Number) readField(activityInfo, "privateFlags")).intValue());
-            effectiveFlags = Integer.valueOf(
-                    (originalFlags.intValue()
-                            & ~ACTIVITY_PREDICTIVE_BACK_DISABLE_FLAG)
-                            | ACTIVITY_PREDICTIVE_BACK_ENABLE_FLAG);
+            originalFlags = ((Number) readField(
+                    activityInfo, "privateFlags")).intValue();
+            effectiveFlags = (originalFlags
+                    & ~ACTIVITY_PREDICTIVE_BACK_DISABLE_FLAG)
+                    | ACTIVITY_PREDICTIVE_BACK_ENABLE_FLAG;
             writeField(activityInfo, "privateFlags", effectiveFlags);
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to inject selected predictive-back metadata"
@@ -6115,9 +5752,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 invalidateOpenTransitionSnapshot(snapshot, "staleValidator");
                 return;
             }
-            if (snapshot.animatorCount != snapshot.originalAnimatorCount) {
+            if (snapshot.animators.length != snapshot.originalAnimatorCount) {
                 log(Log.INFO, TAG, "Skipped partial Xiaomi OPEN transition snapshot"
-                        + ", currentAnimatorCount=" + snapshot.animatorCount
+                        + ", currentAnimatorCount=" + snapshot.animators.length
                         + ", originalAnimatorCount=" + snapshot.originalAnimatorCount);
                 invalidateOpenTransitionSnapshot(snapshot, "partialAnimationSet");
                 return;
@@ -6145,7 +5782,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             log(Log.INFO, TAG, "Published reversible Xiaomi OPEN transition snapshot"
-                    + ", animatorCount=" + snapshot.animatorCount
+                    + ", animatorCount=" + snapshot.animators.length
                     + ", info=" + shortObject(snapshot.transitionInfo));
         } catch (Throwable throwable) {
             invalidateOpenTransitionSnapshot(snapshot, "verificationFailure");
@@ -6173,7 +5810,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         log(Log.INFO, TAG, "Invalidated Xiaomi OPEN transition snapshot"
                 + ", reason=" + reason
-                + ", animatorCount=" + snapshot.animatorCount);
+                + ", animatorCount=" + snapshot.animators.length);
     }
 
     private void removeOpenTransitionListeners(OpenTransitionSnapshot snapshot) {
@@ -7243,35 +6880,27 @@ public final class MiuiBackGestureHook extends XposedModule {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            for (Method method : handlerClass.getDeclaredMethods()) {
-                Class<?>[] parameterTypes = method.getParameterTypes();
-                if ("mergeAnimation".equals(method.getName())
-                        && parameterTypes.length == 6
-                        && parameterTypes[0] == IBinder.class
-                        && "android.window.TransitionInfo".equals(
-                        parameterTypes[1].getName())
-                        && parameterTypes[2] == SurfaceControl.Transaction.class
-                        && parameterTypes[3] == SurfaceControl.Transaction.class
-                        && parameterTypes[4] == IBinder.class
-                        && "com.android.wm.shell.transition.Transitions$TransitionFinishCallback"
-                        .equals(parameterTypes[5].getName())) {
-                    method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("systemui_back_commit_composition")
-                            .intercept(this::correctPredictiveBackCommitComposition));
-                    backCommitCompositionHookReady = true;
-                    log(Log.INFO, TAG,
-                            "Hooked Shell predictive return-home commit composition");
-                    return;
-                }
-            }
-            log(Log.WARN, TAG,
-                    "BackTransitionHandler.mergeAnimation not found");
+            Method method = requireBackMergeAnimation(handlerClass);
+            recordHookHandle(hook(method)
+                    .setId("systemui_back_commit_composition")
+                    .intercept(this::correctPredictiveBackCommitComposition));
+            backCommitCompositionHookReady = true;
+            log(Log.INFO, TAG,
+                    "Hooked Shell predictive return-home commit composition");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
                     "Failed to hook Shell predictive return-home commit composition",
                     throwable);
         }
+    }
+
+    private Method requireBackMergeAnimation(Class<?> handlerClass)
+            throws NoSuchMethodException {
+        return requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
+                IBinder.class.getName(), "android.window.TransitionInfo",
+                SurfaceControl.Transaction.class.getName(),
+                SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
+                "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
     }
 
     private Object correctPredictiveBackPrepareReparent(
@@ -7386,9 +7015,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             // TO_FRONT role made it treat the departing task as another opening surface. Repair
             // the physical parent first, then normalize only the retained semantic role to the
             // AOSP CHANGE shape used by handlePrepareTransition and mergePendingTransitions.
-            invokeAnyMethod(startTransaction, "reparent",
-                    new Object[]{changeLeash, composition.closingLeash});
-            ((SurfaceControl.Transaction) startTransaction).apply();
+            ((SurfaceControl.Transaction) startTransaction)
+                    .reparent(changeLeash, composition.closingLeash)
+                    .apply();
             if (readField(handler, "mOpenTransitionInfo") != info
                     || readField(handler, "mPrepareOpenTransition")
                     != chain.getArg(0)) {
@@ -7557,7 +7186,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", homeTaskId=" + composition.openingTaskId
                                 + ", transitionType="
                                 + candidate.transitionType
-                                + ", changeMode=" + candidate.changeMode
                                 + ", changeLeash=" + candidate.changeLeash
                                 + ", closingLeash="
                                 + composition.closingLeash
@@ -7797,9 +7425,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         return new ReturnHomeCommitComposition(handler, controller, composition,
                 (SurfaceControl) changeLeashObject, transitionToken, info,
                 startTransaction, finishTransaction, mergeTarget,
-                finishCallback, preparedOpenInfo,
-                previousAnimationFinishCallback, transitionType,
-                matchingMode, backGestureAnimated);
+                finishCallback, previousAnimationFinishCallback,
+                transitionType);
     }
 
     private ReturnHomeFinishTransferCandidate
@@ -8471,32 +8098,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            Method mergeAnimation = null;
-            for (Method method : handlerClass.getDeclaredMethods()) {
-                Class<?>[] parameterTypes = method.getParameterTypes();
-                if ("mergeAnimation".equals(method.getName())
-                        && parameterTypes.length == 6
-                        && parameterTypes[0] == IBinder.class
-                        && "android.window.TransitionInfo".equals(
-                        parameterTypes[1].getName())
-                        && parameterTypes[2]
-                        == SurfaceControl.Transaction.class
-                        && parameterTypes[3]
-                        == SurfaceControl.Transaction.class
-                        && parameterTypes[4] == IBinder.class
-                        && "com.android.wm.shell.transition.Transitions$TransitionFinishCallback"
-                        .equals(parameterTypes[5].getName())) {
-                    mergeAnimation = method;
-                    break;
-                }
-            }
-            if (mergeAnimation == null) {
-                log(Log.WARN, TAG,
-                        "Exact BackTransitionHandler.mergeAnimation unavailable"
-                                + " for finish/start atomicity");
-                return false;
-            }
-            mergeAnimation.setAccessible(true);
+            Method mergeAnimation = requireBackMergeAnimation(handlerClass);
             backFinishOpenCallerDeoptimized = deoptimize(mergeAnimation);
             log(backFinishOpenCallerDeoptimized ? Log.INFO : Log.WARN,
                     TAG, "Deoptimized exact BackTransitionHandler.mergeAnimation"
@@ -8580,9 +8182,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         return new ReturnHomeComposition(apps, closingTarget, openingTarget,
                 closingLeash, openingLeash, closingTaskId, openingTaskId,
-                closingDisplayId,
-                readIntFieldOrDefault(closingTarget, "prefixOrderIndex", -1),
-                readIntFieldOrDefault(openingTarget, "prefixOrderIndex", -1));
+                closingDisplayId);
     }
 
     private int resolveRemoteTargetActivityType(Object target) throws Exception {
@@ -8618,19 +8218,15 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private void hookBackNavigationInfoReceived(Class<?> controllerClass) {
-        for (Method method : controllerClass.getDeclaredMethods()) {
-            if (!"onBackNavigationInfoReceived".equals(method.getName())
-                    || method.getParameterCount() != 2) {
-                continue;
-            }
-            method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("shell_back_onBackNavigationInfoReceived")
-                    .intercept(this::onBackNavigationInfoReceived));
-            return;
-        }
-        log(Log.WARN, TAG, "BackAnimationController.onBackNavigationInfoReceived not found");
+    private void hookBackNavigationInfoReceived(Class<?> controllerClass)
+            throws NoSuchMethodException {
+        Method method = controllerClass.getDeclaredMethod(
+                "onBackNavigationInfoReceived",
+                BackNavigationInfo.class, BackTouchTracker.class);
+        method.setAccessible(true);
+        recordHookHandle(hook(method)
+                .setId("shell_back_onBackNavigationInfoReceived")
+                .intercept(this::onBackNavigationInfoReceived));
     }
 
 
@@ -8673,16 +8269,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         throwable);
             }
         }
-        notifyShellAnimationFinished(chain.getThisObject(),
-                chain.getExecutable().getName());
+        Object controller = chain.getThisObject();
+        String reason = chain.getExecutable().getName();
+        new ArrayList<>(nativeInputMonitors.values()).forEach(
+                monitor -> monitor.onShellAnimationFinished(controller, reason));
         return result;
-    }
-
-    private void notifyShellAnimationFinished(Object controller, String reason) {
-        for (NativeBackInputMonitor monitor
-                : new ArrayList<>(nativeInputMonitors.values())) {
-            monitor.onShellAnimationFinished(controller, reason);
-        }
     }
 
     private synchronized void ensureMiuiOverviewStateReceiver(Context context) {
@@ -8828,14 +8419,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             return;
         }
         acceptedInputToken.set(token);
-        boolean consumed = false;
-        for (NativeBackInputMonitor monitor
-                : new ArrayList<>(nativeInputMonitors.values())) {
-            if (monitor.acceptMiuiHomeInput(token)) {
-                consumed = true;
-                break;
-            }
-        }
+        boolean consumed = new ArrayList<>(nativeInputMonitors.values()).stream()
+                .anyMatch(monitor -> monitor.acceptMiuiHomeInput(token));
         if (consumed) {
             acceptedInputToken.compareAndSet(token, null);
         } else {
@@ -8860,13 +8445,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
         try {
             String[] packages = context.getPackageManager().getPackagesForUid(uid);
-            if (packages != null) {
-                for (String packageName : packages) {
-                    if (MIUI_HOME.equals(packageName)) {
-                        return true;
-                    }
-                }
-            }
+            return packages != null && Arrays.asList(packages).contains(MIUI_HOME);
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to validate launcher-state sender uid=" + uid,
                     throwable);
@@ -9084,48 +8663,15 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Object createNativeEdgeBackPluginFromFactory(Object edgeBackGestureHandler,
                                                          Context context) throws Exception {
-        Handler handler = findUiHandler(edgeBackGestureHandler);
-        for (Field field : edgeBackGestureHandler.getClass().getDeclaredFields()) {
-            field.setAccessible(true);
-            Object candidate = field.get(edgeBackGestureHandler);
-            if (candidate == null) {
-                continue;
-            }
-            for (Method method : candidate.getClass().getMethods()) {
-                if (!"create".equals(method.getName())
-                        || method.getParameterCount() != 2) {
-                    continue;
-                }
-                Class<?>[] types = method.getParameterTypes();
-                if (!types[0].isAssignableFrom(Context.class)
-                        && !Context.class.isAssignableFrom(types[0])) {
-                    continue;
-                }
-                if (!types[1].isAssignableFrom(Handler.class)
-                        && !Handler.class.isAssignableFrom(types[1])) {
-                    continue;
-                }
-                method.setAccessible(true);
-                Object plugin = method.invoke(candidate, context, handler);
-                log(Log.INFO, TAG, "Created native edge back plugin from field "
-                        + field.getName() + ", factory=" + shortObject(candidate)
-                        + ", plugin=" + shortObject(plugin));
-                return plugin;
-            }
-        }
-        return null;
-    }
-
-    private Handler findUiHandler(Object edgeBackGestureHandler) {
-        try {
-            Object uiThreadContext = readField(edgeBackGestureHandler, "mUiThreadContext");
-            Object handler = readField(uiThreadContext, "handler");
-            if (handler instanceof Handler) {
-                return (Handler) handler;
-            }
-        } catch (Throwable ignored) {
-        }
-        return new Handler(Looper.getMainLooper());
+        Object factory = readField(
+                edgeBackGestureHandler, "mBackPanelControllerFactory");
+        Handler handler = (Handler) readField(
+                readField(edgeBackGestureHandler, "mUiThreadContext"), "handler");
+        Object plugin = invokeMethod(factory, "create",
+                new Class<?>[]{Context.class, Handler.class},
+                new Object[]{context, handler});
+        invokeAnyMethod(plugin, "init", new Object[0]);
+        return plugin;
     }
 
     private void logNativePluginDiagnostics(Object edgeBackGestureHandler) {
@@ -9175,7 +8721,9 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private boolean ensureRegistryRunner(Object definitions, int type, Object animation,
                                          String label) {
-        if (definitions == null || animation == null || sparseArrayContains(definitions, type)) {
+        if (definitions == null || animation == null
+                || definitions instanceof SparseArray<?>
+                && ((SparseArray<?>) definitions).indexOfKey(type) >= 0) {
             return false;
         }
         try {
@@ -9193,22 +8741,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     throwable);
             return false;
         }
-    }
-
-    private boolean sparseArrayContains(Object sparseArray, int key) {
-        try {
-            int size = ((Integer) invokeAnyMethod(sparseArray, "size", new Object[0])).intValue();
-            for (int i = 0; i < size; i++) {
-                Object keyAt = invokeAnyMethod(sparseArray, "keyAt",
-                        new Object[]{Integer.valueOf(i)});
-                if (keyAt instanceof Integer && ((Integer) keyAt).intValue() == key) {
-                    return true;
-                }
-            }
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to inspect SparseArray contains key=" + key, throwable);
-        }
-        return false;
     }
 
     private void recordHookHandle(XposedInterface.HookHandle hookHandle) {
@@ -9306,7 +8838,8 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private Field findCachedField(Class<?> ownerClass, String fieldName)
             throws NoSuchFieldException {
-        ReflectionKey key = new ReflectionKey(ownerClass, "field:" + fieldName);
+        Pair<Class<?>, String> key = Pair.create(
+                ownerClass, "field:" + fieldName);
         Field cached = reflectedFields.get(key);
         if (cached != null) {
             return cached;
@@ -9468,28 +9001,10 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        boolean isAttachedTo(IBinder binder) {
-            return attached && shellBackAnimation == binder;
-        }
-
-        void updateContext(Context newContext) {
-            if (newContext != null) {
-                context = newContext.getApplicationContext();
-            }
-        }
-
-        boolean blocksHotReload() {
-            return blocksControllerReplacement();
-        }
-
         boolean blocksControllerReplacement() {
             ReturnHomeSession session = currentSession;
             return (session != null && session.cleaned.get() == 0)
                     || !pendingUnifiedInterruptedAnimToConfigs.isEmpty();
-        }
-
-        boolean isDeferredControllerReplacement() {
-            return deferredControllerReplacement;
         }
 
         void beginDeferredControllerReplacement(String reason) {
@@ -9497,9 +9012,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 deferredControllerReplacement = true;
                 attached = false;
                 invalidatePendingFreshOpen("deferredControllerReplacement:" + reason);
-                discardPendingStartEvent();
-                pendingProgressEvent = null;
-                pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+                clearPendingCallbackState();
                 pendingStandardCommitSignal.set(null);
                 pendingUnifiedNativeFinishDispatches.clear();
             }
@@ -9565,9 +9078,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 finishSession(session, "detach:" + reason,
                         shouldRestorePreview(session));
             }
-            discardPendingStartEvent();
-            pendingProgressEvent = null;
-            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            clearPendingCallbackState();
             pendingStandardCommitSignal.set(null);
             pendingUnifiedNativeFinishDispatches.clear();
             if (clearShell && !shellBinderDead
@@ -9598,9 +9109,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             // A callback start is the generation boundary even if the preceding runner never
             // arrived. Do not let its last progress sample bleed into this gesture.
-            discardPendingStartEvent();
-            pendingProgressEvent = null;
-            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            clearPendingCallbackState();
             ReturnHomeSession session = currentSession;
             if (session == null) {
                 pendingStartEvent = event;
@@ -9634,9 +9143,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 pendingTerminalAction = RETURN_HOME_TERMINAL_CANCEL;
                 return;
             }
-            discardPendingStartEvent();
-            pendingProgressEvent = null;
-            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            clearPendingCallbackState();
             animateCancel(session, "callbackCancelled");
         }
 
@@ -9647,9 +9154,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.INFO, TAG, "Return-to-home invoke waiting for remote targets");
                 return;
             }
-            discardPendingStartEvent();
-            pendingProgressEvent = null;
-            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            clearPendingCallbackState();
             startNativeClose(session);
         }
 
@@ -9675,9 +9180,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         startUnifiedNativeCancel(
                                 previous, "supersededRunner");
                     }
-                    discardPendingStartEvent();
-                    pendingProgressEvent = null;
-                    pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+                    clearPendingCallbackState();
                     discardMatchingUnboundStandardSignal(
                             miuiHomeAcceptedInputIdentity.get(),
                             "overlappingRunnerRejected");
@@ -9709,7 +9212,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             pendingProgressEvent = null;
             pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
             ReturnHomeSession session = new ReturnHomeSession(
-                    miuiHomeReturnHomeGenerationIds.incrementAndGet(), transit,
+                    miuiHomeReturnHomeGenerationIds.incrementAndGet(),
                     apps, wallpapers, nonApps, finishedCallback,
                     miuiHomeAcceptedInputIdentity.get());
             currentSession = session;
@@ -9765,9 +9268,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         void onRemoteAnimationCancelled() {
-            discardPendingStartEvent();
-            pendingProgressEvent = null;
-            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+            clearPendingCallbackState();
             ReturnHomeSession session = currentSession;
             if (session != null) {
                 if (requestUnifiedPendingCommitTermination(
@@ -9914,9 +9415,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void discardPendingStartEvent() {
+        private void clearPendingCallbackState() {
             BackMotionEvent event = pendingStartEvent;
             pendingStartEvent = null;
+            pendingProgressEvent = null;
+            pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
             releaseBackMotionEventTarget(event);
         }
 
@@ -10035,7 +9538,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             float rawProgress = clamp01(smoothedProgress);
             session.lastSmoothedProgress = rawProgress;
             float progress = backGestureInterpolator.getInterpolation(rawProgress);
-            session.progress = progress;
             float startWidth = session.startRect.width();
             float startHeight = session.startRect.height();
             float width = startWidth * (1.0f
@@ -12568,12 +12070,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object actualTypeObject = invokeAnyMethod(
                         animationIdentity, "getLastAminType",
                         new Object[0]);
-                String requestedType = requestedTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) requestedTypeObject).name()
-                        : String.valueOf(requestedTypeObject);
-                String actualType = actualTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) actualTypeObject).name()
-                        : String.valueOf(actualTypeObject);
+                String requestedType = enumName(requestedTypeObject);
+                String actualType = enumName(actualTypeObject);
                 Object targetSet = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getRemoteTargetSet", new Object[0]);
@@ -12768,17 +12266,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 Object currentIdentity = invokeAnyMethod(
                         windowElement, "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        windowElement, "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(windowElement);
                 Object actualTypeObject = invokeAnyMethod(
                         currentIdentity, "getLastAminType",
                         new Object[0]);
-                actualType = actualTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) actualTypeObject).name()
-                        : String.valueOf(actualTypeObject);
+                actualType = enumName(actualTypeObject);
                 allowed = currentIdentity == animationIdentity
                         && configured
                         == session.unifiedNativeConfiguredAnimTo.get()
@@ -12933,9 +12425,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object actualTypeObject = invokeAnyMethod(
                         currentIdentity, "getLastAminType",
                         new Object[0]);
-                actualType = actualTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) actualTypeObject).name()
-                        : String.valueOf(actualTypeObject);
+                actualType = enumName(actualTypeObject);
                 exact = token.allowed
                         && token.windowElement == windowElement
                         && token.animationIdentity == currentIdentity
@@ -13115,9 +12605,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object typeObject = invokeAnyMethod(
                     params, "getAnimType", new Object[0]);
-            String typeName = typeObject instanceof Enum<?>
-                    ? ((Enum<?>) typeObject).name()
-                    : String.valueOf(typeObject);
+            String typeName = enumName(typeObject);
             if (!"CLOSE_TO_ELEMENT".equals(typeName)) {
                 return;
             }
@@ -13290,8 +12778,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             Object windowElement = readField(implementor, "windowElement");
             Object windowAnimContext = readField(implementor, "windowAnimContext");
             Object animType = invokeAnyMethod(params, "getAnimType", new Object[0]);
-            String typeName = animType instanceof Enum<?>
-                    ? ((Enum<?>) animType).name() : String.valueOf(animType);
+            String typeName = enumName(animType);
             if (windowElement != token.windowElement
                     || windowAnimContext != token.windowAnimContext
                     || !isReturnHomeNativeCloseType(typeName)) {
@@ -13344,11 +12831,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(windowElement);
             boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                     windowElement, "isAnimRunning", new Object[0]));
             Object compat = invokeAnyMethod(windowElement,
@@ -13611,11 +13094,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(windowElement);
             boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                     windowElement, "isAnimRunning", new Object[0]));
             Object expectedAnimationIdentity = provisionalCandidate
@@ -13672,14 +13151,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object typeObject = invokeAnyMethod(
                     params, "getAnimType", new Object[0]);
-            String typeName = typeObject instanceof Enum<?>
-                    ? ((Enum<?>) typeObject).name()
-                    : String.valueOf(typeObject);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String typeName = enumName(typeObject);
+            String currentType = readNativeAnimationType(windowElement);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
             Object targetView = invokeAnyMethod(
@@ -13904,11 +13377,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object windowElement = readField(
                         implementor, "windowElement");
                 Object animation = readField(implementor, "mAnim");
-                Object typeObject = invokeAnyMethod(
-                        windowElement, "getCurrentAnimType", new Object[0]);
-                String typeName = typeObject instanceof Enum<?>
-                        ? ((Enum<?>) typeObject).name()
-                        : String.valueOf(typeObject);
+                String typeName = readNativeAnimationType(windowElement);
                 boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                         animation, "isRunning", new Object[0]));
                 boolean exact = currentSession == session
@@ -14071,21 +13540,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                     || Looper.myLooper() != Looper.getMainLooper()) {
                 return;
             }
-            while (true) {
-                ReturnHomeNativeGeometrySnapshot previous =
-                        session.nativeGeometrySnapshot.get();
-                if (previous != null
-                        && (previous.frameTraceId > snapshot.frameTraceId
-                        || (previous.frameTraceId == snapshot.frameTraceId
-                        && previous.sourceKind >= snapshot.sourceKind))) {
-                    return;
-                }
-                if (!session.nativeGeometrySnapshot.compareAndSet(
-                        previous, snapshot)) {
-                    continue;
-                }
+            ReturnHomeNativeGeometrySnapshot previous =
+                    session.nativeGeometrySnapshot.get();
+            if (previous != null
+                    && (previous.frameTraceId > snapshot.frameTraceId
+                    || (previous.frameTraceId == snapshot.frameTraceId
+                    && previous.sourceKind >= snapshot.sourceKind))) {
                 return;
             }
+            session.nativeGeometrySnapshot.set(snapshot);
         }
 
         Object resolveNativeGeometryFrameApplyLock(
@@ -14644,9 +14107,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object typeObject = invokeAnyMethod(
                     params, "getAnimType", new Object[0]);
-            String typeName = typeObject instanceof Enum<?>
-                    ? ((Enum<?>) typeObject).name()
-                    : String.valueOf(typeObject);
+            String typeName = enumName(typeObject);
             if (!"CLOSE_TO_ELEMENT".equals(typeName)) {
                 return;
             }
@@ -14658,11 +14119,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             ReturnHomeSession session = token.session;
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(windowElement);
             boolean running = Boolean.TRUE.equals(invokeAnyMethod(
                     windowElement, "isAnimRunning", new Object[0]));
             Object targetSet = invokeAnyMethod(
@@ -14809,9 +14266,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object typeObject = invokeAnyMethod(
                     params, "getAnimType", new Object[0]);
-            String typeName = typeObject instanceof Enum<?>
-                    ? ((Enum<?>) typeObject).name()
-                    : String.valueOf(typeObject);
+            String typeName = enumName(typeObject);
             if (!"CLOSE_TO_HOME".equals(typeName)
                     && !"CLOSE_TO_HOME_CENTER".equals(typeName)) {
                 return;
@@ -15024,24 +14479,7 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private boolean adoptUnifiedStandardCommitToken(
                 UnifiedNativeStandardCommitToken token) {
-            if (token == null) {
-                return false;
-            }
-            while (true) {
-                int phase = token.phase.get();
-                if (phase != UnifiedNativeStandardCommitToken.PHASE_ENTERING
-                        && phase
-                        != UnifiedNativeStandardCommitToken.PHASE_ENTERED
-                        && phase
-                        != UnifiedNativeStandardCommitToken.PHASE_CONSUMED) {
-                    return false;
-                }
-                if (token.phase.compareAndSet(
-                        phase,
-                        UnifiedNativeStandardCommitToken.PHASE_ADOPTED)) {
-                    return true;
-                }
-            }
+            return adoptUnifiedTokenPhase(token == null ? null : token.phase);
         }
 
         private boolean isUnifiedCommitTransitionAtAnimToBoundary(
@@ -15077,11 +14515,16 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private boolean adoptUnifiedCommitTransitionToken(
                 UnifiedNativeCommitTransitionToken transition) {
-            if (transition == null) {
+            return adoptUnifiedTokenPhase(
+                    transition == null ? null : transition.phase);
+        }
+
+        private boolean adoptUnifiedTokenPhase(AtomicInteger tokenPhase) {
+            if (tokenPhase == null) {
                 return false;
             }
             while (true) {
-                int phase = transition.phase.get();
+                int phase = tokenPhase.get();
                 if (phase
                         != UnifiedNativeCommitTransitionToken.PHASE_ENTERING
                         && phase
@@ -15090,7 +14533,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         != UnifiedNativeCommitTransitionToken.PHASE_CONSUMED) {
                     return false;
                 }
-                if (transition.phase.compareAndSet(
+                if (tokenPhase.compareAndSet(
                         phase,
                         UnifiedNativeCommitTransitionToken.PHASE_ADOPTED)) {
                     return true;
@@ -15208,9 +14651,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object typeObject = invokeAnyMethod(
                     params, "getAnimType", new Object[0]);
-            String typeName = typeObject instanceof Enum<?>
-                    ? ((Enum<?>) typeObject).name()
-                    : String.valueOf(typeObject);
+            String typeName = enumName(typeObject);
             if (!isReturnHomeNativeCloseType(typeName)) {
                 return;
             }
@@ -15427,9 +14868,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             Object requestedTypeObject = invokeAnyMethod(
                     animParams, "getAnimType", new Object[0]);
-            String requestedType = requestedTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) requestedTypeObject).name()
-                    : String.valueOf(requestedTypeObject);
+            String requestedType = enumName(requestedTypeObject);
             if (!isReturnHomeNativeCloseType(requestedType)
                     || ("CLOSE_TO_ELEMENT".equals(requestedType)
                     && !hasCommittedUnifiedElementGeometry(
@@ -15443,12 +14882,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             Object currentIdentity = invokeAnyMethod(
                     expectedWindowElement,
                     "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    expectedWindowElement,
-                    "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(expectedWindowElement);
             Object targetSet = invokeAnyMethod(
                     expectedWindowElement,
                     "getRemoteTargetSet", new Object[0]);
@@ -15887,15 +15321,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                     "getAnimSymbol", new Object[0]);
             Object actualTypeObject = invokeAnyMethod(
                     currentIdentity, "getLastAminType", new Object[0]);
-            String actualType = actualTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) actualTypeObject).name()
-                    : String.valueOf(actualTypeObject);
+            String actualType = enumName(actualTypeObject);
             Object requestedTypeObject = invokeAnyMethod(
                     configured.animParams,
                     "getAnimType", new Object[0]);
-            String requestedType = requestedTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) requestedTypeObject).name()
-                    : String.valueOf(requestedTypeObject);
+            String requestedType = enumName(requestedTypeObject);
             Object targetSet = invokeAnyMethod(
                     expectedWindowElement,
                     "getRemoteTargetSet", new Object[0]);
@@ -16023,9 +15453,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object typeObject = animationIdentity == null ? null
                         : invokeAnyMethod(animationIdentity,
                         "getLastAminType", new Object[0]);
-                String actualType = typeObject instanceof Enum<?>
-                        ? ((Enum<?>) typeObject).name()
-                        : String.valueOf(typeObject);
+                String actualType = enumName(typeObject);
                 boolean running = animationIdentity != null
                         && Boolean.TRUE.equals(invokeAnyMethod(
                         animationIdentity, "isRunning", new Object[0]));
@@ -16098,9 +15526,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                             session.nativeWindowElement,
                             "getCurrentAnimType", new Object[0]);
                 }
-                actualType = typeObject instanceof Enum<?>
-                        ? ((Enum<?>) typeObject).name()
-                        : String.valueOf(typeObject);
+                actualType = enumName(typeObject);
                 running = animationIdentity != null
                         && Boolean.TRUE.equals(invokeAnyMethod(
                         animationIdentity, "isRunning", new Object[0]));
@@ -17059,9 +16485,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 throw new IllegalStateException(
                         "missing Xiaomi predictive WindowElement");
             }
-            if ((enabled && !session.unifiedNativePreviewSpringEndHeld)
-                    || (!enabled
-                    && session.unifiedNativePreviewSpringEndHeld)) {
+            if (enabled != session.unifiedNativePreviewSpringEndHeld) {
                 return;
             }
             Object callbackCollection = invokeAnyMethod(
@@ -17626,12 +17050,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        session.nativeWindowElement,
-                        "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(
+                        session.nativeWindowElement);
                 if (currentElement != session.nativeWindowElement
                         || currentIdentity
                         != session.unifiedNativeAnimationIdentity) {
@@ -18296,12 +17716,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        session.nativeWindowElement,
-                        "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(
+                        session.nativeWindowElement);
                 if (currentElement != session.nativeWindowElement
                         || currentIdentity
                         != session.unifiedNativeAnimationIdentity
@@ -18429,12 +17845,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        session.nativeWindowElement,
-                        "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(
+                        session.nativeWindowElement);
                 if (currentElement != session.nativeWindowElement
                         || currentIdentity
                         != session.unifiedNativeAnimationIdentity
@@ -18475,12 +17887,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object providerIdentity = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getAnimSymbol", new Object[0]);
-                Object providerTypeObject = invokeAnyMethod(
-                        session.nativeWindowElement,
-                        "getCurrentAnimType", new Object[0]);
-                String providerType = providerTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) providerTypeObject).name()
-                        : String.valueOf(providerTypeObject);
+                String providerType = readNativeAnimationType(
+                        session.nativeWindowElement);
                 Object providerTargetSet = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getRemoteTargetSet", new Object[0]);
@@ -18679,23 +18087,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", oldGeneration=" + replacedToken.generation
                             + ", newGeneration=" + session.generation);
                 }
-                Class<?> compatClass = Class.forName(
-                        MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT, false, classLoader);
-                Method wrap = compatClass.getDeclaredMethod("wrap",
-                        session.apps.getClass());
-                wrap.setAccessible(true);
-                Object compatApps = wrap.invoke(null, new Object[]{session.apps});
-                Object[] sourceNonApps = session.nonApps;
-                Object compatNonApps;
-                if (sourceNonApps == null || sourceNonApps.length == 0) {
-                    compatNonApps = Array.newInstance(compatClass, 0);
-                } else {
-                    Method wrapNonApps = compatClass.getDeclaredMethod("wrap",
-                            sourceNonApps.getClass());
-                    wrapNonApps.setAccessible(true);
-                    compatNonApps = wrapNonApps.invoke(null,
-                            new Object[]{sourceNonApps});
-                }
+                Object compatApps = wrapNativeAnimationTargets(session.apps);
+                Object compatNonApps = wrapNativeAnimationTargets(session.nonApps);
                 invokeAnyMethod(windowElement,
                         "onClosingWindowTransitionExecute",
                         new Object[]{compatApps, compatNonApps, null, Boolean.FALSE});
@@ -18999,11 +18392,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(windowElement);
             Object pendingReference = invokeAnyMethod(
                     stateManager, "getPendingIconViewWeakRef", new Object[0]);
             Object pendingIcon = pendingReference instanceof WeakReference<?>
@@ -19165,11 +18554,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         session.stateManager, "getCurrentWindowElement", new Object[0]);
                 Object currentIdentity = invokeAnyMethod(
                         windowElement, "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        windowElement, "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(windowElement);
                 boolean surfaceCanceled = Boolean.TRUE.equals(
                         readField(windowElement, "mSurfaceCanceled"));
                 boolean listenerDisabled = Boolean.TRUE.equals(
@@ -19248,19 +18633,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                         stateManager, "getCurrentWindowElement", new Object[0]);
                 String replacementType = null;
                 if (currentElement != null && currentElement != windowElement) {
-                    Object replacementTypeObject = invokeAnyMethod(
-                            currentElement, "getCurrentAnimType", new Object[0]);
-                    replacementType = replacementTypeObject instanceof Enum<?>
-                            ? ((Enum<?>) replacementTypeObject).name()
-                            : String.valueOf(replacementTypeObject);
+                    replacementType = readNativeAnimationType(currentElement);
                 }
                 Object currentIdentity = invokeAnyMethod(
                         windowElement, "getAnimSymbol", new Object[0]);
-                Object currentTypeObject = invokeAnyMethod(
-                        windowElement, "getCurrentAnimType", new Object[0]);
-                String currentType = currentTypeObject instanceof Enum<?>
-                        ? ((Enum<?>) currentTypeObject).name()
-                        : String.valueOf(currentTypeObject);
+                String currentType = readNativeAnimationType(windowElement);
                 boolean surfaceCanceled = Boolean.TRUE.equals(
                         readField(windowElement, "mSurfaceCanceled"));
                 boolean surfaceCancelExecuted = Boolean.TRUE.equals(
@@ -19546,11 +18923,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     oldWindowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    oldWindowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(oldWindowElement);
             Object launcherTarget = invokeAnyMethod(
                     oldWindowElement, "getLauncherTargetView", new Object[0]);
             Object oldListObject = readField(
@@ -19691,11 +19064,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(windowElement);
             Object pendingReference = invokeAnyMethod(
                     stateManager, "getPendingIconViewWeakRef", new Object[0]);
             Object pendingIcon = pendingReference instanceof WeakReference<?>
@@ -19764,8 +19133,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", expectedType=" + session.nativeAnimationType
                                 + ", verifiedClose=" + verifiedClose
                                 + ", pendingCommit=" + pendingCommit
-                                + ", verifiedClose=" + verifiedClose
-                                + ", pendingCommit=" + pendingCommit
                                 + ", samePendingIcon=" + samePendingIcon
                                 + ", running=" + running
                                 + ", reusable=" + reusable
@@ -19798,12 +19165,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     Object lockedIdentity = invokeAnyMethod(
                             windowElement, "getAnimSymbol",
                             new Object[0]);
-                    Object lockedTypeObject = invokeAnyMethod(
-                            windowElement, "getCurrentAnimType",
-                            new Object[0]);
-                    String lockedType = lockedTypeObject instanceof Enum<?>
-                            ? ((Enum<?>) lockedTypeObject).name()
-                            : String.valueOf(lockedTypeObject);
+                    String lockedType = readNativeAnimationType(windowElement);
                     int mutation =
                             pendingCommitInterruption.mutation.get();
                     if (!isExactUnifiedPendingInterruption(
@@ -19920,11 +19282,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     token.stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     token.windowElement, "getAnimSymbol", new Object[0]);
-            Object currentTypeObject = invokeAnyMethod(
-                    token.windowElement, "getCurrentAnimType", new Object[0]);
-            String currentType = currentTypeObject instanceof Enum<?>
-                    ? ((Enum<?>) currentTypeObject).name()
-                    : String.valueOf(currentTypeObject);
+            String currentType = readNativeAnimationType(token.windowElement);
             Object pendingReference = invokeAnyMethod(
                     token.stateManager, "getPendingIconViewWeakRef", new Object[0]);
             Object pendingIcon = pendingReference instanceof WeakReference<?>
@@ -20225,10 +19583,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         "getCurrentWindowElement", new Object[0]);
                 Object currentIdentity = invokeAnyMethod(windowElement,
                         "getAnimSymbol", new Object[0]);
-                Object currentType = invokeAnyMethod(windowElement,
-                        "getCurrentAnimType", new Object[0]);
-                String typeName = currentType instanceof Enum<?>
-                        ? ((Enum<?>) currentType).name() : String.valueOf(currentType);
+                String typeName = readNativeAnimationType(windowElement);
                 boolean closeToHome = isReturnHomeNativeCloseType(typeName);
                 boolean running = Boolean.TRUE.equals(invokeAnyMethod(windowElement,
                         "isAnimRunning", new Object[0]));
@@ -20604,11 +19959,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     entry : pendingUnifiedNativeFinishDispatches.entrySet()) {
                 ConcurrentLinkedQueue<UnifiedNativeFinishDispatchToken>
                         queue = entry.getValue();
-                for (UnifiedNativeFinishDispatchToken dispatch : queue) {
-                    if (dispatch.session == session) {
-                        queue.remove(dispatch);
-                    }
-                }
+                queue.removeIf(dispatch -> dispatch.session == session);
                 if (queue.isEmpty()) {
                     pendingUnifiedNativeFinishDispatches.remove(
                             entry.getKey(), queue);
@@ -21425,7 +20776,6 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private final class ReturnHomeSession {
             final long generation;
-            final int transit;
             final Object[] apps;
             final Object[] wallpapers;
             final Object[] nonApps;
@@ -21473,7 +20823,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean previewLeashPrepared;
             float initialTouchY;
             int swipeEdge;
-            float progress;
             float startCornerRadius;
             float endCornerRadius;
             float currentCornerRadius;
@@ -21566,12 +20915,11 @@ public final class MiuiBackGestureHook extends XposedModule {
             float previewBlurPublishedDimming;
             boolean previewBlurInterruptedHomeSpring;
 
-            ReturnHomeSession(long generation, int transit, Object[] apps,
+            ReturnHomeSession(long generation, Object[] apps,
                               Object[] wallpapers, Object[] nonApps,
                               IBinder finishedCallback,
                               MiuiHomeAcceptedInputToken acceptedInputIdentity) {
                 this.generation = generation;
-                this.transit = transit;
                 this.apps = apps;
                 this.wallpapers = wallpapers;
                 this.nonApps = nonApps;
@@ -21626,14 +20974,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                                 Object edgeBackGestureHandler, Object controller, Object backAnimationImpl)
             throws Exception {
         InputManager inputManager = context.getSystemService(InputManager.class);
-        int displayId = 0;
-        try {
-            Object value = readField(edgeBackGestureHandler, "mDisplayId");
-            if (value instanceof Integer) {
-                displayId = ((Integer) value).intValue();
-            }
-        } catch (Throwable ignored) {
-        }
+        int displayId = readIntFieldOrDefault(
+                edgeBackGestureHandler, "mDisplayId", 0);
         Object monitor = invokeAnyMethod(inputManager, "monitorGestureInput",
                 new Object[]{"miui-aosp-back", Integer.valueOf(displayId)});
         if (!(monitor instanceof InputMonitor)) {
@@ -21656,7 +20998,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         private final InputMonitor inputMonitor;
         private final SystemUiBackGestureDriver driver;
         private final int displayId;
-        private Object backAnimationImpl;
         private boolean gestureCandidate;
         private boolean launcherOpenBreakCandidate;
         private long launcherOpenBreakGenerationCandidate;
@@ -21685,7 +21026,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             super(inputChannel, Looper.getMainLooper());
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
-            this.backAnimationImpl = backAnimationImpl;
             this.inputMonitor = inputMonitor;
             this.displayId = displayId;
             this.driver = new SystemUiBackGestureDriver(context, edgeBackGestureHandler,
@@ -21723,7 +21063,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
-            this.backAnimationImpl = newBackAnimationImpl;
             driver.updateBackAnimation(newBackAnimationImpl);
         }
 
@@ -22042,7 +21381,9 @@ public final class MiuiBackGestureHook extends XposedModule {
         private int edgeForDown(MotionEvent event) {
             float x = event.getRawX();
             float displayWidth = currentDisplayWidth();
-            EdgeWidthSnapshot widths = edgeWidths();
+            EdgeWidthSnapshot widths = readEdgeWidthSnapshot(
+                    edgeBackGestureHandler,
+                    context.getResources().getDisplayMetrics().density);
             if (x < widths.leftTouchWidth) {
                 return EDGE_LEFT;
             }
@@ -22050,11 +21391,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return EDGE_RIGHT;
             }
             return -1;
-        }
-
-        private EdgeWidthSnapshot edgeWidths() {
-            return readEdgeWidthSnapshot(edgeBackGestureHandler,
-                    context.getResources().getDisplayMetrics().density);
         }
 
         private float currentDisplayWidth() {
@@ -22607,7 +21943,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         private volatile Object backAnimationImpl;
         private boolean gestureActive;
         private boolean thresholdCrossed;
-        private boolean nativePanelActive;
         private boolean triggerBack;
         private boolean shellGestureStarted;
         private boolean shellGestureStartDeferred;
@@ -22749,7 +22084,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             nativePanelHapticDeferralUnavailable = false;
             deferredBackPanelHaptic = null;
             thresholdCrossed = false;
-            nativePanelActive = false;
             triggerBack = false;
             activeEdge = edge;
             downX = event.getRawX();
@@ -22878,7 +22212,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             thresholdCrossed = true;
-            nativePanelActive = true;
             if (legacyInterruptGesture) {
                 log(Log.INFO, TAG, "MIUI in-app interrupt threshold crossed, distance="
                         + distance);
@@ -23282,7 +22615,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             for (OpenTransitionSnapshot snapshot : runningOpenTransitions.values()) {
                 if (snapshot.state.get() == OPEN_SNAPSHOT_ACTIVE) {
                     log(Log.INFO, TAG, "Detected reversible running OPEN transition"
-                            + ", animatorCount=" + snapshot.animatorCount
+                            + ", animatorCount=" + snapshot.animators.length
                             + ", info=" + shortObject(snapshot.transitionInfo));
                     return snapshot;
                 }
@@ -23512,7 +22845,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             nativePanelHapticDeferralUnavailable = false;
             acceptedInputIdentity = null;
             thresholdCrossed = false;
-            nativePanelActive = false;
             triggerBack = false;
             settleDeferredBackPanelHaptic(
                     abandonedHaptic, false, "localGestureCleared");
@@ -24002,9 +23334,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 invokeAnyMethod(releaseController, "invokeOrCancelBack",
                         new Object[]{completionTracker});
                 ((BackTouchTracker) completionTracker).reset();
-                if (currentTracker != null && currentTracker != completionTracker) {
-                    ((BackTouchTracker) currentTracker).reset();
-                }
                 if (queuedTracker != null && queuedTracker != completionTracker) {
                     ((BackTouchTracker) queuedTracker).reset();
                 }
@@ -24113,11 +23442,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!legacyInterruptGesture && !launcherOpenBreakGesture) {
                     invokeAnyMethod(controller, "setTriggerBack",
                             new Object[]{Boolean.valueOf(newTriggerBack)});
-                }
-                if (!newTriggerBack && nativePanelActive) {
-                    nativePanelActive = false;
-                } else if (newTriggerBack && thresholdCrossed) {
-                    nativePanelActive = true;
                 }
                 log(Log.INFO, TAG, "SystemUI gesture driver triggerBack=" + newTriggerBack);
             } catch (Throwable throwable) {
@@ -24408,10 +23732,9 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private boolean nativePanelEmittedActivationHaptic(
                 String stateBefore, String stateAfter) {
-            return ("ACTIVE".equals(stateAfter)
-                    && !"ACTIVE".equals(stateBefore))
-                    || ("FLUNG".equals(stateAfter)
-                    && !"ACTIVE".equals(stateBefore));
+            return !"ACTIVE".equals(stateBefore)
+                    && ("ACTIVE".equals(stateAfter)
+                    || "FLUNG".equals(stateAfter));
         }
 
         private void rememberDeferredBackPanelHaptic(
@@ -24494,8 +23817,8 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object invokeMethod(Object target, String methodName,
                                 Class<?>[] parameterTypes, Object[] args) throws Exception {
         Class<?> owner = target.getClass();
-        ReflectionKey key = new ReflectionKey(owner,
-                exactMethodSignature(methodName, parameterTypes));
+        Pair<Class<?>, String> key = Pair.create(owner,
+                "exact:" + methodName + Arrays.toString(parameterTypes));
         Method method = reflectedExactMethods.get(key);
         if (method == null) {
             if (missingReflectedMembers.contains(key)) {
@@ -24517,7 +23840,7 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object invokeAnyMethod(Object target, String methodName, Object[] args)
             throws Exception {
         Class<?> owner = target.getClass();
-        ReflectionKey key = new ReflectionKey(owner,
+        Pair<Class<?>, String> key = Pair.create(owner,
                 "any:" + methodName + "/" + args.length);
         Method best = reflectedAnyMethods.get(key);
         if (best == null && missingReflectedMembers.contains(key)) {
@@ -24538,13 +23861,14 @@ public final class MiuiBackGestureHook extends XposedModule {
         return best.invoke(target, args);
     }
 
-    private static String exactMethodSignature(String methodName, Class<?>[] parameterTypes) {
-        StringBuilder signature = new StringBuilder("exact:").append(methodName).append('(');
-        for (Class<?> parameterType : parameterTypes) {
-            signature.append(parameterType == null ? "null" : parameterType.getName())
-                    .append(';');
-        }
-        return signature.append(')').toString();
+    private String readNativeAnimationType(Object windowElement) throws Exception {
+        return enumName(invokeAnyMethod(
+                windowElement, "getCurrentAnimType", new Object[0]));
+    }
+
+    private static String enumName(Object value) {
+        return value instanceof Enum<?>
+                ? ((Enum<?>) value).name() : String.valueOf(value);
     }
 
     private static Method findAnyMethod(Class<?> type, String methodName, int argCount) {

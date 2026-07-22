@@ -10,12 +10,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Rect
-import android.graphics.drawable.Drawable
 import android.os.Bundle
-import android.os.Looper
 import android.util.LruCache
 import android.util.Printer
 import androidx.activity.ComponentActivity
@@ -55,7 +50,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -87,14 +81,11 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.core.graphics.drawable.toBitmap
 import io.github.libxposed.service.XposedService
 import java.util.HashSet
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -128,7 +119,6 @@ import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowUpDown
 import top.yukonga.miuix.kmp.icon.extended.Close
 import top.yukonga.miuix.kmp.icon.extended.More
-import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
@@ -168,15 +158,8 @@ class PredictiveBackSettingsActivity :
     }
 
     override fun onServiceStateChanged(service: XposedService?) {
-        val update = {
-            xposedService = service
-            serviceStateObserved = true
-        }
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            update()
-        } else {
-            runOnUiThread(update)
-        }
+        xposedService = service
+        serviceStateObserved = true
     }
 }
 
@@ -276,7 +259,7 @@ private fun PredictiveBackSettingsScreen(
     var configurationError by remember { mutableStateOf<String?>(null) }
     var saveError by remember { mutableStateOf<String?>(null) }
     var localWriteGeneration by remember { mutableStateOf(0L) }
-    val confirmedPackages = remember { AtomicReference<Set<String>>(emptySet()) }
+    var confirmedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
     val writeMutex = remember(preferences) { Mutex() }
     val lazyListState = rememberLazyListState()
     val scrollBehavior = MiuixScrollBehavior()
@@ -290,7 +273,7 @@ private fun PredictiveBackSettingsScreen(
     val horizontalSafeInsets = WindowInsets.safeDrawing
         .only(WindowInsetsSides.Horizontal)
         .asPaddingValues()
-    val topBarBackdrop = rememberMiuixBlurBackdrop(enableBlur = true)
+    val topBarBackdrop = rememberMiuixBlurBackdrop()
 
     LaunchedEffect(appLoadGeneration, appsErrorMessage) {
         val refreshingExistingList = apps.isNotEmpty()
@@ -321,7 +304,7 @@ private fun PredictiveBackSettingsScreen(
         configurationError = null
         saveError = null
         localWriteGeneration = 0L
-        confirmedPackages.set(emptySet())
+        confirmedPackages = emptySet()
         if (!serviceStateObserved) {
             configurationLoading = true
             return@LaunchedEffect
@@ -342,7 +325,7 @@ private fun PredictiveBackSettingsScreen(
             }
             preferences = loaded.first
             selectedPackages = loaded.second
-            confirmedPackages.set(loaded.second)
+            confirmedPackages = loaded.second
         } catch (_: Throwable) {
             configurationError = configurationErrorMessage
         } finally {
@@ -455,7 +438,7 @@ private fun PredictiveBackSettingsScreen(
             saveError = null
             scope.launch {
                 val saved = writeMutex.withLock {
-                    val fallbackPackages = confirmedPackages.get()
+                    val fallbackPackages = confirmedPackages
                     val commitSucceeded = withContext(Dispatchers.IO) {
                         val succeeded = try {
                             activePreferences.edit()
@@ -484,7 +467,7 @@ private fun PredictiveBackSettingsScreen(
                         succeeded
                     }
                     if (preferences === activePreferences && commitSucceeded) {
-                        confirmedPackages.set(nextPackages)
+                        confirmedPackages = nextPackages
                     }
                     commitSucceeded
                 }
@@ -493,7 +476,7 @@ private fun PredictiveBackSettingsScreen(
                         if (saved) {
                             selectedPackages = nextPackages
                         } else {
-                            selectedPackages = confirmedPackages.get()
+                            selectedPackages = confirmedPackages
                             saveError = saveErrorMessage
                         }
                     }
@@ -516,7 +499,7 @@ private fun PredictiveBackSettingsScreen(
             Column(
                 modifier = Modifier
                     .installerMiuixBlurEffect(topBarBackdrop)
-                    .background(topBarBackdrop.getMiuixAppBarColor()),
+                    .background(Color.Transparent),
             ) {
                 TopAppBar(
                     color = Color.Transparent,
@@ -690,10 +673,7 @@ private fun PredictiveBackSettingsScreen(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
-                            .then(
-                                topBarBackdrop?.let { Modifier.layerBackdrop(it) }
-                                    ?: Modifier,
-                            )
+                            .layerBackdrop(topBarBackdrop)
                             .scrollEndHaptic()
                             .overScrollVertical()
                             .nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -791,15 +771,6 @@ private fun PredictiveBackSettingsScreen(
                                                 selectedPackages + app.packageName
                                             } else {
                                                 selectedPackages - app.packageName
-                                            },
-                                        )
-                                    },
-                                    onClick = {
-                                        persistSelection(
-                                            if (checked) {
-                                                selectedPackages - app.packageName
-                                            } else {
-                                                selectedPackages + app.packageName
                                             },
                                         )
                                     },
@@ -946,13 +917,9 @@ private fun MiuixDropdown(
     selectedIndex: Int,
     onSelectedIndexChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    placeholder: String = "No Selection",
 ) {
     val isDropdownExpanded = remember { mutableStateOf(false) }
     val hapticFeedback = LocalHapticFeedback.current
-    val itemsNotEmpty = items.isNotEmpty()
-    val actualEnabled = enabled && itemsNotEmpty
 
     Box(modifier = modifier) {
         Row(
@@ -960,7 +927,6 @@ private fun MiuixDropdown(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    enabled = actualEnabled,
                     onClick = {
                         isDropdownExpanded.value = !isDropdownExpanded.value
                         if (isDropdownExpanded.value) {
@@ -974,26 +940,18 @@ private fun MiuixDropdown(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val textColor = if (actualEnabled) {
-                MiuixTheme.colorScheme.onBackgroundVariant
-            } else {
-                MiuixTheme.colorScheme.disabledOnSecondaryVariant
-            }
             Text(
-                text = if (itemsNotEmpty) items[selectedIndex] else placeholder,
+                text = items[selectedIndex],
                 fontSize = MiuixTheme.textStyles.subtitle.fontSize,
                 fontWeight = FontWeight.Bold,
-                color = textColor,
+                color = MiuixTheme.colorScheme.onBackgroundVariant,
             )
-            val iconColor = if (actualEnabled) {
-                MiuixTheme.colorScheme.onSurfaceVariantActions
-            } else {
-                MiuixTheme.colorScheme.disabledOnSecondaryVariant
-            }
             Image(
                 modifier = Modifier.size(10.dp, 16.dp),
                 imageVector = MiuixIcons.Basic.ArrowUpDown,
-                colorFilter = ColorFilter.tint(iconColor),
+                colorFilter = ColorFilter.tint(
+                    MiuixTheme.colorScheme.onSurfaceVariantActions,
+                ),
                 contentDescription = stringResource(R.string.toggle_dropdown),
             )
         }
@@ -1023,49 +981,11 @@ private fun MiuixDropdown(
     }
 }
 
-private val DropdownWithStartMarginProvider = object : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowBounds: IntRect,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-        popupMargin: IntRect,
-        alignment: PopupPositionProvider.Align,
-    ): IntOffset {
-        val offsetX = if (alignment == PopupPositionProvider.Align.End) {
-            anchorBounds.right - popupContentSize.width - popupMargin.right
-        } else {
-            anchorBounds.left + popupMargin.left
-        }
-        val offsetY = if (windowBounds.bottom - anchorBounds.bottom > popupContentSize.height) {
-            anchorBounds.bottom + popupMargin.bottom
-        } else if (anchorBounds.top - windowBounds.top > popupContentSize.height) {
-            anchorBounds.top - popupContentSize.height - popupMargin.top
-        } else {
-            anchorBounds.top + anchorBounds.height / 2 - popupContentSize.height / 2
-        }
-        return IntOffset(
-            x = offsetX.coerceIn(
-                windowBounds.left,
-                (windowBounds.right - popupContentSize.width - popupMargin.right)
-                    .coerceAtLeast(windowBounds.left),
-            ),
-            y = offsetY.coerceIn(
-                (windowBounds.top + popupMargin.top).coerceAtMost(
-                    windowBounds.bottom - popupContentSize.height - popupMargin.bottom,
-                ),
-                windowBounds.bottom - popupContentSize.height - popupMargin.bottom,
-            ),
-        )
-    }
-
-    override fun getMargins(): PaddingValues =
-        PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-}
+private val DropdownWithStartMarginProvider =
+    ListPopupDefaults.dropdownPositionProvider(12.dp, 8.dp)
 
 @Composable
-private fun rememberMiuixBlurBackdrop(enableBlur: Boolean): LayerBackdrop? {
-    if (!enableBlur || !isRenderEffectSupported()) return null
+private fun rememberMiuixBlurBackdrop(): LayerBackdrop {
     val surfaceColor = MiuixTheme.colorScheme.surface
     return rememberLayerBackdrop {
         drawRect(surfaceColor)
@@ -1074,23 +994,15 @@ private fun rememberMiuixBlurBackdrop(enableBlur: Boolean): LayerBackdrop? {
 }
 
 @Composable
-private fun LayerBackdrop?.getMiuixAppBarColor(): Color =
-    this?.let { Color.Transparent } ?: MiuixTheme.colorScheme.surface
-
-@Composable
 private fun Modifier.installerMiuixBlurEffect(
-    backdrop: LayerBackdrop?,
-    enabled: Boolean = true,
-    blurRadius: Float = 25f,
-    shape: Shape = RectangleShape,
+    backdrop: LayerBackdrop,
 ): Modifier {
-    if (!enabled || backdrop == null) return this
     val blendColor = MiuixTheme.colorScheme.surface.copy(alpha = 0.8f)
     return then(
         Modifier.textureBlur(
             backdrop = backdrop,
-            shape = shape,
-            blurRadius = blurRadius,
+            shape = RectangleShape,
+            blurRadius = 25f,
             colors = BlurColors(
                 blendColors = listOf(BlendColorEntry(color = blendColor)),
             ),
@@ -1148,7 +1060,6 @@ private fun MiuixAppItem(
     shape: Shape,
     showPackageName: Boolean,
     onToggle: (Boolean) -> Unit,
-    onClick: () -> Unit,
 ) {
     Box(
         modifier = modifier
@@ -1160,10 +1071,8 @@ private fun MiuixAppItem(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(
-                    onClick = onClick,
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = ripple(color = MiuixTheme.colorScheme.primary),
                     enabled = enabled,
+                    onClick = { onToggle(!checked) },
                 )
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -1342,18 +1251,7 @@ private fun loadAppIcon(
     }.recoverCatching {
         packageManager.getApplicationIcon(packageName)
     }.getOrNull()
-    return runCatching { drawable?.toImageBitmap(iconSize) }.getOrNull()
-}
-
-private fun Drawable.toImageBitmap(size: Int): ImageBitmap {
-    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(bitmap)
-    val previousBounds = Rect(bounds)
-    try {
-        setBounds(0, 0, size, size)
-        draw(canvas)
-    } finally {
-        bounds = previousBounds
-    }
-    return bitmap.asImageBitmap()
+    return runCatching {
+        drawable?.toBitmap(iconSize, iconSize)?.asImageBitmap()
+    }.getOrNull()
 }
