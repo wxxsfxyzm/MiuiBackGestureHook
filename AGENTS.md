@@ -159,6 +159,10 @@ Same-activity and input rules:
   touch band. MiuiHome must publish an explicit identity-sharing accepted-DOWN token carrying
   MotionEvent identity, display, edge, and the current SystemUI arbiter generation. SystemUI
   may start or pilfer only after the token exactly matches its pending spy-channel DOWN.
+- Do not reject a stream merely because its DOWN lies inside a visible IME. Keep Xiaomi's
+  NavigationBar left/right `systemGestures` providers at their native empty sizes; do not
+  republish edge sensitivity through its LayoutParams because MiuiHome's `GestureStubView`
+  owns the physical edge and WMS would otherwise exclude the IME before the accepted-DOWN boundary.
 - Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
   deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
   `BackPanelController` dispatch, and release-time invoke/cancel.
