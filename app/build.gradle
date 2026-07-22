@@ -1,5 +1,6 @@
 plugins {
     id "com.android.application"
+    id "org.jetbrains.kotlin.plugin.compose"
 }
 
 def gitCommitCount = providers.exec {
@@ -46,10 +47,10 @@ def hasEnvSigningConfig = [
 
 android {
     namespace "dev.codex.miuibackgesturehook"
-    compileSdk 36
+    compileSdk 37
 
     buildFeatures {
-        buildConfig true
+        compose true
     }
 
     defaultConfig {
@@ -57,7 +58,7 @@ android {
         minSdk 36
         targetSdk 36
         versionCode gitVersionCode.get()
-        versionName "0.4.3"
+        versionName "0.7.0"
     }
 
     signingConfigs {
@@ -77,6 +78,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (hasLocalSigningConfig || hasEnvSigningConfig) {
+                signingConfig signingConfigs.release
+            }
+        }
+
         release {
             minifyEnabled true
             shrinkResources true
@@ -92,4 +99,11 @@ android {
 dependencies {
     compileOnly "io.github.libxposed:api:102.0.0"
     compileOnly project(":hidden-api")
+
+    implementation "io.github.libxposed:service:102.0.0"
+    implementation "androidx.activity:activity-compose:1.13.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0"
+    implementation "top.yukonga.miuix.kmp:miuix-blur-android:0.9.3"
+    implementation "top.yukonga.miuix.kmp:miuix-icons-android:0.9.3"
+    implementation "top.yukonga.miuix.kmp:miuix-ui-android:0.9.3"
 }
