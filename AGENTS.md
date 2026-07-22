@@ -117,7 +117,9 @@ Hot-reload rules:
 
 - Preserve `autoHotReload=true`. Treat hook IDs as lifecycle keys: whenever a hook is added,
   renamed, or retired, update its normal installation, old-handle replacement mapping,
-  presence tracking, and missing-hook backfill together.
+  presence tracking, and missing-hook backfill together. Count an old hook ID as present only
+  after `replaceHook(...)` succeeds; replacement failure must leave it eligible for missing-hook
+  backfill. Track system-server process evidence independently from replacement success.
 - When Xiaomi skips `NavigationBar` creation for FSG with the gesture line hidden, attach
   `EdgeBackGestureHandler` headlessly through an exact module-owned
   `NavBarHelper.NavbarTaskbarStateUpdater`. Do not create an invisible navigation-bar window,
@@ -426,6 +428,9 @@ hidden-api/src/main/java/android/view/
 hidden-api/src/main/java/android/window/
 app/src/main/AndroidManifest.xml
 app/src/main/java/dev/codex/miuibackgesturehook/MiuiBackGestureHook.java
+app/src/main/java/dev/codex/miuibackgesturehook/ModuleApplication.kt
+app/src/main/java/dev/codex/miuibackgesturehook/PredictiveBackPreferences.java
+app/src/main/java/dev/codex/miuibackgesturehook/PredictiveBackSettingsActivity.kt
 app/src/main/resources/META-INF/xposed/module.prop
 app/src/main/resources/META-INF/xposed/java_init.list
 app/src/main/resources/META-INF/xposed/scope.list
@@ -467,7 +472,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 
 ## Development Guidelines
 
-- Prefer Java; the current scaffold is Java-only.
+- Prefer Java for hook/runtime code; keep the existing Kotlin/Compose application UI in Kotlin.
 - Use the modern LSPosed/libxposed API already declared by the project.
 - Keep hooks small and heavily logged.
 - Keep scope minimal while testing.
