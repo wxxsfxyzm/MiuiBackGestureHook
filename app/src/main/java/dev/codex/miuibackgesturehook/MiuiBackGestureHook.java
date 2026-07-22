@@ -15,7 +15,6 @@ import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.Insets;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -45,7 +44,6 @@ import android.view.SurfaceControl;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
-import android.view.WindowMetrics;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.PathInterpolator;
 import android.window.BackMotionEvent;
@@ -1067,11 +1065,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
             }
         }
-        if (SYSTEM_UI.equals(processName)
-                && !oldHookIds.contains("systemui_navigation_bar_gesture_insets")
-                && hotReloadClassLoader != null) {
-            hookNavigationBarGestureInsets(hotReloadClassLoader);
-        }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
             if (!oldHookIds.contains("systemui_navigation_bar_controller_create")) {
                 hookNavigationBarControllerCreate(hotReloadClassLoader);
@@ -1281,8 +1274,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         switch (hookId) {
             case "systemui_block_miui_gesture_line_progress":
                 return this::interceptMiuiOverviewProxyTransact;
-            case "systemui_navigation_bar_gesture_insets":
-                return this::restoreNavigationBarGestureInsets;
             case "systemui_navigation_bar_controller_create":
                 return this::reconcileAfterNavigationBarCreate;
             case "systemui_navigation_bar_controller_remove":
@@ -5585,7 +5576,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             hookNavigationBarControllerCreate(classLoader);
             hookNavigationBarControllerRemove(classLoader);
             hookNavigationBarControllerMode(classLoader);
-            hookNavigationBarGestureInsets(classLoader);
             hookShellBackAnimation(classLoader);
             hookBackAnimationSendBackEvent(classLoader);
             hookDefaultTransitionHandler(classLoader);
@@ -6743,93 +6733,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private Object onEdgeBackSetBackAnimation(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
         installBackInputDriver(chain.getThisObject(), chain.getArg(0));
-        return result;
-    }
-
-    private void hookNavigationBarGestureInsets(ClassLoader classLoader) {
-        try {
-            Class<?> navigationBarClass = Class.forName(NAVIGATION_BAR, false, classLoader);
-            Method method = navigationBarClass.getDeclaredMethod(
-                    "getBarLayoutParamsForRotation", int.class);
-            method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_gesture_insets")
-                    .intercept(this::restoreNavigationBarGestureInsets));
-            log(Log.INFO, TAG, "Hooked NavigationBar system gesture Insets restoration");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook NavigationBar gesture Insets", throwable);
-        }
-    }
-
-    private Object restoreNavigationBarGestureInsets(XposedInterface.Chain chain)
-            throws Throwable {
-        Object result = chain.proceed();
-        if (!(result instanceof WindowManager.LayoutParams)) {
-            return result;
-        }
-
-        Object navigationBar = chain.getThisObject();
-        Object edgeBackGestureHandler = readField(navigationBar, "mEdgeBackGestureHandler");
-        Object inGestureNavMode = readField(edgeBackGestureHandler, "mInGestureNavMode");
-        Object backGestureAllowed = readField(edgeBackGestureHandler,
-                "mIsBackGestureAllowed");
-        if (!Boolean.TRUE.equals(inGestureNavMode)
-                || !Boolean.TRUE.equals(backGestureAllowed)) {
-            log(Log.INFO, TAG, "Kept system gesture Insets empty"
-                    + ", gesturalMode=" + inGestureNavMode
-                    + ", backAllowed=" + backGestureAllowed);
-            return result;
-        }
-
-        Context context = (Context) readField(navigationBar, "mContext");
-        EdgeWidthSnapshot widths = readEdgeWidthSnapshot(edgeBackGestureHandler,
-                context.getResources().getDisplayMetrics().density);
-        // AOSP publishes the configured sensitivities to application Insets. Window insets
-        // extend only EdgeBackGestureHandler's own DOWN range; they do not widen providedInsets.
-        int leftWidth = widths.leftSensitivity;
-        int rightWidth = widths.rightSensitivity;
-
-        Object providers = readField(result, "providedInsets");
-        if (providers == null || !providers.getClass().isArray()) {
-            log(Log.WARN, TAG, "NavigationBar LayoutParams has no providedInsets array");
-            return result;
-        }
-
-        int restored = 0;
-        int systemGestureType = WindowInsets.Type.systemGestures();
-        for (int i = 0; i < Array.getLength(providers); i++) {
-            Object provider = Array.get(providers, i);
-            if (provider == null) {
-                continue;
-            }
-            Object type = invokeAnyMethod(provider, "getType", new Object[0]);
-            if (!(type instanceof Number)
-                    || ((Number) type).intValue() != systemGestureType) {
-                continue;
-            }
-            Object index = invokeAnyMethod(provider, "getIndex", new Object[0]);
-            if (!(index instanceof Number)) {
-                continue;
-            }
-            int providerIndex = ((Number) index).intValue();
-            Insets size;
-            if (providerIndex == 0) {
-                size = Insets.of(leftWidth, 0, 0, 0);
-            } else if (providerIndex == 1) {
-                size = Insets.of(0, 0, rightWidth, 0);
-            } else {
-                continue;
-            }
-            invokeAnyMethod(provider, "setInsetsSize", new Object[]{size});
-            invokeAnyMethod(provider, "setMinimalInsetsSizeInDisplayCutoutSafe",
-                    new Object[]{size});
-            restored++;
-        }
-        log(restored == 2 ? Log.INFO : Log.WARN, TAG,
-                "Restored NavigationBar system gesture Insets"
-                        + ", left=" + leftWidth
-                        + ", right=" + rightWidth
-                        + ", providers=" + restored);
         return result;
     }
 
@@ -21514,11 +21417,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", x=" + event.getRawX() + ", y=" + event.getRawY());
                 return false;
             }
-            if (isInImeRegion(event)) {
-                log(Log.INFO, TAG, "Ignored native back inside visible IME region"
-                        + ", x=" + event.getRawX() + ", y=" + event.getRawY());
-                return false;
-            }
             if (isInMiuiSidebarRegion(event)) {
                 log(Log.INFO, TAG, "Ignored native back inside MIUI sidebar bounds"
                         + ", x=" + event.getRawX() + ", y=" + event.getRawY());
@@ -21746,23 +21644,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             // the historical default when reflection is unavailable; secondary displays fail
             // closed instead of borrowing another display's launcher state.
             return displayId == 0 ? 0 : Integer.MIN_VALUE;
-        }
-
-        private boolean isInImeRegion(MotionEvent event) {
-            try {
-                WindowManager windowManager = context.getSystemService(WindowManager.class);
-                WindowMetrics metrics = windowManager.getCurrentWindowMetrics();
-                WindowInsets insets = metrics.getWindowInsets();
-                if (insets == null || !insets.isVisible(WindowInsets.Type.ime())) {
-                    return false;
-                }
-                Insets imeInsets = insets.getInsets(WindowInsets.Type.ime());
-                Rect bounds = metrics.getBounds();
-                return imeInsets.bottom > 0 && event.getRawY() >= bounds.bottom - imeInsets.bottom;
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to inspect IME region for native back", throwable);
-                return true;
-            }
         }
 
         private boolean isInExcludedRegion(MotionEvent event, int edge) {
