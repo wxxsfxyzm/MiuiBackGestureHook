@@ -166,18 +166,21 @@ Same-activity and input rules:
 - Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
   deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
   `BackPanelController` dispatch, and release-time invoke/cancel.
-- When system bars are hidden at `ACTION_DOWN`, continue normal AOSP/Shell back arbitration.
-  Yield only if native display policy actually shows the navigation bar transiently during that
-  same stream; cancel any module-started Shell gesture and do not also commit BACK. Do not blanket
-  turn immersive application callbacks into a two-gesture path.
-- Preserve AOSP's `SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY` distinction for the native
-  BackPanel activation haptic. Snapshot the matching display's existing `SysUiState` at
-  `ACTION_DOWN`: when bit 17 is set, keep Xiaomi's threshold haptic immediate; when it is clear or
-  unreadable, defer only the exact effect-23 activation until ownership resolves. Discard deferred
-  feedback if transient bars claim or cancel the stream, and replay it only for the exact committed
-  gesture identity. Treat a module-owned headless NavigationBar handler as unreadable because it has
-  no real system-bar behavior publisher. Do not infer eligibility from the application, edge,
-  timing, or gesture count; actual transient-bar state retains final cancellation authority.
+- Apply AOSP's bar-visibility eligibility at `ACTION_DOWN`, before BackPanel, Shell, or pilfering.
+  Snapshot the matching display's existing `SysUiState`: when `SYSUI_STATE_NAV_BAR_HIDDEN` is set
+  and `SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY` (bit 17) is clear, leave the stream
+  unclaimed for native display policy instead of starting BACK. When bit 17 is set, preserve the
+  native threshold haptic and normal AOSP/Shell arbitration. Treat an unreadable or module-owned
+  headless publisher as fail-closed while the navigation bar is hidden. Do not defer, suppress, or
+  replay BackPanel haptics, and do not infer eligibility from the application, edge, timing, or
+  gesture count.
+- If native display policy nevertheless shows the navigation bar transiently during an allowed
+  stream, cancel any module-started Shell gesture and do not also commit BACK.
+- Preserve the current window-requested status-bar and navigation-bar appearance while those
+  transient bars are shown; do not replace it with SystemUI's forced semi-transparent mode.
+  If preserving that appearance leaves NavigationBar's transition mode unchanged, explicitly
+  re-arm its existing `AutoHideController.touchAutoHide()` path; do not add a module timer or
+  manually hide Insets.
 - Preserve MiuiHome's native redirect decision for disabled, non-touchable, and application
   exclusion states: a redirected stream never reaches the processor and therefore never emits
   an accepted token. When SystemUI does not claim a stream, do not synthesize, replay, or
