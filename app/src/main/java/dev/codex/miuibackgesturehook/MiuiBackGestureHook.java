@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r37-aosp-immersive-haptic";
+            "systemui-aosp-back-0.7.0-r42-transparent-transient-auto-hide";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -195,10 +195,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             "com.miui.home.recents.util.WindowCornerRadiusUtil";
     private static final String NAVIGATION_BAR =
             "com.android.systemui.navigationbar.views.NavigationBar";
+    private static final String NAV_BAR_HELPER =
+            "com.android.systemui.navigationbar.NavBarHelper";
     private static final String NAVIGATION_BAR_CONTROLLER_IMPL =
             "com.android.systemui.navigationbar.NavigationBarControllerImpl";
     private static final String NAV_BAR_STATE_UPDATER =
             "com.android.systemui.navigationbar.NavBarHelper$NavbarTaskbarStateUpdater";
+    private static final String STATUS_BAR_APPEARANCE_LAMBDA =
+            "com.android.systemui.statusbar.data.repository."
+                    + "StatusBarModePerDisplayRepositoryImpl$statusBarAppearance$1";
     private static final String SYSTEM_UI_DEPENDENCY =
             "com.android.systemui.Dependency";
     private static final String MIUI_CONFIGS =
@@ -283,6 +288,7 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final int TYPE_CROSS_ACTIVITY = 2;
     private static final int TYPE_CROSS_TASK = 3;
     private static final int TYPE_CALLBACK = 4;
+    private static final long SYSUI_STATE_NAV_BAR_HIDDEN = 1L << 1;
     private static final long SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY =
             1L << 17;
     private static final long SYSUI_STATE_MIUI_QUICK_SETTINGS_EXPANDED = 1L << 60;
@@ -300,7 +306,6 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     private static final float PILFER_THRESHOLD_DP = 8.0f;
     private static final float TRIGGER_THRESHOLD_DP = 48.0f;
-    private static final int BACK_PANEL_ACTIVATION_HAPTIC = 23;
     private static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
     private static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
     private static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
@@ -441,7 +446,7 @@ public final class MiuiBackGestureHook extends XposedModule {
     private volatile boolean predictiveBackApplicationMetadataFailureLogged;
     private String processName;
     private boolean nativePluginDiagnosticsLogged;
-    private boolean headlessImmersiveHapticPolicyLogged;
+    private boolean headlessImmersiveGesturePolicyLogged;
     private volatile Field defaultTransitionAnimationsField;
     private volatile Field defaultTransitionAnimationSizeField;
     private volatile Field defaultTransitionAnimExecutorField;
@@ -1066,6 +1071,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
+            if (!oldHookIds.contains("systemui_navigation_bar_show_transient")) {
+                hookNavigationBarTransientAutoHide(hotReloadClassLoader);
+            }
+            if (!oldHookIds.contains("systemui_navigation_bar_transient_appearance")) {
+                hookNavigationBarTransientAppearance(hotReloadClassLoader);
+            }
+            if (!oldHookIds.contains("systemui_status_bar_transient_appearance")) {
+                hookStatusBarTransientAppearance(hotReloadClassLoader);
+            }
             if (!oldHookIds.contains("systemui_navigation_bar_controller_create")) {
                 hookNavigationBarControllerCreate(hotReloadClassLoader);
             }
@@ -1274,6 +1288,11 @@ public final class MiuiBackGestureHook extends XposedModule {
         switch (hookId) {
             case "systemui_block_miui_gesture_line_progress":
                 return this::interceptMiuiOverviewProxyTransact;
+            case "systemui_navigation_bar_transient_appearance":
+            case "systemui_status_bar_transient_appearance":
+                return this::preserveTransientBarAppearance;
+            case "systemui_navigation_bar_show_transient":
+                return this::preserveTransientBarAutoHide;
             case "systemui_navigation_bar_controller_create":
                 return this::reconcileAfterNavigationBarCreate;
             case "systemui_navigation_bar_controller_remove":
@@ -1382,7 +1401,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return this::onShellAnimationFinished;
             case "systemui_navigation_bar_view_insets":
             case "systemui_navigation_bar_window_state":
-            case "systemui_navigation_bar_show_transient":
             case "systemui_navigation_bar_abort_transient":
             case "systemui_navigation_bar_auto_hide":
             case "systemui_edge_back_task_stack_changed":
@@ -4852,30 +4870,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private static final class DeferredBackPanelHaptic {
-        final Object plugin;
-        final View view;
-        final MiuiHomeAcceptedInputToken inputIdentity;
-        final Object controller;
-        final long inputMonitorEpoch;
-        final long gestureEpoch;
-        final int edge;
-        final AtomicBoolean settled = new AtomicBoolean();
-
-        DeferredBackPanelHaptic(Object plugin, View view,
-                                MiuiHomeAcceptedInputToken inputIdentity,
-                                Object controller, long inputMonitorEpoch,
-                                long gestureEpoch, int edge) {
-            this.plugin = plugin;
-            this.view = view;
-            this.inputIdentity = inputIdentity;
-            this.controller = controller;
-            this.inputMonitorEpoch = inputMonitorEpoch;
-            this.gestureEpoch = gestureEpoch;
-            this.edge = edge;
-        }
-    }
-
     private Object restoreMiuiHomeGestureStubShow(XposedInterface.Chain chain)
             throws Throwable {
         Object result = chain.proceed();
@@ -5122,6 +5116,29 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", target=" + shortObject(argument));
                 return null;
             }
+        }
+        if (chain.getArgs().size() == 2
+                && chain.getArg(0) == null
+                && Boolean.FALSE.equals(chain.getArg(1))) {
+            Object navigationBar;
+            try {
+                navigationBar = readField(chain.getThisObject(), "mNavigationBar");
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Cannot inspect AOSP side transient-bars target", throwable);
+                return chain.proceed();
+            }
+            if (navigationBar == null) {
+                log(Log.WARN, TAG,
+                        "Cannot restore AOSP side transient bars: NavigationBar is absent");
+                return chain.proceed();
+            }
+            Object[] args = chain.getArgs().toArray();
+            args[0] = navigationBar;
+            args[1] = Boolean.TRUE;
+            log(Log.INFO, TAG, "Restored AOSP side transient-bars target"
+                    + ", target=" + shortObject(navigationBar));
+            return chain.proceed(args);
         }
         return chain.proceed();
     }
@@ -5572,6 +5589,9 @@ public final class MiuiBackGestureHook extends XposedModule {
     private void installSystemUiHooks(ClassLoader classLoader) {
         try {
             hookMiuiOverviewProxy(classLoader);
+            hookNavigationBarTransientAutoHide(classLoader);
+            hookNavigationBarTransientAppearance(classLoader);
+            hookStatusBarTransientAppearance(classLoader);
             hookEdgeBackGestureHandler(classLoader);
             hookNavigationBarControllerCreate(classLoader);
             hookNavigationBarControllerRemove(classLoader);
@@ -6071,6 +6091,109 @@ public final class MiuiBackGestureHook extends XposedModule {
             reply.writeNoException();
         }
         return Boolean.TRUE;
+    }
+
+    private void hookNavigationBarTransientAutoHide(ClassLoader classLoader) {
+        try {
+            Class<?> navigationBarClass = Class.forName(NAVIGATION_BAR, false, classLoader);
+            Method method = navigationBarClass.getDeclaredMethod(
+                    "showTransient", int.class, int.class, boolean.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("systemui_navigation_bar_show_transient")
+                    .intercept(this::preserveTransientBarAutoHide));
+            log(Log.INFO, TAG, "Hooked NavigationBar.showTransient auto-hide preservation");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook NavigationBar transient auto-hide", throwable);
+        }
+    }
+
+    private Object preserveTransientBarAutoHide(XposedInterface.Chain chain)
+            throws Throwable {
+        Object navigationBar = chain.getThisObject();
+        boolean wasTransient = false;
+        Integer modeBefore = null;
+        try {
+            wasTransient = Boolean.TRUE.equals(readField(navigationBar, "mTransientShown"));
+            Object mode = readField(navigationBar, "mTransitionMode");
+            if (mode instanceof Number) {
+                modeBefore = Integer.valueOf(((Number) mode).intValue());
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Cannot snapshot transient NavigationBar state", throwable);
+        }
+
+        Object result = chain.proceed();
+        try {
+            if (wasTransient || modeBefore == null
+                    || !Boolean.TRUE.equals(readField(navigationBar, "mTransientShown"))) {
+                return result;
+            }
+            Object modeAfter = readField(navigationBar, "mTransitionMode");
+            if (!(modeAfter instanceof Number)
+                    || ((Number) modeAfter).intValue() != modeBefore.intValue()) {
+                return result;
+            }
+            Object autoHideController = readField(navigationBar, "mAutoHideController");
+            if (autoHideController == null) {
+                log(Log.WARN, TAG,
+                        "Transparent transient NavigationBar has no AutoHideController");
+                return result;
+            }
+            invokeAnyMethod(autoHideController, "touchAutoHide", new Object[0]);
+            log(Log.INFO, TAG,
+                    "Preserved native transient-bar auto-hide with unchanged transparent mode");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to preserve transparent transient-bar auto-hide", throwable);
+        }
+        return result;
+    }
+
+    private void hookNavigationBarTransientAppearance(ClassLoader classLoader) {
+        try {
+            Class<?> helperClass = Class.forName(NAV_BAR_HELPER, false, classLoader);
+            Method method = helperClass.getDeclaredMethod(
+                    "transitionMode", int.class, boolean.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("systemui_navigation_bar_transient_appearance")
+                    .intercept(this::preserveTransientBarAppearance));
+            log(Log.INFO, TAG, "Hooked NavBarHelper.transitionMode transient appearance");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook NavBarHelper transient appearance", throwable);
+        }
+    }
+
+    private void hookStatusBarTransientAppearance(ClassLoader classLoader) {
+        try {
+            Class<?> appearanceClass = Class.forName(
+                    STATUS_BAR_APPEARANCE_LAMBDA, false, classLoader);
+            Method method = findAnyMethod(appearanceClass, "invoke", 6);
+            if (method == null) {
+                throw new NoSuchMethodException(STATUS_BAR_APPEARANCE_LAMBDA + ".invoke/6");
+            }
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("systemui_status_bar_transient_appearance")
+                    .intercept(this::preserveTransientBarAppearance));
+            log(Log.INFO, TAG, "Hooked status-bar transient appearance reducer");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook status-bar transient appearance", throwable);
+        }
+    }
+
+    private Object preserveTransientBarAppearance(XposedInterface.Chain chain)
+            throws Throwable {
+        if (!Boolean.TRUE.equals(chain.getArg(1))) {
+            return chain.proceed();
+        }
+        Object[] args = chain.getArgs().toArray();
+        args[1] = Boolean.FALSE;
+        return chain.proceed(args);
     }
 
     private void hookNavigationBarControllerCreate(ClassLoader classLoader) {
@@ -20909,8 +21032,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean launcherEditingCandidate;
         private boolean miuiHomeInputAccepted;
         private boolean pilfered;
-        private boolean immersiveBarsHiddenAtDown;
-        private boolean deferImmersivePanelHapticAtDown;
+        private boolean waitingForTransientBarsAtDown;
         private boolean arbiterAttached;
         private int activeEdge;
         private int downEventId;
@@ -21004,7 +21126,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private boolean onNativeDown(MotionEvent event) {
-            driver.onPhysicalDown();
             resetCandidate();
             int edge = edgeForDown(event);
             if (edge < 0 || !canStartBackGesture(event, edge)) {
@@ -21082,7 +21203,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown)) {
+                        launcherEditingCandidate)) {
                     resetCandidate();
                     return false;
                 }
@@ -21092,7 +21213,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
                 return false;
             }
             if (!pilfered && distance > dp(PILFER_THRESHOLD_DP)) {
@@ -21105,7 +21226,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             if (!driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
                     launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                     launcherDrawerCandidate,
-                    launcherEditingCandidate, deferImmersivePanelHapticAtDown)) {
+                    launcherEditingCandidate)) {
                 resetCandidate();
                 return false;
             }
@@ -21125,7 +21246,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         launcherOpenBreakGenerationCandidate,
                         launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown)) {
+                        launcherEditingCandidate)) {
                     log(Log.INFO, TAG, "MiuiHome accepted DOWN but SystemUI path declined"
                             + ", eventId=" + token.eventId
                             + ", edge=" + token.edge);
@@ -21201,7 +21322,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
                 cancel.recycle();
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to cancel native back candidate", throwable);
@@ -21231,19 +21352,19 @@ public final class MiuiBackGestureHook extends XposedModule {
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
             } else if (allowTrigger && pilfered) {
                 driver.handleTouch(event, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
             } else {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
                 cancel.recycle();
             }
             boolean handled = pilfered;
@@ -21252,7 +21373,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private boolean nativeTransientBarsClaimedGesture() {
-            return immersiveBarsHiddenAtDown && isNavBarShownTransiently();
+            return waitingForTransientBarsAtDown && isNavBarShownTransiently();
         }
 
         private boolean yieldToNativeTransientBars(MotionEvent event, String phase) {
@@ -21263,7 +21384,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 driver.handleTouch(cancel, activeEdge, launcherOpenBreakCandidate,
                         launcherOpenBreakGenerationCandidate, launcherShadeCandidate,
                         launcherDrawerCandidate,
-                        launcherEditingCandidate, deferImmersivePanelHapticAtDown);
+                        launcherEditingCandidate);
                 cancel.recycle();
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
@@ -21393,18 +21514,25 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", displayId=" + displayId
                         + ", edge=" + edge);
             }
-            boolean systemBarsHidden = areSystemBarsHidden();
+            Long sysUiStateFlags = readSystemUiStateFlags();
+            boolean navBarHidden = sysUiStateFlags != null
+                    ? (sysUiStateFlags.longValue() & SYSUI_STATE_NAV_BAR_HIDDEN) != 0L
+                    : isNavigationBarHidden();
             boolean navBarShownTransiently = isNavBarShownTransiently();
-            immersiveBarsHiddenAtDown = systemBarsHidden && !navBarShownTransiently;
-            Boolean allowGestureIgnoringBarVisibility = immersiveBarsHiddenAtDown
-                    ? allowsGestureIgnoringBarVisibility() : Boolean.FALSE;
-            deferImmersivePanelHapticAtDown = immersiveBarsHiddenAtDown
-                    && !Boolean.TRUE.equals(allowGestureIgnoringBarVisibility);
-            if (immersiveBarsHiddenAtDown) {
-                log(Log.INFO, TAG, "Continuing AOSP back arbitration with immersive bars hidden"
-                        + ", allowGestureIgnoringBarVisibility="
-                        + allowGestureIgnoringBarVisibility
-                        + ", deferPanelHaptic=" + deferImmersivePanelHapticAtDown
+            boolean allowGestureIgnoringBarVisibility = sysUiStateFlags != null
+                    && (sysUiStateFlags.longValue()
+                    & SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY) != 0L;
+            if (navBarHidden && !allowGestureIgnoringBarVisibility) {
+                log(Log.INFO, TAG, "Ignored native back by AOSP bar-visibility policy"
+                        + ", sysUiStateFlags=" + sysUiStateFlags
+                        + ", edge=" + edge + ", x=" + event.getRawX()
+                        + ", y=" + event.getRawY());
+                return false;
+            }
+            waitingForTransientBarsAtDown = navBarHidden && !navBarShownTransiently;
+            if (navBarHidden) {
+                log(Log.INFO, TAG, "AOSP bar-visibility policy allows immersive back"
+                        + ", sysUiStateFlags=" + sysUiStateFlags
                         + ", edge=" + edge + ", x=" + event.getRawX()
                         + ", y=" + event.getRawY());
             }
@@ -21503,15 +21631,15 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private Boolean allowsGestureIgnoringBarVisibility() {
+        private Long readSystemUiStateFlags() {
             boolean headlessPublisher;
             boolean logHeadlessPublisher = false;
             synchronized (headlessNavBarLifecycleLock) {
                 HeadlessNavBarLease lease = headlessNavBarLease;
                 headlessPublisher = lease != null
                         && lease.edgeBackGestureHandler == edgeBackGestureHandler;
-                if (headlessPublisher && !headlessImmersiveHapticPolicyLogged) {
-                    headlessImmersiveHapticPolicyLogged = true;
+                if (headlessPublisher && !headlessImmersiveGesturePolicyLogged) {
+                    headlessImmersiveGesturePolicyLogged = true;
                     logHeadlessPublisher = true;
                 }
             }
@@ -21519,7 +21647,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (logHeadlessPublisher) {
                     log(Log.INFO, TAG,
                             "Headless NavigationBar has no system-bar behavior publisher; "
-                                    + "deferring immersive panel haptic");
+                                    + "using fail-closed AOSP immersive policy");
                 }
                 return null;
             }
@@ -21533,19 +21661,16 @@ public final class MiuiBackGestureHook extends XposedModule {
                         || ((Number) stateDisplayId).intValue() != displayId
                         || !(flagsObject instanceof Number)) {
                     log(Log.WARN, TAG,
-                            "Cannot bind immersive haptic policy to current SysUiState"
+                            "Cannot bind AOSP gesture policy to current SysUiState"
                                     + ", stateDisplayId=" + stateDisplayId
                                     + ", monitorDisplayId=" + displayId
                                     + ", flags=" + flagsObject);
                     return null;
                 }
-                long flags = ((Number) flagsObject).longValue();
-                return Boolean.valueOf((flags
-                        & SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY) != 0L);
+                return Long.valueOf(((Number) flagsObject).longValue());
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
-                        "Failed to inspect AOSP immersive gesture visibility policy; "
-                                + "deferring native panel haptic",
+                        "Failed to inspect AOSP immersive gesture visibility policy",
                         throwable);
                 return null;
             }
@@ -21765,8 +21890,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherEditingCandidate = false;
             miuiHomeInputAccepted = false;
             pilfered = false;
-            immersiveBarsHiddenAtDown = false;
-            deferImmersivePanelHapticAtDown = false;
+            waitingForTransientBarsAtDown = false;
             activeEdge = EDGE_LEFT;
             downEventId = 0;
             downDeviceId = Integer.MIN_VALUE;
@@ -21777,15 +21901,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             downTime = Long.MIN_VALUE;
         }
 
-        private boolean areSystemBarsHidden() {
+        private boolean isNavigationBarHidden() {
             try {
                 WindowInsets insets = context.getSystemService(WindowManager.class)
                         .getCurrentWindowMetrics().getWindowInsets();
                 return insets == null
-                        || (!insets.isVisible(WindowInsets.Type.statusBars())
-                        && !insets.isVisible(WindowInsets.Type.navigationBars()));
+                        || !insets.isVisible(WindowInsets.Type.navigationBars());
             } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to inspect foreground system bars", throwable);
+                log(Log.WARN, TAG, "Failed to inspect navigation-bar visibility", throwable);
                 return true;
             }
         }
@@ -21843,13 +21966,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean launcherDrawerGesture;
         private boolean launcherEditingGesture;
         private boolean recentsVisualOnlyGesture;
-        private boolean deferNativePanelHaptic;
-        private boolean nativePanelHapticDeferralUnavailable;
-        private DeferredBackPanelHaptic deferredBackPanelHaptic;
         private MiuiHomeAcceptedInputToken acceptedInputIdentity;
-        private final Handler mainHandler = new Handler(Looper.getMainLooper());
         private final AtomicLong inputMonitorEpoch = new AtomicLong();
-        private volatile long physicalGestureEpoch;
         private volatile boolean inputMonitorAttached;
         private int activeEdge;
         private float downX;
@@ -21881,10 +21999,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        void onPhysicalDown() {
-            physicalGestureEpoch++;
-        }
-
         void bindAcceptedInput(MiuiHomeAcceptedInputToken token) {
             if (gestureActive && token != null
                     && token.generation
@@ -21898,16 +22012,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     long launcherOpenBreakGenerationCandidate,
                                     boolean launcherShadeCandidate,
                                     boolean launcherDrawerCandidate,
-                                    boolean launcherEditingCandidate,
-                                    boolean deferPanelHapticAtDown) {
+                                    boolean launcherEditingCandidate) {
             try {
                 switch (event.getActionMasked()) {
                     case MotionEvent.ACTION_DOWN:
                         return onDown(event, edge, launcherOpenBreakCandidate,
                                 launcherOpenBreakGenerationCandidate,
                                 launcherShadeCandidate,
-                                launcherDrawerCandidate, launcherEditingCandidate,
-                                deferPanelHapticAtDown);
+                                launcherDrawerCandidate, launcherEditingCandidate);
                     case MotionEvent.ACTION_MOVE:
                         return onMove(event);
                     case MotionEvent.ACTION_UP:
@@ -21937,8 +22049,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                long launcherOpenBreakGenerationCandidate,
                                boolean launcherShadeCandidate,
                                boolean launcherDrawerCandidate,
-                               boolean launcherEditingCandidate,
-                               boolean deferPanelHapticAtDown) throws Exception {
+                               boolean launcherEditingCandidate) throws Exception {
             clearLegacyBackGuard("newPhysicalGesture");
             gestureActive = true;
             shellGestureStarted = false;
@@ -21959,11 +22070,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherDrawerGesture = launcherDrawerCandidate;
             launcherEditingGesture = launcherEditingCandidate;
             recentsVisualOnlyGesture = false;
-            settleDeferredBackPanelHaptic(
-                    deferredBackPanelHaptic, false, "newPhysicalGesture");
-            deferNativePanelHaptic = deferPanelHapticAtDown;
-            nativePanelHapticDeferralUnavailable = false;
-            deferredBackPanelHaptic = null;
             thresholdCrossed = false;
             triggerBack = false;
             activeEdge = edge;
@@ -22156,8 +22262,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             triggerBack = trigger;
             MiuiHomeAcceptedInputToken releaseInputIdentity =
                     acceptedInputIdentity;
-            DeferredBackPanelHaptic releaseHaptic =
-                    takeDeferredBackPanelHaptic(releaseInputIdentity);
             Object releaseController = aospNullNavigationGesture
                     && aospNullNavigationController != null
                     ? aospNullNavigationController : controller;
@@ -22168,11 +22272,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
                     launcherEditingGesture, aospNullNavigationGesture,
                     aospNullNavigationInputEpoch,
-                    releaseInputIdentity, releaseHaptic);
-            if (!queued) {
-                settleDeferredBackPanelHaptic(
-                        releaseHaptic, false, "shellReleaseQueueFailed");
-            }
+                    releaseInputIdentity);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "SystemUI gesture driver release queued=" + queued
                     + ", requestedTrigger=" + trigger
@@ -22209,9 +22309,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // DefaultTransitionImpl.mergeAnimation() reverses the running OPEN animators.
                 dispatchLegacyInterruptBack();
             }
-            settleDeferredBackPanelHaptic(
-                    takeDeferredBackPanelHaptic(acceptedInputIdentity),
-                    trigger, trigger ? "legacyOpenInterrupt" : "legacyOpenCancelled");
             log(Log.INFO, TAG, "Finished MIUI in-app interrupt gesture"
                     + ", fixedThresholdEligible=" + fixedThresholdEligible
                     + ", nativePanelTrigger=" + nativePanelTrigger
@@ -22231,7 +22328,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 inputMonitorAttached = false;
                 inputMonitorEpoch.incrementAndGet();
             }
-            physicalGestureEpoch++;
             if (pendingLauncherOpenBreakAttemptId != 0L) {
                 decrementLauncherOpenBreakCommandsInFlight();
             }
@@ -22280,9 +22376,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                             LAUNCHER_OPEN_BREAK_RESULT_REJECTED, "sendException");
                 }
             }
-            settleDeferredBackPanelHaptic(
-                    takeDeferredBackPanelHaptic(acceptedInputIdentity),
-                    trigger, trigger ? "launcherOpenBreak" : "launcherOpenCancelled");
             log(Log.INFO, TAG, "Finished MiuiHome launcher OPEN break gesture"
                     + ", trigger=" + trigger
                     + ", generation=" + launcherOpenBreakGeneration
@@ -22568,7 +22661,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     rejectedController,
                     downX, downY, 0.0f, false, false, activeEdge,
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
-                    launcherEditingGesture, false, 0L, null, null);
+                    launcherEditingGesture, false, 0L, null);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "Rejected Shell navigation cancellation queued=" + queued
                             + ", requestedTrigger=false"
@@ -22610,101 +22703,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && inputIdentity.edge == edge;
         }
 
-        private DeferredBackPanelHaptic takeDeferredBackPanelHaptic(
-                MiuiHomeAcceptedInputToken expectedInputIdentity) {
-            DeferredBackPanelHaptic deferred = deferredBackPanelHaptic;
-            deferredBackPanelHaptic = null;
-            if (deferred != null
-                    && deferred.inputIdentity != expectedInputIdentity) {
-                settleDeferredBackPanelHaptic(
-                        deferred, false, "acceptedInputChanged");
-                return null;
-            }
-            return deferred;
-        }
-
-        private void settleDeferredBackPanelHaptic(
-                DeferredBackPanelHaptic deferred, boolean committed,
-                String reason) {
-            if (deferred == null
-                    || !deferred.settled.compareAndSet(false, true)) {
-                return;
-            }
-            if (!committed) {
-                log(Log.INFO, TAG, "Discarded deferred immersive BackPanel haptic"
-                        + ", reason=" + reason
-                        + ", eventId=" + deferred.inputIdentity.eventId
-                        + ", downTime=" + deferred.inputIdentity.downTime
-                        + ", edge=" + deferred.edge);
-                return;
-            }
-            Runnable replay = () -> replayDeferredBackPanelHaptic(deferred, reason);
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                replay.run();
-            } else if (!mainHandler.post(replay)) {
-                log(Log.WARN, TAG, "Failed to post deferred immersive BackPanel haptic"
-                        + ", reason=" + reason
-                        + ", eventId=" + deferred.inputIdentity.eventId
-                        + ", edge=" + deferred.edge);
-            }
-        }
-
-        private void replayDeferredBackPanelHaptic(
-                DeferredBackPanelHaptic deferred, String reason) {
-            try {
-                boolean currentIdentity;
-                boolean currentGesture;
-                synchronized (backInputLifecycleLock) {
-                    currentIdentity = isCurrentAcceptedInputIdentity(
-                            deferred.inputIdentity, deferred.edge,
-                            deferred.controller, deferred.inputMonitorEpoch);
-                }
-                currentGesture = deferred.gestureEpoch == physicalGestureEpoch;
-                Object currentPlugin = readField(
-                        edgeBackGestureHandler, "mEdgeBackPlugin");
-                Object currentView = currentPlugin == null ? null
-                        : readField(currentPlugin, "mView");
-                boolean transientBarsVisible = Boolean.TRUE.equals(readField(
-                        edgeBackGestureHandler, "mIsNavBarShownTransiently"));
-                if (!currentIdentity || !currentGesture
-                        || currentPlugin != deferred.plugin
-                        || currentView != deferred.view
-                        || transientBarsVisible
-                        || !deferred.view.isAttachedToWindow()
-                        || !deferred.view.isHapticFeedbackEnabled()) {
-                    log(Log.INFO, TAG, "Dropped stale deferred immersive BackPanel haptic"
-                            + ", reason=" + reason
-                            + ", currentInput=" + currentIdentity
-                            + ", currentGesture=" + currentGesture
-                            + ", currentPlugin=" + (currentPlugin == deferred.plugin)
-                            + ", currentView=" + (currentView == deferred.view)
-                            + ", transientBarsVisible=" + transientBarsVisible
-                            + ", attached=" + deferred.view.isAttachedToWindow()
-                            + ", hapticEnabled="
-                            + deferred.view.isHapticFeedbackEnabled()
-                            + ", eventId=" + deferred.inputIdentity.eventId
-                            + ", edge=" + deferred.edge);
-                    return;
-                }
-                boolean performed = deferred.view.performHapticFeedback(
-                        BACK_PANEL_ACTIVATION_HAPTIC);
-                log(performed ? Log.INFO : Log.WARN, TAG,
-                        "Replayed committed immersive BackPanel haptic"
-                                + ", performed=" + performed
-                                + ", reason=" + reason
-                                + ", eventId=" + deferred.inputIdentity.eventId
-                                + ", downTime=" + deferred.inputIdentity.downTime
-                                + ", edge=" + deferred.edge);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG,
-                        "Failed to replay deferred immersive BackPanel haptic",
-                        throwable);
-            }
-        }
-
         private void clearLocalGestureState() {
-            DeferredBackPanelHaptic abandonedHaptic = deferredBackPanelHaptic;
-            deferredBackPanelHaptic = null;
             gestureActive = false;
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
@@ -22722,13 +22721,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             launcherDrawerGesture = false;
             launcherEditingGesture = false;
             recentsVisualOnlyGesture = false;
-            deferNativePanelHaptic = false;
-            nativePanelHapticDeferralUnavailable = false;
             acceptedInputIdentity = null;
             thresholdCrossed = false;
             triggerBack = false;
-            settleDeferredBackPanelHaptic(
-                    abandonedHaptic, false, "localGestureCleared");
         }
 
         private void cancelLocalGesture(MotionEvent event, String reason) {
@@ -22786,8 +22781,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                        boolean aospNullFallback,
                                                        long aospNullInputEpoch,
                                                        MiuiHomeAcceptedInputToken
-                                                               inputIdentity,
-                                                       DeferredBackPanelHaptic releaseHaptic) {
+                                                               inputIdentity) {
             try {
                 Object shellExecutor = readField(releaseController, "mShellExecutor");
                 if (!(shellExecutor instanceof Executor)) {
@@ -22798,8 +22792,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         releaseController, rawX, rawY, releaseDistance,
                         dispatchFinalProgress, requestedTrigger, releaseEdge,
                         recentsCallback, shadeCallback, drawerCallback, editingCallback,
-                        aospNullFallback, aospNullInputEpoch, inputIdentity,
-                        releaseHaptic));
+                        aospNullFallback, aospNullInputEpoch, inputIdentity));
                 return true;
             } catch (Throwable throwable) {
                 // A release must never fall back to mutating controller/tracker state from
@@ -22823,8 +22816,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                   boolean aospNullFallback,
                                                   long aospNullInputEpoch,
                                                   MiuiHomeAcceptedInputToken
-                                                          inputIdentity,
-                                                  DeferredBackPanelHaptic releaseHaptic) {
+                                                          inputIdentity) {
             Object tracker = null;
             try {
                 tracker = invokeAnyMethod(releaseController,
@@ -22833,8 +22825,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     applyProgressThresholds(tracker);
                     ((BackTouchTracker) tracker).update(rawX, rawY);
                 } else {
-                    settleDeferredBackPanelHaptic(
-                            releaseHaptic, false, "shellTrackerMissing");
                     finishShellReleaseWithoutTracker(releaseController,
                             recentsCallback, shadeCallback, drawerCallback, editingCallback);
                     return;
@@ -22854,8 +22844,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 tracker = invokeAnyMethod(releaseController,
                         "getActiveTracker", new Object[0]);
                 if (tracker == null) {
-                    settleDeferredBackPanelHaptic(
-                            releaseHaptic, false, "shellTrackerLost");
                     finishShellReleaseWithoutTracker(releaseController,
                             recentsCallback, shadeCallback, drawerCallback, editingCallback);
                     return;
@@ -22867,10 +22855,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", nativeTriggerBeforeThresholdVeto="
                         + nativeTriggerBeforeThresholdVeto
                         + ", actualTrigger=" + actualTrigger);
-                if (!actualTrigger) {
-                    settleDeferredBackPanelHaptic(
-                            releaseHaptic, false, "shellTriggerCancelled");
-                }
                 if (dispatchFinalProgress && !aospNullFallback) {
                     dispatchExplicitProgressOnShell(releaseController, tracker,
                             releaseDistance);
@@ -22880,13 +22864,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 BackNavigationInfo info = infoObject instanceof BackNavigationInfo
                         ? (BackNavigationInfo) infoObject : null;
                 if (info == null) {
-                    boolean committed = finishNullNavigationOnShellExecutor(
+                    finishNullNavigationOnShellExecutor(
                             releaseController, tracker, requestedTrigger,
                             actualTrigger, releaseEdge, aospNullFallback,
                             aospNullInputEpoch, inputIdentity);
-                    settleDeferredBackPanelHaptic(releaseHaptic, committed,
-                            committed ? "aospNullFallbackCommitted"
-                                    : "nullNavigationCancelled");
                     return;
                 }
                 int focusedTaskId = -1;
@@ -22910,8 +22891,6 @@ public final class MiuiBackGestureHook extends XposedModule {
 
                 if (Boolean.TRUE.equals(readField(releaseController,
                         "mPostCommitAnimationInProgress"))) {
-                    settleDeferredBackPanelHaptic(
-                            releaseHaptic, false, "shellPostCommitAlreadyRunning");
                     log(Log.WARN, TAG, "Shell release found an existing post-commit animation"
                             + ", actualTrigger=" + actualTrigger
                             + ", edge=" + releaseEdge);
@@ -22955,8 +22934,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     invokeAnyMethod(releaseController, "invokeOrCancelBack",
                             new Object[]{tracker});
                     ((BackTouchTracker) tracker).reset();
-                    settleDeferredBackPanelHaptic(
-                            releaseHaptic, actualTrigger, "shellDirectCallback");
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             "direct-callback", releaseEdge,
                             recentsCallback, shadeCallback, drawerCallback, editingCallback);
@@ -22969,9 +22946,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     invokeAnyMethod(releaseController, "invokeOrCancelBack",
                             new Object[]{tracker});
                     ((BackTouchTracker) tracker).reset();
-                    settleDeferredBackPanelHaptic(releaseHaptic, actualTrigger,
-                            runnerState == REMOTE_RUNNER_MISSING
-                                    ? "shellRunnerMissing" : "shellRunnerCancelled");
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             runnerState == REMOTE_RUNNER_MISSING
                                     ? "runner-missing" : "runner-cancelled",
@@ -22982,9 +22956,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (runnerState == REMOTE_RUNNER_WAITING
                         || runnerState == REMOTE_RUNNER_UNKNOWN) {
                     scheduleShellAnimationTimeout(releaseController);
-                    settleDeferredBackPanelHaptic(releaseHaptic, actualTrigger,
-                            runnerState == REMOTE_RUNNER_WAITING
-                                    ? "shellRunnerWaiting" : "shellRunnerUnknown");
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             runnerState == REMOTE_RUNNER_WAITING
                                     ? "runner-waiting" : "runner-unknown",
@@ -22997,21 +22968,17 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 invokeAnyMethod(releaseController,
                         "startPostCommitAnimation", new Object[0]);
-                settleDeferredBackPanelHaptic(
-                        releaseHaptic, actualTrigger, "shellPostCommit");
                 logShellReleaseResult(info, requestedTrigger, actualTrigger,
                         "post-commit", releaseEdge,
                         recentsCallback, shadeCallback, drawerCallback, editingCallback);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Complete Shell release transaction failed; cancelling",
                         throwable);
-                settleDeferredBackPanelHaptic(
-                        releaseHaptic, false, "shellReleaseException");
                 cancelFailedShellRelease(releaseController, tracker);
             }
         }
 
-        private boolean finishNullNavigationOnShellExecutor(
+        private void finishNullNavigationOnShellExecutor(
                 Object releaseController, Object tracker,
                 boolean requestedTrigger, boolean actualTrigger,
                 int releaseEdge, boolean aospNullFallback,
@@ -23043,7 +23010,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + authenticatedFallback
                                     + ", actualTrigger=" + actualTrigger
                                     + ", edge=" + releaseEdge);
-                    return false;
+                    return;
                 }
                 ((BackTouchTracker) tracker).reset();
                 if (commitLegacyBack) {
@@ -23062,7 +23029,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + (commitLegacyBack ? "-1" : "unchanged")
                             + ", legacyBackCommitted=" + commitLegacyBack
                             + ", edge=" + releaseEdge);
-            return commitLegacyBack;
         }
 
         private void prepareReturnHomeCancelTransitionCleanup(
@@ -23493,10 +23459,6 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private boolean dispatchToEdgePlugin(MotionEvent event, int edge) {
             MotionEvent screenEvent = null;
-            View hapticView = null;
-            boolean restoreHapticEnabled = false;
-            boolean hapticSuppressionApplied = false;
-            String panelStateBefore = null;
             try {
                 Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
                 if (plugin == null) {
@@ -23509,60 +23471,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 invokeMethod(plugin, "setIsLeftPanel",
                         new Class<?>[]{boolean.class},
                         new Object[]{Boolean.valueOf(edge == EDGE_LEFT)});
-                // Keep the native state machine on the original event timeline. Only its
-                // synchronous View haptic is held while transient-bar ownership is unresolved.
-                if (deferNativePanelHaptic
-                        && !nativePanelHapticDeferralUnavailable) {
-                    try {
-                        panelStateBefore = readNativePanelState(plugin);
-                        Object viewObject = readField(plugin, "mView");
-                        if (panelStateBefore == null || !(viewObject instanceof View)) {
-                            throw new IllegalStateException("state=" + panelStateBefore
-                                    + ", view=" + shortObject(viewObject));
-                        }
-                        hapticView = (View) viewObject;
-                        // ACTIVE -> INACTIVE uses Xiaomi's distinct deactivation feedback.
-                        // ACTIVE -> FLUNG does not emit effect 23, so neither needs suppression.
-                        restoreHapticEnabled = !"ACTIVE".equals(panelStateBefore)
-                                && hapticView.isHapticFeedbackEnabled();
-                        if (restoreHapticEnabled) {
-                            hapticView.setHapticFeedbackEnabled(false);
-                            hapticSuppressionApplied = true;
-                        }
-                    } catch (Throwable throwable) {
-                        nativePanelHapticDeferralUnavailable = true;
-                        log(Log.WARN, TAG,
-                                "Cannot defer immersive BackPanel haptic; preserving native "
-                                        + "feedback"
-                                        + ", edge=" + edge,
-                                throwable);
-                    }
-                }
                 screenEvent = MotionEvent.obtain(event);
                 screenEvent.setLocation(event.getRawX(), event.getRawY());
                 invokeMethod(plugin, "onMotionEvent",
                         new Class<?>[]{MotionEvent.class}, new Object[]{screenEvent});
-                if (hapticSuppressionApplied) {
-                    try {
-                        String panelStateAfter = readNativePanelState(plugin);
-                        if (nativePanelEmittedActivationHaptic(
-                                panelStateBefore, panelStateAfter)) {
-                            rememberDeferredBackPanelHaptic(plugin, hapticView,
-                                    panelStateBefore, panelStateAfter);
-                        } else if (panelStateAfter == null) {
-                            throw new IllegalStateException(
-                                    "stateAfter unavailable, stateBefore="
-                                            + panelStateBefore);
-                        }
-                    } catch (Throwable throwable) {
-                        nativePanelHapticDeferralUnavailable = true;
-                        log(Log.WARN, TAG,
-                                "Cannot identify deferred immersive BackPanel haptic result; "
-                                        + "future events preserve native feedback"
-                                        + ", edge=" + edge,
-                                throwable);
-                    }
-                }
                 return true;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to dispatch event to NavigationEdgeBackPlugin",
@@ -23572,15 +23484,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (screenEvent != null) {
                     screenEvent.recycle();
                 }
-                if (restoreHapticEnabled && hapticView != null) {
-                    try {
-                        hapticView.setHapticFeedbackEnabled(true);
-                    } catch (Throwable throwable) {
-                        log(Log.ERROR, TAG,
-                                "Failed to restore native BackPanel haptic state",
-                                throwable);
-                    }
-                }
             }
         }
 
@@ -23588,17 +23491,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             try {
                 Object plugin = readField(
                         edgeBackGestureHandler, "mEdgeBackPlugin");
-                return readNativePanelState(plugin);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG,
-                        "Failed to read native BackPanelController state",
-                        throwable);
-                return null;
-            }
-        }
-
-        private String readNativePanelState(Object plugin) {
-            try {
                 Object state = plugin == null ? null
                         : readField(plugin, "currentState");
                 return state instanceof Enum<?>
@@ -23609,57 +23501,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                         throwable);
                 return null;
             }
-        }
-
-        private boolean nativePanelEmittedActivationHaptic(
-                String stateBefore, String stateAfter) {
-            return !"ACTIVE".equals(stateBefore)
-                    && ("ACTIVE".equals(stateAfter)
-                    || "FLUNG".equals(stateAfter));
-        }
-
-        private void rememberDeferredBackPanelHaptic(
-                Object plugin, View view,
-                String stateBefore, String stateAfter) {
-            MiuiHomeAcceptedInputToken inputIdentity = acceptedInputIdentity;
-            Object hapticController;
-            long hapticInputEpoch;
-            boolean currentIdentity;
-            synchronized (backInputLifecycleLock) {
-                hapticController = controller;
-                hapticInputEpoch = inputMonitorEpoch.get();
-                currentIdentity = isCurrentAcceptedInputIdentity(
-                        inputIdentity, activeEdge, hapticController,
-                        hapticInputEpoch);
-            }
-            if (!currentIdentity) {
-                log(Log.WARN, TAG,
-                        "Suppressed immersive BackPanel haptic without a current input identity"
-                                + ", stateBefore=" + stateBefore
-                                + ", stateAfter=" + stateAfter
-                                + ", input=" + shortObject(inputIdentity)
-                                + ", edge=" + activeEdge);
-                return;
-            }
-            DeferredBackPanelHaptic existing = deferredBackPanelHaptic;
-            if (existing != null && existing.plugin == plugin
-                    && existing.view == view
-                    && existing.inputIdentity == inputIdentity) {
-                return;
-            }
-            if (existing != null) {
-                settleDeferredBackPanelHaptic(
-                        existing, false, "nativePanelIdentityChanged");
-            }
-            deferredBackPanelHaptic = new DeferredBackPanelHaptic(
-                    plugin, view, inputIdentity, hapticController,
-                    hapticInputEpoch, physicalGestureEpoch, activeEdge);
-            log(Log.INFO, TAG, "Deferred immersive BackPanel activation haptic"
-                    + ", stateBefore=" + stateBefore
-                    + ", stateAfter=" + stateAfter
-                    + ", eventId=" + inputIdentity.eventId
-                    + ", downTime=" + inputIdentity.downTime
-                    + ", edge=" + activeEdge);
         }
 
         private Boolean resolveNativePanelReleaseTrigger(
