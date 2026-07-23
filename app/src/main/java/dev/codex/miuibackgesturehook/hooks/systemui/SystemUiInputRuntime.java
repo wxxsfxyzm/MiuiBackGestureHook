@@ -93,6 +93,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
 
+    protected boolean isOpenEndHandoffCurrent(long handoffEpoch) {
+        return handoffEpoch != 0L
+                && openSnapshotLifecycleEpoch.get() == handoffEpoch
+                && runningOpenTransitions.isEmpty();
+    }
+
     protected NativeBackInputMonitor createNativeBackInputMonitor(Context context,
                                                                 Object edgeBackGestureHandler, Object controller, Object backAnimationImpl)
             throws Exception {
@@ -1529,36 +1535,78 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             launcherOpenBreakGesture = false;
             launcherOpenBreakGeneration = 0L;
             launcherOpenBreakAttemptId = 0L;
+            handoffEndedOpenToShell("launcher OPEN",
+                    ", generation=" + generation, 0L);
+        }
+
+        void onInAppOpenTransitionEnded(
+                OpenTransitionSnapshot snapshot, long handoffEpoch) {
+            if (!gestureActive || gestureSuppressed
+                    || !legacyInterruptGesture
+                    || snapshot == null
+                    || legacyRunningOpenInfo != snapshot.transitionInfo
+                    || shellGestureStarted
+                    || !thresholdCrossed
+                    || !isOpenEndHandoffCurrent(handoffEpoch)
+                    || !isShellOwnerCurrent(gestureOwner)
+                    || !isCurrentAcceptedInputIdentity(
+                    acceptedInputIdentity, activeEdge, gestureOwner.controller,
+                    gestureOwner.inputEpoch)) {
+                return;
+            }
+            handoffEndedOpenToShell("in-app Activity OPEN",
+                    ", info=" + shortObject(snapshot.transitionInfo), handoffEpoch);
+        }
+
+        protected void handoffEndedOpenToShell(
+                String openDescription, String identityDescription,
+                long openHandoffEpoch) {
             if (!thresholdCrossed) {
                 shellGestureStartDeferred = true;
                 log(Log.INFO, TAG,
-                        "Deferred launcher OPEN-to-Shell handoff until 8dp"
-                                + ", generation=" + generation
+                        "Deferred " + openDescription + "-to-Shell handoff until 8dp"
+                                + identityDescription
                                 + ", edge=" + activeEdge);
+                return;
+            }
+            if (openHandoffEpoch != 0L
+                    && !isOpenEndHandoffCurrent(openHandoffEpoch)) {
                 return;
             }
             if (!isShellReadyForGesture()) {
                 log(Log.WARN, TAG,
-                        "Suppressed ended launcher OPEN handoff while Shell was busy"
-                                + ", generation=" + generation
+                        "Suppressed ended " + openDescription
+                                + " handoff while Shell was busy"
+                                + identityDescription
                                 + ", state=" + describeShellState());
+                return;
+            }
+            if (openHandoffEpoch != 0L
+                    && !isOpenEndHandoffCurrent(openHandoffEpoch)) {
                 return;
             }
             try {
                 float distance = activeEdge == EDGE_LEFT
                         ? lastX - downX : downX - lastX;
-                if (!startShellGesture(gestureOwner, lastX, lastY)) {
+                if (openHandoffEpoch != 0L) {
+                    legacyInterruptGesture = false;
+                    legacyRunningOpenInfo = null;
+                }
+                if (!startShellGesture(
+                        gestureOwner, lastX, lastY, openHandoffEpoch)) {
                     log(Log.WARN, TAG,
-                            "Suppressed ended launcher OPEN handoff after Shell rejected navigation"
-                                    + ", generation=" + generation);
+                            "Suppressed ended " + openDescription
+                                    + " handoff after Shell rejected navigation"
+                                    + identityDescription);
                     return;
                 }
                 ShellGestureSession session = activeShellSession;
                 log(Log.INFO, TAG,
                         (legacyInterruptGesture
-                                ? "Handed ended launcher OPEN gesture to Xiaomi OPEN interruption"
-                                : "Handed ended launcher OPEN gesture to Shell")
-                                + ", generation=" + generation
+                                ? "Handed ended " + openDescription
+                                + " gesture to Xiaomi OPEN interruption"
+                                : "Handed ended " + openDescription + " gesture to Shell")
+                                + identityDescription
                                 + ", distance=" + distance
                                 + ", legacyInterrupt=" + legacyInterruptGesture
                                 + ", aospNullNavigation="
@@ -1569,8 +1617,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                 + (session == null ? 0L : session.id));
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG,
-                        "Failed launcher OPEN-to-Shell handoff"
-                                + ", generation=" + generation,
+                        "Failed " + openDescription + "-to-Shell handoff"
+                                + identityDescription,
                         throwable);
             }
         }
@@ -1833,12 +1881,16 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         protected boolean startShellGesture() throws Exception {
-            return startShellGesture(null, 0.0f, 0.0f);
+            return startShellGesture(null, 0.0f, 0.0f, 0L);
         }
 
         protected boolean startShellGesture(
-                ShellOwner progressOwner, float progressX, float progressY)
-                throws Exception {
+                ShellOwner progressOwner, float progressX, float progressY,
+                long openHandoffEpoch) throws Exception {
+            if (openHandoffEpoch != 0L
+                    && !isOpenEndHandoffCurrent(openHandoffEpoch)) {
+                return false;
+            }
             // A running Xiaomi OPEN transition is the native interruption source. Prefer it
             // even when system_server can already return a valid predictive-back navigation;
             // otherwise Shell starts a new cross-activity animation and misses reverse().
@@ -1912,6 +1964,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     ensureAospBackAnimations(owner.controller,
                             "gestureStartOwner");
                     if (abandoned.get()) {
+                        return;
+                    }
+                    if (openHandoffEpoch != 0L
+                            && !isOpenEndHandoffCurrent(openHandoffEpoch)) {
+                        startResult.set(new ShellStartSnapshot(
+                                false, false, "stale-ended-open-handoff",
+                                null, null, false, null));
                         return;
                     }
                     startInvoked = true;

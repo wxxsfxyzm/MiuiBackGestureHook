@@ -200,6 +200,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         if (!(type instanceof Number) || ((Number) type).intValue() != 1) {
             return;
         }
+        openSnapshotLifecycleEpoch.incrementAndGet();
         Object animationsObject = defaultTransitionAnimationsField.get(handler);
         Object animationSizeObject = defaultTransitionAnimationSizeField.get(handler);
         Object executorObject = defaultTransitionAnimExecutorField.get(handler);
@@ -303,9 +304,15 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
     protected void invalidateOpenTransitionSnapshot(OpenTransitionSnapshot snapshot,
                                                   String reason) {
-        if (snapshot == null
-                || snapshot.state.getAndSet(OPEN_SNAPSHOT_INVALID)
-                == OPEN_SNAPSHOT_INVALID) {
+        if (snapshot == null) {
+            return;
+        }
+        boolean normalEnd = "end".equals(reason);
+        if (!normalEnd) {
+            openSnapshotLifecycleEpoch.incrementAndGet();
+        }
+        int previousState = snapshot.state.getAndSet(OPEN_SNAPSHOT_INVALID);
+        if (previousState == OPEN_SNAPSHOT_INVALID) {
             return;
         }
         runningOpenTransitions.remove(snapshot.token, snapshot);
@@ -321,6 +328,18 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         log(Log.INFO, TAG, "Invalidated Xiaomi OPEN transition snapshot"
                 + ", reason=" + reason
                 + ", animatorCount=" + snapshot.animators.length);
+        if (previousState == OPEN_SNAPSHOT_ACTIVE && normalEnd) {
+            long handoffEpoch = openSnapshotLifecycleEpoch.incrementAndGet();
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (!isOpenEndHandoffCurrent(handoffEpoch)) {
+                    return;
+                }
+                for (NativeBackInputMonitor monitor
+                        : new ArrayList<>(nativeInputMonitors.values())) {
+                    monitor.driver.onInAppOpenTransitionEnded(snapshot, handoffEpoch);
+                }
+            });
+        }
     }
 
     protected void removeOpenTransitionListeners(OpenTransitionSnapshot snapshot) {
