@@ -169,11 +169,16 @@ Same-activity and input rules:
 - Apply AOSP's bar-visibility eligibility at `ACTION_DOWN`, before BackPanel, Shell, or pilfering.
   Snapshot the matching display's existing `SysUiState`: when `SYSUI_STATE_NAV_BAR_HIDDEN` is set
   and `SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY` (bit 17) is clear, leave the stream
-  unclaimed for native display policy instead of starting BACK. When bit 17 is set, preserve the
-  native threshold haptic and normal AOSP/Shell arbitration. Treat an unreadable or module-owned
-  headless publisher as fail-closed while the navigation bar is hidden. Do not defer, suppress, or
-  replay BackPanel haptics, and do not infer eligibility from the application, edge, timing, or
-  gesture count.
+  unclaimed for native display policy while a real NavigationBar or Taskbar owns transient-bar
+  behavior. When the exact current module-owned headless lease proves that Xiaomi intentionally
+  omitted both owners, accept the first gesture through the normal SystemUI/Shell path instead of
+  waiting for a nonexistent transient NavigationBar. At `ACTION_DOWN`, require a readable matching
+  native `SysUiState`, a ready identity-matching lease, its registered updater, an empty default
+  NavigationBar slot, and an uninitialized Taskbar; lifecycle uncertainty remains fail-closed.
+  Keep transient-yield armed so a real owner that takes over during that stream still cancels the
+  module-started Shell gesture. When bit 17 is set, preserve the native threshold haptic and normal
+  AOSP/Shell arbitration. Do not defer, suppress, or replay BackPanel haptics, and do not infer
+  eligibility from the application, edge, timing, or gesture count.
 - If native display policy nevertheless shows the navigation bar transiently during an allowed
   stream, cancel any module-started Shell gesture and do not also commit BACK.
 - Preserve the current window-requested status-bar and navigation-bar appearance while those
