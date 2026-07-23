@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r46-return-home-finish-replacement";
+            "systemui-aosp-back-0.7.0-r48-headless-direct-back";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -6482,6 +6482,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 detachHeadlessNavBarLease(existing, reason + ":nativeOwnerReady");
                 return;
             }
+            if (existing != null && !headlessDesired) {
+                detachHeadlessNavBarLease(existing, reason + ":noLongerHeadless");
+                return;
+            }
             if (existing != null) {
                 if (existing.navigationMode != navigationMode) {
                     invokeMethod(existing.edgeBackGestureHandler,
@@ -6515,6 +6519,59 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.ERROR, TAG, "Failed to reconcile headless NavigationBar lifecycle"
                     + ", controller=" + shortObject(controller)
                     + ", reason=" + reason, throwable);
+        }
+    }
+
+    private boolean isCurrentHeadlessNavBarLifecycle(Object edgeBackGestureHandler) {
+        if (edgeBackGestureHandler == null
+                || !acceptingHeadlessNavBarLifecycle
+                || Looper.myLooper() != Looper.getMainLooper()) {
+            return false;
+        }
+        long generation = headlessNavBarLifecycleGeneration.get();
+        HeadlessNavBarLease lease;
+        synchronized (headlessNavBarLifecycleLock) {
+            lease = headlessNavBarLease;
+            if (lease == null || !lease.ready
+                    || lease.edgeBackGestureHandler != edgeBackGestureHandler) {
+                return false;
+            }
+        }
+        try {
+            Object navigationBars = readField(lease.controller, "mNavigationBars");
+            Object taskbarDelegate = readField(lease.controller, "mTaskbarDelegate");
+            Object injector = readField(
+                    lease.controller, "mNavigationModeControllerInjector");
+            Object defaultNavigationBar = invokeAnyMethod(
+                    navigationBars, "get", new Object[]{Integer.valueOf(0)});
+            boolean taskbarInitialized = Boolean.TRUE.equals(
+                    readField(taskbarDelegate, "mInitialized"));
+            boolean fsgMode = Boolean.TRUE.equals(readField(injector, "mIsFsgMode"));
+            boolean hideGestureLine = Boolean.TRUE.equals(
+                    readField(injector, "mHideGestureLine"));
+            boolean updaterRegistered = containsIdentity(
+                    readField(lease.navBarHelper, "mStateListeners"), lease.updaterProxy);
+            boolean backAnimationCurrent = readField(
+                    taskbarDelegate, "mBackAnimation") == lease.backAnimation;
+            if (defaultNavigationBar != null || taskbarInitialized
+                    || !fsgMode || !hideGestureLine || !updaterRegistered
+                    || !backAnimationCurrent) {
+                scheduleHeadlessNavBarReconcile(lease.controller, "inputDown:staleLease");
+                return false;
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Cannot authenticate live headless NavigationBar lifecycle", throwable);
+            return false;
+        }
+        if (!acceptingHeadlessNavBarLifecycle
+                || generation != headlessNavBarLifecycleGeneration.get()) {
+            return false;
+        }
+        synchronized (headlessNavBarLifecycleLock) {
+            return headlessNavBarLease == lease
+                    && lease.ready
+                    && lease.edgeBackGestureHandler == edgeBackGestureHandler;
         }
     }
 
@@ -21700,7 +21757,12 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean allowGestureIgnoringBarVisibility = sysUiStateFlags != null
                     && (sysUiStateFlags.longValue()
                     & SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY) != 0L;
-            if (navBarHidden && !allowGestureIgnoringBarVisibility) {
+            boolean authenticatedHeadlessLifecycle = navBarHidden
+                    && !allowGestureIgnoringBarVisibility
+                    && sysUiStateFlags != null
+                    && isCurrentHeadlessNavBarLifecycle(edgeBackGestureHandler);
+            if (navBarHidden && !allowGestureIgnoringBarVisibility
+                    && !authenticatedHeadlessLifecycle) {
                 log(Log.INFO, TAG, "Ignored native back by AOSP bar-visibility policy"
                         + ", sysUiStateFlags=" + sysUiStateFlags
                         + ", edge=" + edge + ", x=" + event.getRawX()
@@ -21708,7 +21770,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return false;
             }
             waitingForTransientBarsAtDown = navBarHidden && !navBarShownTransiently;
-            if (navBarHidden) {
+            if (navBarHidden && authenticatedHeadlessLifecycle
+                    && !allowGestureIgnoringBarVisibility) {
+                log(Log.INFO, TAG,
+                        "Accepted native back through authenticated headless lifecycle"
+                                + ", sysUiStateFlags=" + sysUiStateFlags
+                                + ", edge=" + edge + ", x=" + event.getRawX()
+                                + ", y=" + event.getRawY());
+            } else if (navBarHidden) {
                 log(Log.INFO, TAG, "AOSP bar-visibility policy allows immersive back"
                         + ", sysUiStateFlags=" + sysUiStateFlags
                         + ", edge=" + edge + ", x=" + event.getRawX()
