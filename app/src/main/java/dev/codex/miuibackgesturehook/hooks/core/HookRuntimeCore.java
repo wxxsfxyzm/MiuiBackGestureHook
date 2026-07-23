@@ -1,4 +1,4 @@
-package dev.codex.miuibackgesturehook.hooks.runtime;
+package dev.codex.miuibackgesturehook.hooks.core;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -489,16 +489,16 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile Object[][] pendingHotReloadInputState = new Object[0][0];
     protected volatile Object[][] pendingHotReloadHeadlessState = new Object[0][0];
 
-    protected static final class ReturnHomeNativeGeometrySnapshot {
-        final long generation;
-        final Object animationIdentity;
-        final long frameTraceId;
-        final int sourceKind;
-        protected final float[] matrixValues;
-        protected final Rect windowCrop;
-        protected final float[] surfaceCornerRadii;
+    public static final class ReturnHomeNativeGeometrySnapshot {
+        public final long generation;
+        public final Object animationIdentity;
+        public final long frameTraceId;
+        public final int sourceKind;
+        public final float[] matrixValues;
+        public final Rect windowCrop;
+        public final float[] surfaceCornerRadii;
 
-        ReturnHomeNativeGeometrySnapshot(
+        public ReturnHomeNativeGeometrySnapshot(
                 long generation, Object animationIdentity,
                 float[] matrixValues, Rect windowCrop,
                 float[] surfaceCornerRadii, long frameTraceId,
@@ -512,30 +512,30 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.surfaceCornerRadii = surfaceCornerRadii.clone();
         }
 
-        float[] copyMatrixValues() {
+        public float[] copyMatrixValues() {
             return matrixValues.clone();
         }
 
-        Rect copyWindowCrop() {
+        public Rect copyWindowCrop() {
             return new Rect(windowCrop);
         }
 
-        float[] copySurfaceCornerRadii() {
+        public float[] copySurfaceCornerRadii() {
             return surfaceCornerRadii.clone();
         }
     }
 
-    protected static final class HeadlessNavBarLease {
-        final Object controller;
-        final Object navBarHelper;
-        final Object edgeBackGestureHandler;
-        final Object updaterProxy;
-        final Class<?> updaterInterface;
-        final Object backAnimation;
-        final boolean ready;
-        int navigationMode;
+    public static final class HeadlessNavBarLease {
+        public final Object controller;
+        public final Object navBarHelper;
+        public final Object edgeBackGestureHandler;
+        public final Object updaterProxy;
+        public final Class<?> updaterInterface;
+        public final Object backAnimation;
+        public final boolean ready;
+        public int navigationMode;
 
-        HeadlessNavBarLease(Object controller, Object navBarHelper,
+        public HeadlessNavBarLease(Object controller, Object navBarHelper,
                             Object edgeBackGestureHandler, Object updaterProxy,
                             Class<?> updaterInterface, Object backAnimation,
                             int navigationMode, boolean ready) {
@@ -550,17 +550,17 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class OpenTransitionSnapshot {
-        final Object token;
-        final Object transitionInfo;
-        final int originalAnimatorCount;
-        final Animator[] animators;
-        final Executor animExecutor;
-        final long generation;
-        final AtomicInteger state = new AtomicInteger(OPEN_SNAPSHOT_PENDING);
-        volatile AnimatorListenerAdapter listener;
+    public static final class OpenTransitionSnapshot {
+        public final Object token;
+        public final Object transitionInfo;
+        public final int originalAnimatorCount;
+        public final Animator[] animators;
+        public final Executor animExecutor;
+        public final long generation;
+        public final AtomicInteger state = new AtomicInteger(OPEN_SNAPSHOT_PENDING);
+        public volatile AnimatorListenerAdapter listener;
 
-        OpenTransitionSnapshot(Object token, Object transitionInfo, Animator[] animators,
+        public OpenTransitionSnapshot(Object token, Object transitionInfo, Animator[] animators,
                                int originalAnimatorCount, Executor animExecutor,
                                long generation) {
             this.token = token;
@@ -572,12 +572,12 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class OpenTransitionInvalidationListener
+    public static final class OpenTransitionInvalidationListener
             extends AnimatorListenerAdapter {
-        protected final WeakReference<HookRuntimeCore> owner;
-        protected final OpenTransitionSnapshot snapshot;
+        public final WeakReference<HookRuntimeCore> owner;
+        public final OpenTransitionSnapshot snapshot;
 
-        OpenTransitionInvalidationListener(HookRuntimeCore owner,
+        public OpenTransitionInvalidationListener(HookRuntimeCore owner,
                                            OpenTransitionSnapshot snapshot) {
             this.owner = new WeakReference<>(owner);
             this.snapshot = snapshot;
@@ -605,13 +605,13 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class LegacyBackAttempt {
-        final long id;
-        final Object controller;
-        final Object runningTransitionInfo;
-        final long startedUptime;
+    public static final class LegacyBackAttempt {
+        public final long id;
+        public final Object controller;
+        public final Object runningTransitionInfo;
+        public final long startedUptime;
 
-        LegacyBackAttempt(long id, Object controller, Object runningTransitionInfo,
+        public LegacyBackAttempt(long id, Object controller, Object runningTransitionInfo,
                           long startedUptime) {
             this.id = id;
             this.controller = controller;
@@ -620,14 +620,14 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class MiuiHomeLocalHandoffToken {
-        final long generation;
-        final Object session;
-        final Object windowElement;
-        final Object windowAnimContext;
-        final Object status;
+    public static final class MiuiHomeLocalHandoffToken {
+        public final long generation;
+        public final Object session;
+        public final Object windowElement;
+        public final Object windowAnimContext;
+        public final Object status;
 
-        MiuiHomeLocalHandoffToken(long generation, Object session,
+        public MiuiHomeLocalHandoffToken(long generation, Object session,
                                   Object windowElement, Object windowAnimContext,
                                   Object status) {
             this.generation = generation;
@@ -638,13 +638,13 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class LauncherOpenMainTask {
-        final int taskId;
-        final int displayId;
-        final ComponentName component;
-        final Rect bounds;
+    public static final class LauncherOpenMainTask {
+        public final int taskId;
+        public final int displayId;
+        public final ComponentName component;
+        public final Rect bounds;
 
-        LauncherOpenMainTask(int taskId, int displayId,
+        public LauncherOpenMainTask(int taskId, int displayId,
                              ComponentName component, Rect bounds) {
             this.taskId = taskId;
             this.displayId = displayId;
@@ -653,22 +653,22 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class MiuiHomeLauncherOpenSnapshot {
-        final long generation;
-        final long nativeGeneration;
-        final long callbackEpoch;
-        final Object stateManager;
-        final Object windowElement;
-        final Object animationIdentity;
-        final String animationType;
-        final Object windowTransitionCompat;
-        final Object helper;
-        final Object mainTransitionToken;
-        final Object mainTransitionInfo;
-        final int mainTransitionDebugId;
-        final LauncherOpenMainTask mainTask;
+    public static final class MiuiHomeLauncherOpenSnapshot {
+        public final long generation;
+        public final long nativeGeneration;
+        public final long callbackEpoch;
+        public final Object stateManager;
+        public final Object windowElement;
+        public final Object animationIdentity;
+        public final String animationType;
+        public final Object windowTransitionCompat;
+        public final Object helper;
+        public final Object mainTransitionToken;
+        public final Object mainTransitionInfo;
+        public final int mainTransitionDebugId;
+        public final LauncherOpenMainTask mainTask;
 
-        MiuiHomeLauncherOpenSnapshot(
+        public MiuiHomeLauncherOpenSnapshot(
                 long generation, long nativeGeneration, long callbackEpoch,
                 Object stateManager,
                 Object windowElement, Object animationIdentity,
@@ -692,19 +692,19 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class PermissionActivityTransition {
-        final Object container;
-        final Object parent;
-        final SurfaceControl leash;
-        final ComponentName component;
-        final Rect startBounds;
-        final Rect endBounds;
-        final int debugId;
-        final int backgroundColor;
-        final int startDisplayId;
-        final int endDisplayId;
+    public static final class PermissionActivityTransition {
+        public final Object container;
+        public final Object parent;
+        public final SurfaceControl leash;
+        public final ComponentName component;
+        public final Rect startBounds;
+        public final Rect endBounds;
+        public final int debugId;
+        public final int backgroundColor;
+        public final int startDisplayId;
+        public final int endDisplayId;
 
-        PermissionActivityTransition(
+        public PermissionActivityTransition(
                 Object container, Object parent, SurfaceControl leash,
                 ComponentName component,
                 Rect startBounds, Rect endBounds, int debugId,
@@ -722,12 +722,12 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class MiuiHomePermissionMergeToken {
-        final MiuiHomeLauncherOpenSnapshot launcherOpen;
-        final PermissionActivityTransition permissionOpen;
-        final AtomicInteger consumed = new AtomicInteger();
+    public static final class MiuiHomePermissionMergeToken {
+        public final MiuiHomeLauncherOpenSnapshot launcherOpen;
+        public final PermissionActivityTransition permissionOpen;
+        public final AtomicInteger consumed = new AtomicInteger();
 
-        MiuiHomePermissionMergeToken(
+        public MiuiHomePermissionMergeToken(
                 MiuiHomeLauncherOpenSnapshot launcherOpen,
                 PermissionActivityTransition permissionOpen) {
             this.launcherOpen = launcherOpen;
@@ -735,17 +735,17 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class ReturnHomeComposition {
-        final Object appsIdentity;
-        final Object closingTarget;
-        final Object openingTarget;
-        final SurfaceControl closingLeash;
-        final SurfaceControl openingLeash;
-        final int closingTaskId;
-        final int openingTaskId;
-        final int displayId;
+    public static final class ReturnHomeComposition {
+        public final Object appsIdentity;
+        public final Object closingTarget;
+        public final Object openingTarget;
+        public final SurfaceControl closingLeash;
+        public final SurfaceControl openingLeash;
+        public final int closingTaskId;
+        public final int openingTaskId;
+        public final int displayId;
 
-        ReturnHomeComposition(Object appsIdentity, Object closingTarget,
+        public ReturnHomeComposition(Object appsIdentity, Object closingTarget,
                               Object openingTarget, SurfaceControl closingLeash,
                               SurfaceControl openingLeash, int closingTaskId,
                               int openingTaskId, int displayId) {
@@ -760,23 +760,23 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class ReturnHomeCommitComposition {
-        final Object handler;
-        final Object controller;
-        final ReturnHomeComposition composition;
-        final SurfaceControl changeLeash;
-        final Object transitionToken;
-        final Object transitionInfo;
-        final Object startTransaction;
-        final Object finishTransaction;
-        final Object mergeTarget;
-        final Object finishCallback;
-        final Object previousAnimationFinishCallback;
-        final int transitionType;
-        final AtomicInteger acceptedBoundaryComposition =
+    public static final class ReturnHomeCommitComposition {
+        public final Object handler;
+        public final Object controller;
+        public final ReturnHomeComposition composition;
+        public final SurfaceControl changeLeash;
+        public final Object transitionToken;
+        public final Object transitionInfo;
+        public final Object startTransaction;
+        public final Object finishTransaction;
+        public final Object mergeTarget;
+        public final Object finishCallback;
+        public final Object previousAnimationFinishCallback;
+        public final int transitionType;
+        public final AtomicInteger acceptedBoundaryComposition =
                 new AtomicInteger();
 
-        ReturnHomeCommitComposition(Object handler, Object controller,
+        public ReturnHomeCommitComposition(Object handler, Object controller,
                                     ReturnHomeComposition composition,
                                     SurfaceControl changeLeash,
                                     Object transitionToken,
@@ -803,20 +803,20 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class StandardReturnHomeCommitSignal {
-        final long attempt;
-        final long arbiterGeneration;
-        final int taskId;
-        final int transitionDebugId;
-        final int eventId;
-        final long downTime;
-        final int deviceId;
-        final int source;
-        final int displayId;
-        final int edge;
-        final long launcherSessionGeneration;
+    public static final class StandardReturnHomeCommitSignal {
+        public final long attempt;
+        public final long arbiterGeneration;
+        public final int taskId;
+        public final int transitionDebugId;
+        public final int eventId;
+        public final long downTime;
+        public final int deviceId;
+        public final int source;
+        public final int displayId;
+        public final int edge;
+        public final long launcherSessionGeneration;
 
-        StandardReturnHomeCommitSignal(long attempt, long arbiterGeneration,
+        public StandardReturnHomeCommitSignal(long attempt, long arbiterGeneration,
                                        int taskId, int transitionDebugId,
                                        int eventId, long downTime,
                                        int deviceId, int source,
@@ -826,7 +826,7 @@ public abstract class HookRuntimeCore extends XposedModule {
                     0L);
         }
 
-        protected StandardReturnHomeCommitSignal(
+        public StandardReturnHomeCommitSignal(
                 long attempt, long arbiterGeneration,
                 int taskId, int transitionDebugId,
                 int eventId, long downTime,
@@ -845,7 +845,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.launcherSessionGeneration = launcherSessionGeneration;
         }
 
-        StandardReturnHomeCommitSignal bindToLauncherSession(
+        public StandardReturnHomeCommitSignal bindToLauncherSession(
                 long sessionGeneration) {
             return new StandardReturnHomeCommitSignal(
                     attempt, arbiterGeneration, taskId,
@@ -854,7 +854,7 @@ public abstract class HookRuntimeCore extends XposedModule {
                     sessionGeneration);
         }
 
-        boolean matchesInput(MiuiHomeAcceptedInputToken token) {
+        public boolean matchesInput(MiuiHomeAcceptedInputToken token) {
             return token != null
                     && token.generation == arbiterGeneration
                     && token.eventId == eventId
@@ -866,13 +866,13 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class SystemUiReturnHomeCommitIdentity {
-        final Object controller;
-        final long shellSessionId;
-        final int taskId;
-        final MiuiHomeAcceptedInputToken input;
+    public static final class SystemUiReturnHomeCommitIdentity {
+        public final Object controller;
+        public final long shellSessionId;
+        public final int taskId;
+        public final MiuiHomeAcceptedInputToken input;
 
-        SystemUiReturnHomeCommitIdentity(
+        public SystemUiReturnHomeCommitIdentity(
                 Object controller, long shellSessionId, int taskId,
                 MiuiHomeAcceptedInputToken input) {
             this.controller = controller;
@@ -882,13 +882,13 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class EdgeWidthSnapshot {
-        final int leftSensitivity;
-        final int rightSensitivity;
-        final int leftTouchWidth;
-        final int rightTouchWidth;
+    public static final class EdgeWidthSnapshot {
+        public final int leftSensitivity;
+        public final int rightSensitivity;
+        public final int leftTouchWidth;
+        public final int rightTouchWidth;
 
-        EdgeWidthSnapshot(int leftSensitivity, int rightSensitivity,
+        public EdgeWidthSnapshot(int leftSensitivity, int rightSensitivity,
                           int leftInset, int rightInset) {
             this.leftSensitivity = leftSensitivity;
             this.rightSensitivity = rightSensitivity;
@@ -896,20 +896,20 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.rightTouchWidth = combineTouchWidth(rightSensitivity, rightInset);
         }
 
-        int touchWidth(int edge) {
+        public int touchWidth(int edge) {
             return edge == EDGE_LEFT ? leftTouchWidth : rightTouchWidth;
         }
 
-        protected static int combineTouchWidth(int sensitivity, int inset) {
+        public static int combineTouchWidth(int sensitivity, int inset) {
             long width = (long) sensitivity + (long) inset;
             return (int) Math.max(1L, Math.min((long) Integer.MAX_VALUE, width));
         }
     }
 
-    protected static final class ObjectIdentityKey {
-        final Object object;
+    public static final class ObjectIdentityKey {
+        public final Object object;
 
-        ObjectIdentityKey(Object object) {
+        public ObjectIdentityKey(Object object) {
             this.object = object;
         }
 
@@ -933,36 +933,36 @@ public abstract class HookRuntimeCore extends XposedModule {
                 + ", systemServer=" + param.isSystemServer());
     }
 
-    protected static final class ReturnHomeFinishTransferCandidate {
-        final Object handler;
-        final Object controller;
-        final Thread ownerThread;
-        final Object transitions;
-        final Object remoteTransitionHandler;
-        final ReturnHomeComposition composition;
-        final Object transitionToken;
-        final Object transitionInfo;
-        final Object mergeTarget;
-        final SurfaceControl.Transaction startTransaction;
-        final Object preparedOpenInfo;
-        final SurfaceControl.Transaction preparedFinishTransaction;
-        final Object preparedFinishCallback;
-        final Object elementChange;
-        final Object appChange;
-        final SurfaceControl homeLeash;
-        final SurfaceControl elementLeash;
-        final SurfaceControl appLeash;
-        final Rect fullscreenBounds;
-        final Rect elementEndBounds;
-        final int transitionType;
-        final int appFlags;
-        final int elementStartDisplayId;
-        final int elementEndDisplayId;
-        final int transitionDebugId;
-        final int preparedDebugId;
-        final AtomicInteger transferAttempted = new AtomicInteger();
+    public static final class ReturnHomeFinishTransferCandidate {
+        public final Object handler;
+        public final Object controller;
+        public final Thread ownerThread;
+        public final Object transitions;
+        public final Object remoteTransitionHandler;
+        public final ReturnHomeComposition composition;
+        public final Object transitionToken;
+        public final Object transitionInfo;
+        public final Object mergeTarget;
+        public final SurfaceControl.Transaction startTransaction;
+        public final Object preparedOpenInfo;
+        public final SurfaceControl.Transaction preparedFinishTransaction;
+        public final Object preparedFinishCallback;
+        public final Object elementChange;
+        public final Object appChange;
+        public final SurfaceControl homeLeash;
+        public final SurfaceControl elementLeash;
+        public final SurfaceControl appLeash;
+        public final Rect fullscreenBounds;
+        public final Rect elementEndBounds;
+        public final int transitionType;
+        public final int appFlags;
+        public final int elementStartDisplayId;
+        public final int elementEndDisplayId;
+        public final int transitionDebugId;
+        public final int preparedDebugId;
+        public final AtomicInteger transferAttempted = new AtomicInteger();
 
-        ReturnHomeFinishTransferCandidate(
+        public ReturnHomeFinishTransferCandidate(
                 Object handler, Object controller,
                 Thread ownerThread,
                 Object transitions, Object remoteTransitionHandler,
@@ -1009,17 +1009,17 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    protected static final class MiuiHomeAcceptedInputToken {
-        final int eventId;
-        final long downTime;
-        final int deviceId;
-        final int source;
-        final int displayId;
-        final int edge;
-        final long generation;
-        final long receivedUptime;
+    public static final class MiuiHomeAcceptedInputToken {
+        public final int eventId;
+        public final long downTime;
+        public final int deviceId;
+        public final int source;
+        public final int displayId;
+        public final int edge;
+        public final long generation;
+        public final long receivedUptime;
 
-        MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
                                    int source, int displayId, int edge,
                                    long generation) {
             this.eventId = eventId;
@@ -1032,7 +1032,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.receivedUptime = SystemClock.uptimeMillis();
         }
 
-        boolean isExpired() {
+        public boolean isExpired() {
             long now = SystemClock.uptimeMillis();
             long streamAge = now - downTime;
             return now - receivedUptime > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS

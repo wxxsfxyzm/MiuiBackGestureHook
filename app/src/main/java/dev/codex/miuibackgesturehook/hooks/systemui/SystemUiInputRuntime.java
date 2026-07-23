@@ -1,4 +1,6 @@
-package dev.codex.miuibackgesturehook.hooks.runtime;
+package dev.codex.miuibackgesturehook.hooks.systemui;
+
+import dev.codex.miuibackgesturehook.hooks.core.HookRuntimeCore;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -117,7 +119,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected final Context context;
         protected final Object edgeBackGestureHandler;
         protected final InputMonitor inputMonitor;
-        protected final SystemUiBackGestureDriver driver;
+        public final SystemUiBackGestureDriver driver;
         protected final int displayId;
         protected boolean gestureCandidate;
         protected boolean launcherOpenBreakCandidate;
@@ -163,7 +165,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", inputModel=miuihome-accepted-token");
         }
 
-        void detach() {
+        public void detach() {
             resetCandidate();
             driver.detach();
             try {
@@ -187,11 +189,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             driver.updateBackAnimation(newBackAnimationImpl);
         }
 
-        boolean blocksHotReload() {
+        public boolean blocksHotReload() {
             return driver.blocksHotReload();
         }
 
-        String describeActiveShellSession() {
+        public String describeActiveShellSession() {
             return driver.describeActiveShellSession();
         }
 
@@ -1138,7 +1140,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected final Context context;
         protected final Object edgeBackGestureHandler;
         protected volatile Object controller;
-        protected volatile Object backAnimationImpl;
+        public volatile Object backAnimationImpl;
         protected volatile Executor shellExecutor;
         protected volatile ShellGestureSession activeShellSession;
         protected volatile boolean shellStartInFlight;
@@ -1697,7 +1699,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             return true;
         }
 
-        protected void onLauncherOpenBreakCommandResult(long generation, long attemptId,
+        public void onLauncherOpenBreakCommandResult(long generation, long attemptId,
                                                        int resultCode, String reason) {
             if (pendingLauncherOpenBreakGeneration != generation
                     || pendingLauncherOpenBreakAttemptId != attemptId) {

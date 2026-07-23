@@ -1,4 +1,6 @@
-package dev.codex.miuibackgesturehook.hooks.runtime;
+package dev.codex.miuibackgesturehook.hooks.miuihome;
+
+import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiHookRuntime;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -180,7 +182,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
         }
 
-        boolean blocksControllerReplacement() {
+        public boolean blocksControllerReplacement() {
             ReturnHomeSession session = currentSession;
             return (session != null && session.cleaned.get() == 0)
                     || !pendingUnifiedInterruptedAnimToConfigs.isEmpty();
@@ -216,7 +218,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             beginDeferredControllerReplacement("shellBinderDied");
         }
 
-        String describeUnifiedOwner() {
+        public String describeUnifiedOwner() {
             ReturnHomeSession session = currentSession;
             if (session == null) {
                 return "session=none, interruptedConfigTombstones="

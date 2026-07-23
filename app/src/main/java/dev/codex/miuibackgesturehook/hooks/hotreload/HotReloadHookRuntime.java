@@ -1,4 +1,6 @@
-package dev.codex.miuibackgesturehook.hooks.runtime;
+package dev.codex.miuibackgesturehook.hooks.hotreload;
+
+import dev.codex.miuibackgesturehook.hooks.systemserver.SystemServerHookRuntime;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
