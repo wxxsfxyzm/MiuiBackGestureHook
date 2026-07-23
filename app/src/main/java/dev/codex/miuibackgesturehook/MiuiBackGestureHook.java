@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r42-transparent-transient-auto-hide";
+            "systemui-aosp-back-0.7.0-r44-shell-and-return-home-lifecycle-fix";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -388,6 +388,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final AtomicLong miuiHomeNativeGeometryFrameIds = new AtomicLong();
     private final AtomicLong systemUiReturnHomeCommitAttemptIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    private final AtomicLong systemUiShellGestureSessionIds =
             new AtomicLong(SystemClock.elapsedRealtimeNanos());
     private final ThreadLocal<ReturnHomeNativeGeometrySnapshot>
             miuiHomePendingNativeGeometry = new ThreadLocal<>();
@@ -843,13 +845,15 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     private static final class SystemUiReturnHomeCommitIdentity {
         final Object controller;
+        final long shellSessionId;
         final int taskId;
         final MiuiHomeAcceptedInputToken input;
 
         SystemUiReturnHomeCommitIdentity(
-                Object controller, int taskId,
+                Object controller, long shellSessionId, int taskId,
                 MiuiHomeAcceptedInputToken input) {
             this.controller = controller;
+            this.shellSessionId = shellSessionId;
             this.taskId = taskId;
             this.input = input;
         }
@@ -908,6 +912,17 @@ public final class MiuiBackGestureHook extends XposedModule {
 
     @Override
     public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        for (NativeBackInputMonitor monitor
+                : new ArrayList<>(nativeInputMonitors.values())) {
+            if (monitor.blocksHotReload()) {
+                log(Log.WARN, TAG,
+                        "Deferred hot reload while a fixed Shell gesture session is active"
+                                + ", process=" + processName
+                                + ", state="
+                                + monitor.describeActiveShellSession());
+                return false;
+            }
+        }
         MiuiHomeReturnHomeController activeReturnHomeController =
                 miuiHomeReturnHomeController;
         if (activeReturnHomeController != null
@@ -1044,7 +1059,8 @@ public final class MiuiBackGestureHook extends XposedModule {
         if (shouldInstallServerHooks && replaced == 0) {
             installSystemServerHooks(null);
         } else if (shouldInstallServerHooks
-                && (!oldHookIds.contains("server_back_window_start_animation")
+                && (!oldHookIds.contains("server_back_promote_to_tf_if_needed")
+                || !oldHookIds.contains("server_back_window_start_animation")
                 || !oldHookIds.contains("server_schedule_animation_prepare_transition")
                 || !oldHookIds.contains("server_back_navigation_done_cleanup")
                 || !oldHookIds.contains("server_return_home_touch_occlusion")
@@ -1052,6 +1068,11 @@ public final class MiuiBackGestureHook extends XposedModule {
                 && !oldHookIds.contains("predictive_opt_in_system_server")))) {
             ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
             if (serverClassLoader != null) {
+                if (!oldHookIds.contains(
+                        "server_back_promote_to_tf_if_needed")) {
+                    hookTaskFragmentPromotionCompatibility(
+                            serverClassLoader);
+                }
                 if (!oldHookIds.contains("server_back_window_start_animation")) {
                     hookBackWindowStartAnimation(serverClassLoader);
                 }
@@ -1071,6 +1092,59 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
+            Class<?> hotReloadBackControllerClass = null;
+            if (!oldHookIds.contains("shell_back_onBackAnimationFinished")
+                    || !oldHookIds.contains("shell_back_finishBackAnimation")
+                    || !oldHookIds.contains(
+                    "shell_back_onBackNavigationInfoReceived")) {
+                try {
+                    hotReloadBackControllerClass = Class.forName(
+                            BACK_ANIMATION_CONTROLLER, false,
+                            hotReloadClassLoader);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Failed to resolve Shell controller for hook backfill",
+                            throwable);
+                }
+            }
+            if (hotReloadBackControllerClass != null
+                    && !oldHookIds.contains(
+                    "shell_back_onBackAnimationFinished")) {
+                try {
+                    hookShellAnimationFinished(hotReloadBackControllerClass,
+                            "onBackAnimationFinished",
+                            "shell_back_onBackAnimationFinished", false);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Failed to backfill outer Shell completion hook",
+                            throwable);
+                }
+            }
+            if (hotReloadBackControllerClass != null
+                    && !oldHookIds.contains(
+                    "shell_back_finishBackAnimation")) {
+                try {
+                    hookShellAnimationFinished(hotReloadBackControllerClass,
+                            "finishBackAnimation",
+                            "shell_back_finishBackAnimation", true);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Failed to backfill definitive Shell completion hook",
+                            throwable);
+                }
+            }
+            if (hotReloadBackControllerClass != null
+                    && !oldHookIds.contains(
+                    "shell_back_onBackNavigationInfoReceived")) {
+                try {
+                    hookBackNavigationInfoReceived(
+                            hotReloadBackControllerClass);
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Failed to backfill Shell navigation-info hook",
+                            throwable);
+                }
+            }
             if (!oldHookIds.contains("systemui_navigation_bar_show_transient")) {
                 hookNavigationBarTransientAutoHide(hotReloadClassLoader);
             }
@@ -1397,6 +1471,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             case "shell_back_onBackNavigationInfoReceived":
                 return this::onBackNavigationInfoReceived;
             case "shell_back_onBackAnimationFinished":
+                return this::proceedShellAnimationLifecycle;
             case "shell_back_finishBackAnimation":
                 return this::onShellAnimationFinished;
             case "systemui_navigation_bar_view_insets":
@@ -4700,13 +4775,15 @@ public final class MiuiBackGestureHook extends XposedModule {
     }
 
     private void clearSystemUiReturnHomeCommitIdentity(
-            Object controller, String reason) {
+            Object controller, long shellSessionId, String reason) {
         while (true) {
             SystemUiReturnHomeCommitIdentity identity =
                     systemUiReturnHomeCommitIdentity.get();
             if (identity == null
                     || (controller != null
-                    && identity.controller != controller)) {
+                    && identity.controller != controller)
+                    || (shellSessionId != 0L
+                    && identity.shellSessionId != shellSessionId)) {
                 return;
             }
             if (systemUiReturnHomeCommitIdentity.compareAndSet(
@@ -4716,6 +4793,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                                 + ", taskId=" + identity.taskId
                                 + ", eventId="
                                 + identity.input.eventId
+                                + ", shellSessionId="
+                                + identity.shellSessionId
                                 + ", reason=" + reason);
                 return;
             }
@@ -8235,7 +8314,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             method.setAccessible(true);
             recordHookHandle(hook(method)
                     .setId(hookId)
-                    .intercept(this::onShellAnimationFinished));
+                    .intercept("finishBackAnimation".equals(methodName)
+                            ? this::onShellAnimationFinished
+                            : this::proceedShellAnimationLifecycle));
         } catch (NoSuchMethodException exception) {
             if (!optional) {
                 throw exception;
@@ -8265,11 +8346,35 @@ public final class MiuiBackGestureHook extends XposedModule {
         return result;
     }
 
+    private Object proceedShellAnimationLifecycle(
+            XposedInterface.Chain chain) throws Throwable {
+        return chain.proceed();
+    }
+
     private Object onShellAnimationFinished(XposedInterface.Chain chain) throws Throwable {
+        Object controller = chain.getThisObject();
+        List<Runnable> completions = new ArrayList<>();
+        try {
+            Object currentTracker = readField(controller, "mCurrentTracker");
+            Object queuedTracker = readField(controller, "mQueuedTracker");
+            Object navigation = readField(controller, "mBackNavigationInfo");
+            for (NativeBackInputMonitor monitor
+                    : new ArrayList<>(nativeInputMonitors.values())) {
+                Runnable completion = monitor.captureShellAnimationCompletion(
+                        controller, currentTracker, queuedTracker,
+                        navigation, chain.getExecutable().getName());
+                if (completion != null) {
+                    completions.add(completion);
+                }
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to capture fixed Shell completion identity",
+                    throwable);
+        }
         Object result = chain.proceed();
         if ("finishBackAnimation".equals(chain.getExecutable().getName())) {
             try {
-                Object controller = chain.getThisObject();
                 Object transitionHandler = readField(controller,
                         "mBackTransitionHandler");
                 log(Log.INFO, TAG, "Completed stock Shell back-animation cleanup"
@@ -8295,10 +8400,15 @@ public final class MiuiBackGestureHook extends XposedModule {
                         throwable);
             }
         }
-        Object controller = chain.getThisObject();
-        String reason = chain.getExecutable().getName();
-        new ArrayList<>(nativeInputMonitors.values()).forEach(
-                monitor -> monitor.onShellAnimationFinished(controller, reason));
+        for (Runnable completion : completions) {
+            try {
+                completion.run();
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to publish fixed Shell completion",
+                        throwable);
+            }
+        }
         return result;
     }
 
@@ -8579,7 +8689,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return;
             }
             Object controller = readField(backAnimationImpl, "this$0");
-            ensureAospBackAnimations(controller, "setBackAnimation");
             Context context = (Context) readField(edgeBackGestureHandler, "mContext");
             ensureMiuiOverviewStateReceiver(context);
             ensureNativeEdgeBackPlugin(edgeBackGestureHandler, context);
@@ -15529,6 +15638,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 Object animationIdentity) {
             Object callbackStateManager = null;
             Object currentElement = null;
+            String currentElementType = null;
+            boolean oldElementRecorded = false;
             Object currentIdentity = null;
             String actualType = "unknown";
             boolean exactTarget = false;
@@ -15541,6 +15652,21 @@ public final class MiuiBackGestureHook extends XposedModule {
                 currentElement = invokeAnyMethod(
                         session.stateManager, "getCurrentWindowElement",
                         new Object[0]);
+                if (currentElement != null) {
+                    try {
+                        currentElementType = readNativeAnimationType(
+                                currentElement);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                try {
+                    Object oldListObject = readField(
+                            session.stateManager, "windowElementOldList");
+                    oldElementRecorded = oldListObject instanceof List<?>
+                            && ((List<?>) oldListObject).contains(
+                            session.nativeWindowElement);
+                } catch (Throwable ignored) {
+                }
                 currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement, "getAnimSymbol",
                         new Object[0]);
@@ -15577,13 +15703,14 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             return new UnifiedNativeFinishSnapshot(
                     session, callbackStateManager, currentElement,
+                    currentElementType, oldElementRecorded,
                     animationIdentity, currentIdentity, actualType,
                     exactTarget, running, finishComplete, fullscreen,
                     session.unifiedNativeActiveAnimToEpoch,
                     session.unifiedNativeCommitTransition, failure);
         }
 
-        private boolean isExactUnifiedNativeFinishSnapshot(
+        private boolean hasExactUnifiedNativeFinishIdentity(
                 ReturnHomeSession session,
                 UnifiedNativeFinishSnapshot snapshot) {
             return session != null && snapshot != null
@@ -15594,8 +15721,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && snapshot.callbackStateManager == session.stateManager
                     && snapshot.windowElement
                     == session.nativeWindowElement
-                    && snapshot.currentElement
-                    == session.nativeWindowElement
                     && snapshot.animationIdentity
                     == session.unifiedNativeAnimationIdentity
                     && snapshot.currentAnimationIdentity
@@ -15604,6 +15729,45 @@ public final class MiuiBackGestureHook extends XposedModule {
                     == session.unifiedNativeActiveAnimToEpoch
                     && snapshot.exactTarget
                     && snapshot.finishComplete;
+        }
+
+        private boolean isExactUnifiedNativeFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot) {
+            return hasExactUnifiedNativeFinishIdentity(session, snapshot)
+                    && snapshot.currentElement
+                    == session.nativeWindowElement;
+        }
+
+        private boolean isExactAdoptedNativeCloseFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot) {
+            boolean currentElementValid = session != null && snapshot != null
+                    && (snapshot.currentElement == session.nativeWindowElement
+                    || (snapshot.currentElement != null
+                    && snapshot.currentElement != session.nativeWindowElement
+                    && snapshot.oldElementRecorded
+                    && isMiuiHomeLauncherOpenType(
+                    snapshot.currentElementType)));
+            return hasExactUnifiedNativeFinishIdentity(session, snapshot)
+                    && session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && session.nativeAnimationIdentity
+                    == snapshot.animationIdentity
+                    && session.nativeAnimationType != null
+                    && session.nativeAnimationType.equals(snapshot.actualType)
+                    && isReturnHomeNativeCloseType(snapshot.actualType)
+                    && currentElementValid;
+        }
+
+        private boolean isConsumableUnifiedNativeFinishSnapshot(
+                ReturnHomeSession session,
+                UnifiedNativeFinishSnapshot snapshot) {
+            return session != null && session.nativeAnimationStarted
+                    ? isExactAdoptedNativeCloseFinishSnapshot(
+                    session, snapshot)
+                    : isExactUnifiedNativeFinishSnapshot(
+                    session, snapshot);
         }
 
         private boolean acceptUnifiedNativeCommitFromFinishSnapshot(
@@ -15762,7 +15926,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     != UnifiedNativeFinishSnapshot.PHASE_PENDING) {
                 return false;
             }
-            if (!isExactUnifiedNativeFinishSnapshot(session, snapshot)) {
+            if (!isConsumableUnifiedNativeFinishSnapshot(
+                    session, snapshot)) {
                 if (snapshot.phase.compareAndSet(
                         UnifiedNativeFinishSnapshot.PHASE_PENDING,
                         UnifiedNativeFinishSnapshot.PHASE_INVALID)) {
@@ -15778,6 +15943,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", sameElement="
                                     + (snapshot.currentElement
                                     == session.nativeWindowElement)
+                                    + ", currentElementType="
+                                    + snapshot.currentElementType
+                                    + ", oldElementRecorded="
+                                    + snapshot.oldElementRecorded
                                     + ", sameIdentity="
                                     + (snapshot.currentAnimationIdentity
                                     == session.unifiedNativeAnimationIdentity)
@@ -18702,20 +18871,18 @@ public final class MiuiBackGestureHook extends XposedModule {
                         && finishSnapshot.animationIdentity
                         == token.animationIdentity
                         && currentType.equals(finishSnapshot.actualType)
-                        && isExactUnifiedNativeFinishSnapshot(
+                        && isExactAdoptedNativeCloseFinishSnapshot(
                         session, finishSnapshot);
-                boolean replacementElementValid = currentElement == null
-                        || (currentElement != windowElement
-                        && isMiuiHomeLauncherOpenType(replacementType));
+                boolean replacementElementValid = currentElement != null
+                        && currentElement != windowElement
+                        && isMiuiHomeLauncherOpenType(replacementType);
                 boolean pendingCommitValid = pendingCommit
                         && currentElement == windowElement
-                        && currentIdentity == token.animationIdentity
-                        && listenerDisabled;
+                        && currentIdentity == token.animationIdentity;
                 boolean earlySetToOldValid = !pendingCommit
                         && verifiedClose
                         && currentElement == windowElement
                         && currentIdentity == token.animationIdentity
-                        && listenerDisabled
                         && oldElementRecorded;
                 boolean completedReplacementValid = !pendingCommit
                         && exactInterruptedFinish
@@ -18877,7 +19044,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         && oldElementRecorded
                         && !hasRecentTransition && !reusable
                         && surfaceCanceled && surfaceCancelExecuted
-                        && canceled && listenerDisabled;
+                        && canceled;
                 if (!valid) {
                     log(Log.INFO, TAG,
                             "Preserved Xiaomi old-element OPEN selection"
@@ -18979,7 +19146,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && oldElementRecorded
                     && !hasRecentTransition && !reusable
                     && surfaceCanceled && surfaceCancelExecuted
-                    && canceled && listenerDisabled;
+                    && canceled;
             if (!valid) {
                 pendingFreshOpen.compareAndSet(token, null);
                 log(Log.WARN, TAG,
@@ -19658,7 +19825,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         == UnifiedNativeFinishSnapshot.PHASE_PENDING
                         && previous.animationIdentity == animationIdentity
                         && previous.animToEpoch == snapshot.animToEpoch
-                        && isExactUnifiedNativeFinishSnapshot(
+                        && isConsumableUnifiedNativeFinishSnapshot(
                         session, previous)) {
                     snapshot.phase.set(
                             UnifiedNativeFinishSnapshot.PHASE_INVALID);
@@ -20722,6 +20889,8 @@ public final class MiuiBackGestureHook extends XposedModule {
             final Object windowElement;
             final Object callbackStateManager;
             final Object currentElement;
+            final String currentElementType;
+            final boolean oldElementRecorded;
             final Object animationIdentity;
             final Object currentAnimationIdentity;
             final String actualType;
@@ -20739,6 +20908,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                     ReturnHomeSession session,
                     Object callbackStateManager,
                     Object currentElement,
+                    String currentElementType,
+                    boolean oldElementRecorded,
                     Object animationIdentity,
                     Object currentAnimationIdentity,
                     String actualType, boolean exactTarget,
@@ -20752,6 +20923,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                 this.windowElement = session.nativeWindowElement;
                 this.callbackStateManager = callbackStateManager;
                 this.currentElement = currentElement;
+                this.currentElementType = currentElementType;
+                this.oldElementRecorded = oldElementRecorded;
                 this.animationIdentity = animationIdentity;
                 this.currentAnimationIdentity =
                         currentAnimationIdentity;
@@ -21047,7 +21220,8 @@ public final class MiuiBackGestureHook extends XposedModule {
 
         private NativeBackInputMonitor(Context context, Object edgeBackGestureHandler,
                                        Object controller, Object backAnimationImpl, InputMonitor inputMonitor,
-                                       InputChannel inputChannel, int displayId) {
+                                       InputChannel inputChannel, int displayId)
+                throws Exception {
             super(inputChannel, Looper.getMainLooper());
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
@@ -21091,8 +21265,20 @@ public final class MiuiBackGestureHook extends XposedModule {
             driver.updateBackAnimation(newBackAnimationImpl);
         }
 
-        void onShellAnimationFinished(Object finishedController, String reason) {
-            driver.onShellAnimationFinished(finishedController, reason);
+        boolean blocksHotReload() {
+            return driver.blocksHotReload();
+        }
+
+        String describeActiveShellSession() {
+            return driver.describeActiveShellSession();
+        }
+
+        Runnable captureShellAnimationCompletion(
+                Object finishedController, Object currentTracker,
+                Object queuedTracker, Object navigation, String reason) {
+            return driver.captureShellAnimationCompletion(
+                    finishedController, currentTracker, queuedTracker,
+                    navigation, reason);
         }
 
         @Override
@@ -21941,10 +22127,91 @@ public final class MiuiBackGestureHook extends XposedModule {
     }
 
     private final class SystemUiBackGestureDriver {
+        private final class ShellOwner {
+            final Object controller;
+            final Executor executor;
+            final long inputEpoch;
+
+            ShellOwner(Object controller, Executor executor, long inputEpoch) {
+                this.controller = controller;
+                this.executor = executor;
+                this.inputEpoch = inputEpoch;
+            }
+        }
+
+        private final class ShellStartSnapshot {
+            final boolean ready;
+            final boolean startInvoked;
+            final String stateDescription;
+            final Object tracker;
+            final Object navigation;
+            final boolean receivedNullNavigation;
+            final Throwable failure;
+
+            ShellStartSnapshot(boolean ready, boolean startInvoked,
+                               String stateDescription, Object tracker,
+                               Object navigation, boolean receivedNullNavigation,
+                               Throwable failure) {
+                this.ready = ready;
+                this.startInvoked = startInvoked;
+                this.stateDescription = stateDescription;
+                this.tracker = tracker;
+                this.navigation = navigation;
+                this.receivedNullNavigation = receivedNullNavigation;
+                this.failure = failure;
+            }
+        }
+
+        private final class ShellGestureSession {
+            final long id = systemUiShellGestureSessionIds.incrementAndGet();
+            final Object controller;
+            final Executor executor;
+            final long inputEpoch;
+            final Object tracker;
+            final Object navigation;
+            final boolean receivedNullNavigation;
+            final int edge;
+            final float startX;
+            final float startY;
+            final float linearDistance;
+            final float maxDistance;
+            final float nonLinearFactor;
+            final AtomicReference<MiuiHomeAcceptedInputToken> inputIdentity;
+            final AtomicBoolean releaseQueued = new AtomicBoolean();
+            final AtomicBoolean moveFailed = new AtomicBoolean();
+            final AtomicBoolean awaitingStockCleanup = new AtomicBoolean();
+            final AtomicBoolean completionConsumed = new AtomicBoolean();
+
+            ShellGestureSession(ShellOwner owner, ShellStartSnapshot start,
+                                int edge, float startX, float startY,
+                                float linearDistance,
+                                float maxDistance, float nonLinearFactor,
+                                MiuiHomeAcceptedInputToken inputIdentity) {
+                this.controller = owner.controller;
+                this.executor = owner.executor;
+                this.inputEpoch = owner.inputEpoch;
+                this.tracker = start.tracker;
+                this.navigation = start.navigation;
+                this.receivedNullNavigation = start.receivedNullNavigation;
+                this.edge = edge;
+                this.startX = startX;
+                this.startY = startY;
+                this.linearDistance = linearDistance;
+                this.maxDistance = maxDistance;
+                this.nonLinearFactor = nonLinearFactor;
+                this.inputIdentity = new AtomicReference<>(inputIdentity);
+            }
+        }
+
         private final Context context;
         private final Object edgeBackGestureHandler;
         private volatile Object controller;
         private volatile Object backAnimationImpl;
+        private volatile Executor shellExecutor;
+        private volatile ShellGestureSession activeShellSession;
+        private volatile boolean shellStartInFlight;
+        private volatile boolean shellOwnerUncertain;
+        private volatile String lastShellStateDescription = "unqueried";
         private boolean gestureActive;
         private boolean thresholdCrossed;
         private boolean triggerBack;
@@ -21953,8 +22220,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         private volatile boolean gestureSuppressed;
         private boolean legacyInterruptGesture;
         private boolean aospNullNavigationGesture;
-        private long aospNullNavigationInputEpoch;
-        private Object aospNullNavigationController;
         private Object legacyRunningOpenInfo;
         private boolean launcherOpenBreakGesture;
         private long launcherOpenBreakGeneration;
@@ -21974,21 +22239,102 @@ public final class MiuiBackGestureHook extends XposedModule {
         private float downY;
 
         SystemUiBackGestureDriver(Context context, Object edgeBackGestureHandler,
-                                 Object controller, Object backAnimationImpl) {
+                                  Object controller, Object backAnimationImpl)
+                throws Exception {
             this.context = context;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
             this.controller = controller;
             this.backAnimationImpl = backAnimationImpl;
+            this.shellExecutor = resolveShellExecutor(controller);
         }
 
         void updateBackAnimation(Object newBackAnimationImpl) throws Exception {
             Object newController = readField(newBackAnimationImpl, "this$0");
+            Executor newShellExecutor = resolveShellExecutor(newController);
             synchronized (backInputLifecycleLock) {
                 if (controller != newController) {
                     inputMonitorEpoch.incrementAndGet();
                 }
                 this.backAnimationImpl = newBackAnimationImpl;
                 this.controller = newController;
+                this.shellExecutor = newShellExecutor;
+            }
+        }
+
+        private Executor resolveShellExecutor(Object shellController)
+                throws Exception {
+            Object executor = readField(shellController, "mShellExecutor");
+            if (!(executor instanceof Executor)) {
+                throw new IllegalStateException("mShellExecutor is "
+                        + shortObject(executor));
+            }
+            return (Executor) executor;
+        }
+
+        boolean blocksHotReload() {
+            ShellGestureSession session = activeShellSession;
+            return shellStartInFlight || shellOwnerUncertain || session != null;
+        }
+
+        String describeActiveShellSession() {
+            ShellGestureSession session = activeShellSession;
+            return "startInFlight=" + shellStartInFlight
+                    + ", uncertain=" + shellOwnerUncertain
+                    + ", sessionId=" + (session == null ? 0L : session.id)
+                    + ", controller=" + shortObject(
+                    session == null ? null : session.controller)
+                    + ", tracker=" + shortObject(
+                    session == null ? null : session.tracker)
+                    + ", navigation=" + shortObject(
+                    session == null ? null : session.navigation)
+                    + ", releaseQueued=" + (session != null
+                    && session.releaseQueued.get())
+                    + ", completionConsumed=" + (session != null
+                    && session.completionConsumed.get());
+        }
+
+        private ShellOwner captureShellOwner() {
+            synchronized (backInputLifecycleLock) {
+                if (!inputMonitorAttached || controller == null
+                        || shellExecutor == null
+                        || inputMonitorEpoch.get() == 0L) {
+                    return null;
+                }
+                return new ShellOwner(controller, shellExecutor,
+                        inputMonitorEpoch.get());
+            }
+        }
+
+        private boolean isShellOwnerCurrent(ShellOwner owner) {
+            synchronized (backInputLifecycleLock) {
+                return owner != null && inputMonitorAttached
+                        && owner.controller == controller
+                        && owner.executor == shellExecutor
+                        && owner.inputEpoch == inputMonitorEpoch.get();
+            }
+        }
+
+        private boolean isShellSessionOwnerCurrent(
+                ShellGestureSession session) {
+            synchronized (backInputLifecycleLock) {
+                return session != null && inputMonitorAttached
+                        && session.controller == controller
+                        && session.executor == shellExecutor
+                        && session.inputEpoch == inputMonitorEpoch.get();
+            }
+        }
+
+        private boolean executeShellBlocking(Executor executor, Runnable task,
+                                             String reason) {
+            try {
+                invokeAnyMethod(executor, "executeBlocking",
+                        new Object[]{task});
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed blocking Shell-owner task, reason=" + reason,
+                        throwable);
+                return false;
             }
         }
 
@@ -22004,6 +22350,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                     && token.generation
                     == systemUiInputArbiterGeneration) {
                 acceptedInputIdentity = token;
+                ShellGestureSession session = activeShellSession;
+                if (session != null && session.edge == activeEdge) {
+                    session.inputIdentity.compareAndSet(null, token);
+                }
             }
         }
 
@@ -22057,8 +22407,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             aospNullNavigationGesture = false;
-            aospNullNavigationInputEpoch = 0L;
-            aospNullNavigationController = null;
             legacyRunningOpenInfo = null;
             launcherOpenBreakGesture = launcherOpenBreakCandidate;
             launcherOpenBreakGeneration = launcherOpenBreakCandidate
@@ -22177,26 +22525,31 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + ", x=" + event.getRawX()
                         + ", y=" + event.getRawY());
             }
-            if (!shellGestureStartDeferred
-                    && !legacyInterruptGesture && !launcherOpenBreakGesture) {
-                updateActiveTracker(event.getRawX(), event.getRawY());
-            }
+            boolean crossedNow = false;
             if (!thresholdCrossed && distance > dp(PILFER_THRESHOLD_DP)) {
-                crossIntentThreshold(distance);
-            }
-            if (thresholdCrossed && !legacyInterruptGesture
-                    && !aospNullNavigationGesture
-                    && !launcherOpenBreakGesture) {
-                dispatchExplicitProgress(distance);
+                crossedNow = crossIntentThreshold(distance);
             }
             boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
-            updateTriggerBack(shouldTrigger);
+            boolean triggerChanged = updateTriggerBack(shouldTrigger);
+            if (!shellGestureStartDeferred
+                    && !legacyInterruptGesture && !launcherOpenBreakGesture) {
+                ShellGestureSession session = activeShellSession;
+                if (session == null || !queueShellMove(session,
+                        event.getRawX(), event.getRawY(), distance,
+                        crossedNow, thresholdCrossed
+                                && !aospNullNavigationGesture,
+                        triggerChanged, shouldTrigger)) {
+                    cancelLocalGesture(event,
+                            "failed to queue fixed Shell-owner MOVE");
+                    return false;
+                }
+            }
             return true;
         }
 
-        private void crossIntentThreshold(float distance) throws Exception {
+        private boolean crossIntentThreshold(float distance) {
             if (thresholdCrossed) {
-                return;
+                return false;
             }
             thresholdCrossed = true;
             if (legacyInterruptGesture) {
@@ -22206,7 +22559,6 @@ public final class MiuiBackGestureHook extends XposedModule {
                 log(Log.INFO, TAG, "MiuiHome launcher OPEN break threshold crossed, distance="
                         + distance);
             } else {
-                invokeAnyMethod(controller, "onThresholdCrossed", new Object[0]);
                 log(Log.INFO, TAG, launcherShadeGesture
                         ? "SystemUI NotificationShade Shell callback threshold crossed, distance="
                         + distance
@@ -22214,6 +22566,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                         ? "SystemUI Recents Shell callback threshold crossed, distance=" + distance
                         : "SystemUI gesture driver intent threshold crossed, distance=" + distance);
             }
+            return true;
         }
 
         private boolean onUp(MotionEvent event, boolean allowTrigger) throws Exception {
@@ -22259,19 +22612,37 @@ public final class MiuiBackGestureHook extends XposedModule {
             boolean trigger = allowTrigger
                     && thresholdCrossed
                     && releaseDistance > dp(TRIGGER_THRESHOLD_DP);
+            ShellGestureSession session = activeShellSession;
+            if (session == null || session.edge != activeEdge) {
+                cancelLocalGesture(event,
+                        "missing fixed Shell session at release");
+                return true;
+            }
+            boolean ownerStillCurrent = isShellSessionOwnerCurrent(session);
+            if (!ownerStillCurrent) {
+                trigger = false;
+                log(Log.WARN, TAG,
+                        "Forced Shell release cancellation after owner changed"
+                                + ", shellSessionId=" + session.id
+                                + ", sessionController="
+                                + shortObject(session.controller)
+                                + ", currentController="
+                                + shortObject(controller)
+                                + ", sessionInputEpoch="
+                                + session.inputEpoch
+                                + ", currentInputEpoch="
+                                + inputMonitorEpoch.get());
+            }
             triggerBack = trigger;
             MiuiHomeAcceptedInputToken releaseInputIdentity =
-                    acceptedInputIdentity;
-            Object releaseController = aospNullNavigationGesture
-                    && aospNullNavigationController != null
-                    ? aospNullNavigationController : controller;
+                    session.inputIdentity.get();
             boolean queued = queueShellReleaseTransaction(
-                    releaseController,
+                    session,
                     event.getRawX(), event.getRawY(), releaseDistance,
                     thresholdCrossed, trigger, activeEdge,
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
                     launcherEditingGesture, aospNullNavigationGesture,
-                    aospNullNavigationInputEpoch,
+                    session.inputEpoch,
                     releaseInputIdentity);
             log(queued ? Log.INFO : Log.ERROR, TAG,
                     "SystemUI gesture driver release queued=" + queued
@@ -22281,6 +22652,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     + ", drawerShellCallback=" + launcherDrawerGesture
                     + ", editingShellCallback=" + launcherEditingGesture
                     + ", aospNullNavigation=" + aospNullNavigationGesture
+                    + ", shellSessionId=" + session.id
                     + ", edge=" + activeEdge);
             clearLocalGestureState();
             return true;
@@ -22334,7 +22706,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             pendingLauncherOpenBreakGeneration = 0L;
             pendingLauncherOpenBreakAttemptId = 0L;
             clearSystemUiReturnHomeCommitIdentity(
-                    controller, "driverDetach");
+                    controller, 0L, "driverDetach");
             clearLocalGestureState();
         }
 
@@ -22448,64 +22820,207 @@ public final class MiuiBackGestureHook extends XposedModule {
                 return true;
             }
 
-            Object startController;
-            long startInputEpoch;
-            boolean startInputAttached;
-            synchronized (backInputLifecycleLock) {
-                startController = controller;
-                startInputEpoch = inputMonitorEpoch.get();
-                startInputAttached = inputMonitorAttached;
+            try {
+                invokeAnyMethod(edgeBackGestureHandler,
+                        "updateDisplaySize$1", new Object[0]);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG,
+                        "Failed to update display size before Shell start",
+                        throwable);
             }
-            if (startController == null || startInputEpoch == 0L || !startInputAttached) {
+            float maxDistance = Math.max(1.0f,
+                    context.getResources().getDisplayMetrics().widthPixels);
+            float linearThreshold = readFloatFieldOrDefault(
+                    edgeBackGestureHandler, "mBackSwipeLinearThreshold",
+                    dp(AOSP_PROGRESS_THRESHOLD_DP));
+            float linearDistance = Math.min(maxDistance, linearThreshold);
+            float nonLinearFactor = readFloatFieldOrDefault(
+                    edgeBackGestureHandler, "mNonLinearFactor", 0.0f);
+            float startX = downX;
+            float startY = downY;
+            int startEdge = activeEdge;
+            ShellOwner owner = captureShellOwner();
+            if (owner == null) {
                 log(Log.WARN, TAG, "Rejected gesture without a stable Shell start owner"
-                        + ", controller=" + shortObject(startController)
-                        + ", inputEpoch=" + startInputEpoch
-                        + ", inputAttached=" + startInputAttached);
+                        + ", controller=" + shortObject(controller)
+                        + ", inputEpoch=" + inputMonitorEpoch.get()
+                        + ", inputAttached=" + inputMonitorAttached);
                 return false;
             }
-            if (Boolean.TRUE.equals(readField(
-                    startController, "mReceivedNullNavigationInfo"))) {
-                log(Log.WARN, TAG, "Rejected gesture with stale Shell null-navigation state"
-                        + ", state=" + describeShellState(startController));
+
+            AtomicReference<ShellStartSnapshot> startResult =
+                    new AtomicReference<>();
+            AtomicReference<ShellGestureSession> abandonedSession =
+                    new AtomicReference<>();
+            AtomicBoolean abandoned = new AtomicBoolean();
+            AtomicBoolean startTaskEntered = new AtomicBoolean();
+            Runnable startTask = () -> {
+                boolean startInvoked = false;
+                try {
+                    startTaskEntered.set(true);
+                    if (abandoned.get()) {
+                        return;
+                    }
+                    String state = describeShellStateOnOwner(owner.controller);
+                    if (!isShellReadyOnOwner(owner.controller)) {
+                        startResult.set(new ShellStartSnapshot(
+                                false, false, state, null, null,
+                                false, null));
+                        return;
+                    }
+                    ensureAospBackAnimations(owner.controller,
+                            "gestureStartOwner");
+                    if (abandoned.get()) {
+                        return;
+                    }
+                    startInvoked = true;
+                    invokeAnyMethod(owner.controller, "onGestureStarted",
+                            new Object[]{Float.valueOf(startX),
+                                    Float.valueOf(startY),
+                                    Integer.valueOf(startEdge)});
+                    Object tracker = invokeAnyMethod(owner.controller,
+                            "getActiveTracker", new Object[0]);
+                    if (tracker != null) {
+                        applyProgressThresholds(tracker, linearDistance,
+                                maxDistance, nonLinearFactor);
+                    }
+                    Object navigation = readField(owner.controller,
+                            "mBackNavigationInfo");
+                    boolean receivedNull = Boolean.TRUE.equals(readField(
+                            owner.controller, "mReceivedNullNavigationInfo"));
+                    startResult.set(new ShellStartSnapshot(
+                            true, true,
+                            describeShellStateOnOwner(owner.controller),
+                            tracker, navigation, receivedNull, null));
+                } catch (Throwable throwable) {
+                    Object tracker = null;
+                    Object navigation = null;
+                    boolean receivedNull = false;
+                    try {
+                        tracker = invokeAnyMethod(owner.controller,
+                                "getActiveTracker", new Object[0]);
+                        navigation = readField(owner.controller,
+                                "mBackNavigationInfo");
+                        receivedNull = Boolean.TRUE.equals(readField(
+                                owner.controller,
+                                "mReceivedNullNavigationInfo"));
+                    } catch (Throwable captureFailure) {
+                        throwable.addSuppressed(captureFailure);
+                    }
+                    startResult.set(new ShellStartSnapshot(
+                            false, startInvoked,
+                            describeShellStateOnOwner(owner.controller),
+                            tracker, navigation, receivedNull, throwable));
+                } finally {
+                    if (abandoned.get()) {
+                        handleAbandonedShellStart(owner, startResult.get(),
+                                abandonedSession, linearDistance,
+                                maxDistance, nonLinearFactor,
+                                startX, startY, startEdge);
+                    }
+                }
+            };
+            shellStartInFlight = true;
+            boolean blockingStartCompleted = executeShellBlocking(
+                    owner.executor, startTask, "gestureStart");
+            if (!blockingStartCompleted) {
+                abandoned.set(true);
+                shellOwnerUncertain = true;
+                boolean cleanupQueued = false;
+                try {
+                    owner.executor.execute(() -> handleAbandonedShellStart(
+                            owner, startResult.get(), abandonedSession,
+                            linearDistance, maxDistance, nonLinearFactor,
+                            startX, startY, startEdge));
+                    cleanupQueued = true;
+                } catch (Throwable cleanupFailure) {
+                    log(Log.ERROR, TAG,
+                            "Failed to queue abandoned Shell-start cleanup",
+                            cleanupFailure);
+                }
+                if (!cleanupQueued && !startTaskEntered.get()) {
+                    shellStartInFlight = false;
+                    shellOwnerUncertain = false;
+                }
+                log(Log.ERROR, TAG,
+                        "Rejected gesture after Shell blocking start failed"
+                                + ", cleanupQueued=" + cleanupQueued
+                                + ", taskEntered=" + startTaskEntered.get()
+                                + ", controller="
+                                + shortObject(owner.controller)
+                                + ", inputEpoch=" + owner.inputEpoch);
                 return false;
             }
-            syncAospProgressThresholds(startController);
-            invokeAnyMethod(startController, "onGestureStarted",
-                    new Object[]{Float.valueOf(downX), Float.valueOf(downY),
-                            Integer.valueOf(activeEdge)});
-            syncAospProgressThresholds(startController);
-            Object info = readField(startController, "mBackNavigationInfo");
-            boolean receivedNull = Boolean.TRUE.equals(
-                    readField(startController, "mReceivedNullNavigationInfo"));
-            Object currentController;
-            long currentInputEpoch;
-            boolean startOwnerStillCurrent;
-            synchronized (backInputLifecycleLock) {
-                currentController = controller;
-                currentInputEpoch = inputMonitorEpoch.get();
-                startOwnerStillCurrent = inputMonitorAttached
-                        && startController == currentController
-                        && startInputEpoch == currentInputEpoch;
+            ShellStartSnapshot start = startResult.get();
+            if (start == null) {
+                shellOwnerUncertain = true;
+                abandoned.set(true);
+                start = startResult.get();
+                if (start != null) {
+                    handleAbandonedShellStart(owner, start,
+                            abandonedSession, linearDistance,
+                            maxDistance, nonLinearFactor,
+                            startX, startY, startEdge);
+                }
+                log(Log.ERROR, TAG,
+                        "Rejected gesture after Shell blocking start timed out"
+                                + ", controller="
+                                + shortObject(owner.controller)
+                                + ", inputEpoch=" + owner.inputEpoch);
+                return false;
             }
-            if (!startOwnerStillCurrent) {
+            lastShellStateDescription = start.stateDescription;
+            if (start.failure != null) {
+                if (start.startInvoked) {
+                    handleAbandonedShellStart(owner, start,
+                            abandonedSession, linearDistance,
+                            maxDistance, nonLinearFactor,
+                            startX, startY, startEdge);
+                }
+                shellStartInFlight = false;
+                log(Log.ERROR, TAG, "Shell-owner gesture start failed",
+                        start.failure);
+                return false;
+            }
+            if (!start.ready || !start.startInvoked) {
+                shellStartInFlight = false;
+                log(Log.WARN, TAG, "Rejected gesture while Shell is busy"
+                        + ", state=" + start.stateDescription);
+                return false;
+            }
+            ShellGestureSession session = new ShellGestureSession(
+                    owner, start, startEdge, startX, startY, linearDistance,
+                    maxDistance, nonLinearFactor, acceptedInputIdentity);
+            if (!publishShellGestureSession(session)) {
+                shellOwnerUncertain = true;
+                shellStartInFlight = false;
+                cancelUnpublishedShellSession(session,
+                        "activeSessionCollision");
+                return false;
+            }
+            shellStartInFlight = false;
+            Object info = start.navigation;
+            boolean receivedNull = start.receivedNullNavigation;
+            if (!isShellOwnerCurrent(owner)) {
                 log(Log.WARN, TAG, "Rejected Shell gesture after start owner changed"
-                        + ", startController=" + shortObject(startController)
-                        + ", currentController=" + shortObject(currentController)
-                        + ", startInputEpoch=" + startInputEpoch
-                        + ", currentInputEpoch=" + currentInputEpoch);
-                cleanupRejectedShellGesture(startController);
+                        + ", sessionId=" + session.id
+                        + ", startController=" + shortObject(owner.controller)
+                        + ", currentController=" + shortObject(controller)
+                        + ", startInputEpoch=" + owner.inputEpoch
+                        + ", currentInputEpoch=" + inputMonitorEpoch.get());
+                cleanupRejectedShellGesture(session);
                 return false;
             }
             if (info == null || receivedNull) {
                 log(Log.WARN, TAG, "Shell rejected back navigation"
                         + ", info=" + shortObject(info)
                         + ", receivedNull=" + receivedNull
-                        + ", state=" + describeShellState(startController));
+                        + ", state=" + start.stateDescription);
                 if (launcherOverviewGesture) {
                     recentsVisualOnlyGesture = true;
                 }
                 if (launcherCallbackOnly) {
-                    cleanupRejectedShellGesture(startController);
+                    cleanupRejectedShellGesture(session);
                     if (launcherOverviewGesture) {
                         log(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
                                 + ", mode=visual-only"
@@ -22515,7 +23030,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 runningOpen = findReversibleRunningOpenTransition();
                 if (receivedNull && runningOpen != null) {
-                    cleanupRejectedShellGesture(startController);
+                    cleanupRejectedShellGesture(session);
                     legacyInterruptGesture = true;
                     legacyRunningOpenInfo = runningOpen.transitionInfo;
                     log(Log.INFO, TAG, "Using SystemUI-owned legacy BACK for possible "
@@ -22526,16 +23041,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (info == null && receivedNull) {
                     synchronized (backInputLifecycleLock) {
                         if (isCurrentAcceptedInputIdentity(
-                                acceptedInputIdentity, activeEdge, startController,
-                                startInputEpoch)) {
+                                acceptedInputIdentity, activeEdge,
+                                session.controller, session.inputEpoch)) {
                             // Match stock BackAnimationController: retain this authenticated
                             // physical stream, let the native panel drive the tracker's terminal
                             // trigger, and inject one legacy BACK only if release commits.
                             // Launcher callback probes and Shell-busy rejection never reach this
                             // branch.
                             aospNullNavigationGesture = true;
-                            aospNullNavigationInputEpoch = startInputEpoch;
-                            aospNullNavigationController = startController;
                             shellGestureStarted = true;
                             authenticatedNullStart = true;
                         }
@@ -22548,7 +23061,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", edge=" + activeEdge);
                     return true;
                 }
-                cleanupRejectedShellGesture(startController);
+                cleanupRejectedShellGesture(session);
                 return false;
             }
             if (launcherCallbackOnly) {
@@ -22567,7 +23080,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     if (launcherOverviewGesture) {
                         recentsVisualOnlyGesture = true;
                     }
-                    cleanupRejectedShellGesture(startController);
+                    cleanupRejectedShellGesture(session);
                     return false;
                 }
                 log(Log.INFO, TAG, (launcherShadeGesture
@@ -22581,8 +23094,78 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
             shellGestureStarted = true;
             log(Log.INFO, TAG, "SystemUI gesture driver onGestureStarted"
+                    + ", shellSessionId=" + session.id
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
+        }
+
+        private boolean publishShellGestureSession(
+                ShellGestureSession session) {
+            synchronized (backInputLifecycleLock) {
+                if (activeShellSession != null) {
+                    return false;
+                }
+                activeShellSession = session;
+                shellOwnerUncertain = false;
+                return true;
+            }
+        }
+
+        private void handleAbandonedShellStart(
+                ShellOwner owner, ShellStartSnapshot start,
+                AtomicReference<ShellGestureSession> abandonedSession,
+                float linearDistance, float maxDistance,
+                float nonLinearFactor, float startX, float startY,
+                int startEdge) {
+            if (start == null) {
+                shellStartInFlight = false;
+                shellOwnerUncertain = false;
+                return;
+            }
+            if (!start.startInvoked) {
+                shellStartInFlight = false;
+                shellOwnerUncertain = false;
+                return;
+            }
+            ShellGestureSession session = abandonedSession.get();
+            if (session == null) {
+                ShellGestureSession candidate = new ShellGestureSession(
+                        owner, start, startEdge, startX, startY,
+                        linearDistance, maxDistance, nonLinearFactor,
+                        acceptedInputIdentity);
+                if (abandonedSession.compareAndSet(null, candidate)) {
+                    session = candidate;
+                } else {
+                    session = abandonedSession.get();
+                }
+            }
+            if (session == null || session.releaseQueued.get()) {
+                return;
+            }
+            if (activeShellSession != session
+                    && !publishShellGestureSession(session)) {
+                shellStartInFlight = false;
+                cancelUnpublishedShellSession(session,
+                        "abandonedStartCollision");
+                return;
+            }
+            shellStartInFlight = false;
+            cleanupRejectedShellGesture(session);
+        }
+
+        private void cancelUnpublishedShellSession(
+                ShellGestureSession session, String reason) {
+            shellOwnerUncertain = true;
+            try {
+                session.executor.execute(() -> cancelFailedShellRelease(
+                        session, session.tracker));
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not cancel untracked Shell session"
+                                + ", sessionId=" + session.id
+                                + ", reason=" + reason,
+                        throwable);
+            }
         }
 
         private OpenTransitionSnapshot findReversibleRunningOpenTransition() {
@@ -22598,30 +23181,57 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private boolean isShellReadyForGesture() {
-            try {
-                if (Boolean.TRUE.equals(readField(controller,
-                        "mPostCommitAnimationInProgress"))) {
-                    return false;
-                }
-                if (Boolean.TRUE.equals(readField(controller, "mBackGestureStarted"))) {
-                    return false;
-                }
-                if (Boolean.TRUE.equals(readField(
-                        controller, "mReceivedNullNavigationInfo"))) {
-                    return false;
-                }
-                if (readField(controller, "mBackNavigationInfo") != null
-                        || readField(controller, "mBackAnimationFinishedCallback") != null) {
-                    return false;
-                }
-                Object current = readField(controller, "mCurrentTracker");
-                Object queued = readField(controller, "mQueuedTracker");
-                return isTrackerInitial(current) && isTrackerInitial(queued);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to inspect Shell readiness; rejecting gesture",
-                        throwable);
+            ShellGestureSession session = activeShellSession;
+            if (shellOwnerUncertain || session != null) {
+                lastShellStateDescription = describeActiveShellSession();
                 return false;
             }
+            ShellOwner owner = captureShellOwner();
+            if (owner == null) {
+                lastShellStateDescription = "owner-unavailable";
+                return false;
+            }
+            AtomicReference<Boolean> ready = new AtomicReference<>();
+            AtomicReference<String> state = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            executeShellBlocking(owner.executor, () -> {
+                try {
+                    state.set(describeShellStateOnOwner(owner.controller));
+                    ready.set(Boolean.valueOf(
+                            isShellReadyOnOwner(owner.controller)));
+                } catch (Throwable throwable) {
+                    failure.set(throwable);
+                }
+            }, "readiness");
+            lastShellStateDescription = state.get() == null
+                    ? "readiness-timeout" : state.get();
+            if (failure.get() != null) {
+                log(Log.WARN, TAG,
+                        "Failed to inspect Shell readiness; rejecting gesture",
+                        failure.get());
+            }
+            return failure.get() == null
+                    && Boolean.TRUE.equals(ready.get())
+                    && isShellOwnerCurrent(owner);
+        }
+
+        private boolean isShellReadyOnOwner(Object stateController)
+                throws Exception {
+            if (Boolean.TRUE.equals(readField(stateController,
+                    "mPostCommitAnimationInProgress"))
+                    || Boolean.TRUE.equals(readField(
+                    stateController, "mBackGestureStarted"))
+                    || Boolean.TRUE.equals(readField(
+                    stateController, "mReceivedNullNavigationInfo"))
+                    || readField(stateController,
+                    "mBackNavigationInfo") != null
+                    || readField(stateController,
+                    "mBackAnimationFinishedCallback") != null) {
+                return false;
+            }
+            Object current = readField(stateController, "mCurrentTracker");
+            Object queued = readField(stateController, "mQueuedTracker");
+            return isTrackerInitial(current) && isTrackerInitial(queued);
         }
 
         private boolean isTrackerInitial(Object tracker) throws Exception {
@@ -22629,10 +23239,10 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private String describeShellState() {
-            return describeShellState(controller);
+            return lastShellStateDescription;
         }
 
-        private String describeShellState(Object stateController) {
+        private String describeShellStateOnOwner(Object stateController) {
             try {
                 return "postCommit=" + readField(
                         stateController, "mPostCommitAnimationInProgress")
@@ -22650,7 +23260,7 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void cleanupRejectedShellGesture(Object rejectedController) {
+        private void cleanupRejectedShellGesture(ShellGestureSession session) {
             // A prepared adapter may deliver onAnimationStart after onGestureStarted() returns.
             // Finishing navigation here would clear mBackNavigationInfo first; the late adapter
             // callback would then be retained while startSystemAnimation() exits early, leaving
@@ -22658,8 +23268,9 @@ public final class MiuiBackGestureHook extends XposedModule {
             // Shell-owner release transaction so the tracker is finished with trigger=false and
             // a waiting runner receives cancellation before normal navigation cleanup.
             boolean queued = queueShellReleaseTransaction(
-                    rejectedController,
-                    downX, downY, 0.0f, false, false, activeEdge,
+                    session,
+                    session.startX, session.startY, 0.0f,
+                    false, false, session.edge,
                     launcherOverviewGesture, launcherShadeGesture, launcherDrawerGesture,
                     launcherEditingGesture, false, 0L, null);
             log(queued ? Log.INFO : Log.ERROR, TAG,
@@ -22669,7 +23280,8 @@ public final class MiuiBackGestureHook extends XposedModule {
                             + ", shadeProbe=" + launcherShadeGesture
                             + ", drawerProbe=" + launcherDrawerGesture
                             + ", editingProbe=" + launcherEditingGesture
-                            + ", edge=" + activeEdge);
+                            + ", shellSessionId=" + session.id
+                            + ", edge=" + session.edge);
         }
 
         private void clearControllerTriggerAfterVisualOnlyGesture() {
@@ -22678,14 +23290,10 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // BackCallback so it is ordered after any trigger=true posted by ACTION_UP.
                 invokeAnyMethod(backAnimationImpl, "setTriggerBack",
                         new Object[]{Boolean.FALSE});
-                return;
-            } catch (Throwable ignored) {
-            }
-            try {
-                invokeAnyMethod(controller, "setTriggerBack",
-                        new Object[]{Boolean.FALSE});
             } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to clear visual-only Recents trigger", throwable);
+                log(Log.WARN, TAG,
+                        "Failed to queue visual-only trigger clear through BackAnimationImpl",
+                        throwable);
             }
         }
 
@@ -22710,8 +23318,6 @@ public final class MiuiBackGestureHook extends XposedModule {
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             aospNullNavigationGesture = false;
-            aospNullNavigationInputEpoch = 0L;
-            aospNullNavigationController = null;
             legacyRunningOpenInfo = null;
             launcherOpenBreakGesture = false;
             launcherOpenBreakGeneration = 0L;
@@ -22739,12 +23345,87 @@ public final class MiuiBackGestureHook extends XposedModule {
             log(Log.INFO, TAG, "Cancelled local SystemUI back gesture, reason=" + reason);
         }
 
-        private void onShellAnimationFinished(Object finishedController, String reason) {
-            if (controller != finishedController) {
+        private Runnable captureShellAnimationCompletion(
+                Object finishedController, Object currentTracker,
+                Object queuedTracker, Object navigation, String reason) {
+            ShellGestureSession session = activeShellSession;
+            boolean exactIdentity = session != null
+                    && session.navigation == navigation
+                    && (session.tracker == currentTracker
+                    || session.tracker == queuedTracker);
+            if (session == null || session.completionConsumed.get()
+                    || !session.releaseQueued.get()
+                    || session.controller != finishedController
+                    || (!exactIdentity
+                    && !session.awaitingStockCleanup.get())) {
+                return null;
+            }
+            return () -> {
+                if (!exactIdentity) {
+                    boolean quiescent = false;
+                    try {
+                        quiescent = activeShellSession == session
+                                && isShellReadyOnOwner(finishedController);
+                    } catch (Throwable throwable) {
+                        log(Log.WARN, TAG,
+                                "Failed to verify orphaned Shell cleanup",
+                                throwable);
+                    }
+                    if (!quiescent) {
+                        log(Log.WARN, TAG,
+                                "Retained orphaned Shell session after non-quiescent finish"
+                                        + ", shellSessionId=" + session.id
+                                        + ", tracker="
+                                        + shortObject(session.tracker)
+                                        + ", currentTracker="
+                                        + shortObject(currentTracker)
+                                        + ", queuedTracker="
+                                        + shortObject(queuedTracker)
+                                        + ", navigation="
+                                        + shortObject(session.navigation)
+                                        + ", currentNavigation="
+                                        + shortObject(navigation));
+                        return;
+                    }
+                    log(Log.WARN, TAG,
+                            "Accepted definitive stock cleanup for orphaned Shell session"
+                                    + ", shellSessionId=" + session.id);
+                }
+                completeShellSessionOnOwner(
+                        session, "stock-finish:" + reason);
+            };
+        }
+
+        private void completeShellSessionOnOwner(
+                ShellGestureSession session, String reason) {
+            if (session == null
+                    || !session.completionConsumed.compareAndSet(
+                    false, true)) {
                 return;
             }
+            new Handler(Looper.getMainLooper()).post(
+                    () -> completeShellSessionOnMain(session, reason));
+        }
+
+        private void completeShellSessionOnMain(
+                ShellGestureSession session, String reason) {
+            synchronized (backInputLifecycleLock) {
+                if (activeShellSession != session) {
+                    log(Log.WARN, TAG,
+                            "Ignored stale Shell session completion"
+                                    + ", shellSessionId=" + session.id
+                                    + ", activeSessionId="
+                                    + (activeShellSession == null ? 0L
+                                    : activeShellSession.id)
+                                    + ", reason=" + reason);
+                    return;
+                }
+                activeShellSession = null;
+                shellOwnerUncertain = false;
+            }
             clearSystemUiReturnHomeCommitIdentity(
-                    finishedController, "shellFinished:" + reason);
+                    session.controller, session.id,
+                    "shellFinished:" + reason);
             if (gestureSuppressed) {
                 // This DOWN was rejected while the previous Shell navigation was still busy.
                 // Finishing that navigation must not reopen the already-rejected physical
@@ -22752,6 +23433,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // would otherwise pilfer a later MOVE before noticing this driver was cleared.
                 log(Log.INFO, TAG,
                         "Preserved suppressed SystemUI back stream after Shell completion"
+                                + ", shellSessionId=" + session.id
                                 + ", reason=" + reason);
                 return;
             }
@@ -22759,16 +23441,18 @@ public final class MiuiBackGestureHook extends XposedModule {
                 if (recentsVisualOnlyGesture) {
                     log(Log.INFO, TAG,
                             "Preserved visual-only Recents gesture after Shell cancellation"
+                                    + ", shellSessionId=" + session.id
                                     + ", reason=" + reason);
                     return;
                 }
                 clearLocalGestureState();
                 log(Log.WARN, TAG, "Cleared local gesture after Shell animation completion"
+                        + ", shellSessionId=" + session.id
                         + ", reason=" + reason);
             }
         }
 
-        private boolean queueShellReleaseTransaction(Object releaseController,
+        private boolean queueShellReleaseTransaction(ShellGestureSession session,
                                                        float rawX, float rawY,
                                                        float releaseDistance,
                                                        boolean dispatchFinalProgress,
@@ -22781,15 +23465,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                        boolean aospNullFallback,
                                                        long aospNullInputEpoch,
                                                        MiuiHomeAcceptedInputToken
-                                                               inputIdentity) {
+                                                                inputIdentity) {
+            if (session == null || session.completionConsumed.get()
+                    || !session.releaseQueued.compareAndSet(false, true)) {
+                return false;
+            }
             try {
-                Object shellExecutor = readField(releaseController, "mShellExecutor");
-                if (!(shellExecutor instanceof Executor)) {
-                    throw new IllegalStateException("mShellExecutor is "
-                            + shortObject(shellExecutor));
-                }
-                ((Executor) shellExecutor).execute(() -> finishGestureOnShellExecutor(
-                        releaseController, rawX, rawY, releaseDistance,
+                session.executor.execute(() -> finishGestureOnShellExecutor(
+                        session, rawX, rawY, releaseDistance,
                         dispatchFinalProgress, requestedTrigger, releaseEdge,
                         recentsCallback, shadeCallback, drawerCallback, editingCallback,
                         aospNullFallback, aospNullInputEpoch, inputIdentity));
@@ -22797,14 +23480,17 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 // A release must never fall back to mutating controller/tracker state from
                 // the input Looper. Fail closed if the owner executor cannot be reached.
-                log(Log.ERROR, TAG, "Failed to queue complete Shell release transaction",
+                log(Log.ERROR, TAG, "Failed to queue complete Shell release transaction"
+                                + ", shellSessionId=" + session.id,
                         throwable);
+                session.awaitingStockCleanup.set(true);
+                shellOwnerUncertain = true;
                 return false;
             }
         }
 
-        private void finishGestureOnShellExecutor(Object releaseController,
-                                                  float rawX, float rawY,
+        private void finishGestureOnShellExecutor(ShellGestureSession session,
+                                                   float rawX, float rawY,
                                                   float releaseDistance,
                                                   boolean dispatchFinalProgress,
                                                   boolean requestedTrigger,
@@ -22816,19 +23502,49 @@ public final class MiuiBackGestureHook extends XposedModule {
                                                   boolean aospNullFallback,
                                                   long aospNullInputEpoch,
                                                   MiuiHomeAcceptedInputToken
-                                                          inputIdentity) {
+                                                           inputIdentity) {
+            Object releaseController = session.controller;
             Object tracker = null;
             try {
+                if (session.moveFailed.get()) {
+                    requestedTrigger = false;
+                    log(Log.WARN, TAG,
+                            "Forced Shell release cancellation after MOVE failure"
+                                    + ", shellSessionId=" + session.id);
+                }
+                if (!isShellSessionOwnerCurrent(session)) {
+                    if (requestedTrigger) {
+                        log(Log.WARN, TAG,
+                                "Forced Shell release cancellation after owner changed on executor"
+                                        + ", shellSessionId=" + session.id
+                                        + ", sessionController="
+                                        + shortObject(session.controller)
+                                        + ", currentController="
+                                        + shortObject(controller)
+                                        + ", sessionInputEpoch="
+                                        + session.inputEpoch
+                                        + ", currentInputEpoch="
+                                        + inputMonitorEpoch.get());
+                    }
+                    requestedTrigger = false;
+                }
                 tracker = invokeAnyMethod(releaseController,
                         "getActiveTracker", new Object[0]);
-                if (tracker != null) {
-                    applyProgressThresholds(tracker);
-                    ((BackTouchTracker) tracker).update(rawX, rawY);
-                } else {
-                    finishShellReleaseWithoutTracker(releaseController,
-                            recentsCallback, shadeCallback, drawerCallback, editingCallback);
+                if (tracker == null || tracker != session.tracker) {
+                    failShellReleaseWithoutTracker(session,
+                            "activeTrackerIdentityMismatch");
                     return;
                 }
+                Object currentNavigation = readField(releaseController,
+                        "mBackNavigationInfo");
+                if (currentNavigation != session.navigation) {
+                    failShellReleaseWithoutTracker(session,
+                            "navigationIdentityMismatch");
+                    return;
+                }
+                applyProgressThresholds(tracker, session.linearDistance,
+                        session.maxDistance, session.nonLinearFactor);
+                ((BackTouchTracker) tracker).update(rawX, rawY);
                 // BackPanelController posts its terminal ACTIVE/INACTIVE decision through
                 // BackAnimationImpl before this release transaction. Preserve that ordered
                 // decision: an INACTIVE panel has already supplied trigger=false even when the
@@ -22843,9 +23559,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 }
                 tracker = invokeAnyMethod(releaseController,
                         "getActiveTracker", new Object[0]);
-                if (tracker == null) {
-                    finishShellReleaseWithoutTracker(releaseController,
-                            recentsCallback, shadeCallback, drawerCallback, editingCallback);
+                if (tracker == null || tracker != session.tracker) {
+                    failShellReleaseWithoutTracker(session,
+                            "postTriggerTrackerIdentityMismatch");
                     return;
                 }
                 boolean actualTrigger = Boolean.TRUE.equals(invokeAnyMethod(
@@ -22856,16 +23572,21 @@ public final class MiuiBackGestureHook extends XposedModule {
                         + nativeTriggerBeforeThresholdVeto
                         + ", actualTrigger=" + actualTrigger);
                 if (dispatchFinalProgress && !aospNullFallback) {
-                    dispatchExplicitProgressOnShell(releaseController, tracker,
+                    dispatchExplicitProgressOnShell(session, tracker,
                             releaseDistance);
                 }
                 Object infoObject = readField(releaseController,
                         "mBackNavigationInfo");
+                if (infoObject != session.navigation) {
+                    failShellReleaseWithoutTracker(session,
+                            "releaseNavigationIdentityMismatch");
+                    return;
+                }
                 BackNavigationInfo info = infoObject instanceof BackNavigationInfo
                         ? (BackNavigationInfo) infoObject : null;
                 if (info == null) {
                     finishNullNavigationOnShellExecutor(
-                            releaseController, tracker, requestedTrigger,
+                            session, tracker, requestedTrigger,
                             actualTrigger, releaseEdge, aospNullFallback,
                             aospNullInputEpoch, inputIdentity);
                     return;
@@ -22891,6 +23612,7 @@ public final class MiuiBackGestureHook extends XposedModule {
 
                 if (Boolean.TRUE.equals(readField(releaseController,
                         "mPostCommitAnimationInProgress"))) {
+                    session.awaitingStockCleanup.set(true);
                     log(Log.WARN, TAG, "Shell release found an existing post-commit animation"
                             + ", actualTrigger=" + actualTrigger
                             + ", edge=" + releaseEdge);
@@ -22913,7 +23635,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     } else {
                         SystemUiReturnHomeCommitIdentity identity =
                                 new SystemUiReturnHomeCommitIdentity(
-                                        releaseController,
+                                        releaseController, session.id,
                                         focusedTaskId, inputIdentity);
                         SystemUiReturnHomeCommitIdentity replaced =
                                 systemUiReturnHomeCommitIdentity
@@ -22937,9 +23659,12 @@ public final class MiuiBackGestureHook extends XposedModule {
                     logShellReleaseResult(info, requestedTrigger, actualTrigger,
                             "direct-callback", releaseEdge,
                             recentsCallback, shadeCallback, drawerCallback, editingCallback);
+                    completeShellSessionOnOwner(session,
+                            "direct-callback");
                     return;
                 }
 
+                session.awaitingStockCleanup.set(true);
                 int runnerState = inspectRemoteRunnerState(releaseController, info);
                 if (runnerState == REMOTE_RUNNER_MISSING
                         || runnerState == REMOTE_RUNNER_CANCELLED) {
@@ -22951,6 +23676,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     ? "runner-missing" : "runner-cancelled",
                             releaseEdge, recentsCallback, shadeCallback,
                             drawerCallback, editingCallback);
+                    completeShellSessionOnOwner(session,
+                            runnerState == REMOTE_RUNNER_MISSING
+                                    ? "runner-missing" : "runner-cancelled");
                     return;
                 }
                 if (runnerState == REMOTE_RUNNER_WAITING
@@ -22974,16 +23702,17 @@ public final class MiuiBackGestureHook extends XposedModule {
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Complete Shell release transaction failed; cancelling",
                         throwable);
-                cancelFailedShellRelease(releaseController, tracker);
+                cancelFailedShellRelease(session, tracker);
             }
         }
 
         private void finishNullNavigationOnShellExecutor(
-                Object releaseController, Object tracker,
+                ShellGestureSession session, Object tracker,
                 boolean requestedTrigger, boolean actualTrigger,
                 int releaseEdge, boolean aospNullFallback,
                 long aospNullInputEpoch,
                 MiuiHomeAcceptedInputToken inputIdentity) throws Exception {
+            Object releaseController = session.controller;
             boolean authenticatedFallback;
             boolean commitLegacyBack;
             synchronized (backInputLifecycleLock) {
@@ -23004,6 +23733,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                 setTrackerState(tracker, "FINISHED");
                 if (Boolean.TRUE.equals(readField(releaseController,
                         "mPostCommitAnimationInProgress"))) {
+                    session.awaitingStockCleanup.set(true);
                     log(Log.WARN, TAG,
                             "Null-navigation release found an existing post-commit animation"
                                     + ", authenticatedFallback="
@@ -23019,6 +23749,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                 invokeAnyMethod(releaseController, "finishBackNavigation",
                         new Object[]{Boolean.valueOf(commitLegacyBack)});
             }
+            completeShellSessionOnOwner(session,
+                    commitLegacyBack ? "null-navigation-commit"
+                            : "null-navigation-cancel");
             log(commitLegacyBack ? Log.INFO : Log.WARN, TAG,
                     "Finished released gesture with null navigation"
                             + ", requestedTrigger=" + requestedTrigger
@@ -23075,17 +23808,18 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void dispatchExplicitProgressOnShell(Object releaseController,
-                                                     Object tracker,
-                                                     float distance) {
+        private void dispatchExplicitProgressOnShell(ShellGestureSession session,
+                                                      Object tracker,
+                                                      float distance) {
             try {
-                Object callback = readField(releaseController, "mActiveCallback");
+                Object callback = readField(session.controller,
+                        "mActiveCallback");
                 float progress = Math.max(0.0f,
                         Math.min(1.0f, distance
-                                / Math.max(1.0f, progressDistancePx())));
+                                / Math.max(1.0f, session.maxDistance)));
                 BackMotionEvent progressEvent =
                         ((BackTouchTracker) tracker).createProgressEvent(progress);
-                invokeAnyMethod(releaseController, "dispatchOnBackProgressed",
+                invokeAnyMethod(session.controller, "dispatchOnBackProgressed",
                         new Object[]{callback, progressEvent});
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to dispatch final progress on Shell executor",
@@ -23141,112 +23875,94 @@ public final class MiuiBackGestureHook extends XposedModule {
             }
         }
 
-        private void finishShellReleaseWithoutTracker(Object releaseController,
-                                                      boolean recentsCallback,
-                                                      boolean shadeCallback,
-                                                      boolean drawerCallback,
-                                                      boolean editingCallback)
-                throws Exception {
-            writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
-            writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
-            writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
-            Object infoObject = readField(releaseController, "mBackNavigationInfo");
-            Object animationCallback = readField(releaseController,
-                    "mActiveCallback");
-            boolean hasSeparateAnimatorCallback = infoObject == null
-                    || (infoObject instanceof BackNavigationInfo
-                    && ((BackNavigationInfo) infoObject).isPrepareRemoteAnimation());
-            if (hasSeparateAnimatorCallback && animationCallback != null) {
-                try {
-                    // This is the phase-2 animator callback which startPostCommitAnimation()
-                    // would normally cancel before the core navigation completion below.
-                    invokeAnyMethod(releaseController, "tryDispatchOnBackCancelled",
-                            new Object[]{animationCallback});
-                } catch (Throwable throwable) {
-                    log(Log.WARN, TAG,
-                            "Failed to cancel animator callback without active tracker",
-                            throwable);
-                }
-            }
-            Object currentTracker = readField(releaseController, "mCurrentTracker");
-            Object queuedTracker = readField(releaseController, "mQueuedTracker");
-            Object completionTracker = currentTracker != null
-                    ? currentTracker : queuedTracker;
-            if (completionTracker != null) {
-                invokeAnyMethod(completionTracker, "setTriggerBack",
-                        new Object[]{Boolean.FALSE});
-                setTrackerState(completionTracker, "FINISHED");
-                // This atomically returns mBackAnimationFinishedCallback(false), cancels the
-                // real BackNavigationInfo callback, and calls finishBackNavigation(false).
-                invokeAnyMethod(releaseController, "invokeOrCancelBack",
-                        new Object[]{completionTracker});
-                ((BackTouchTracker) completionTracker).reset();
-                if (queuedTracker != null && queuedTracker != completionTracker) {
-                    ((BackTouchTracker) queuedTracker).reset();
-                }
-            } else {
-                finishShellReleaseWithoutAnyTracker(releaseController);
-            }
-            log(Log.WARN, TAG, "Cancelled Shell release without an active tracker"
-                    + ", recentsShellCallback=" + recentsCallback
-                    + ", shadeShellCallback=" + shadeCallback
-                    + ", drawerShellCallback=" + drawerCallback
-                    + ", editingShellCallback=" + editingCallback);
+        private void failShellReleaseWithoutTracker(
+                ShellGestureSession session, String reason) {
+            session.awaitingStockCleanup.set(true);
+            scheduleShellAnimationTimeout(session.controller);
+            log(Log.ERROR, TAG,
+                    "Kept failed Shell session for stock timeout"
+                            + ", shellSessionId=" + session.id
+                            + ", reason=" + reason
+                            + ", tracker=" + shortObject(session.tracker)
+                            + ", navigation="
+                            + shortObject(session.navigation));
         }
 
-        private void finishShellReleaseWithoutAnyTracker(Object releaseController)
-                throws Exception {
-            Object finishedCallback = readField(releaseController,
-                    "mBackAnimationFinishedCallback");
-            if (finishedCallback != null) {
-                try {
-                    invokeAnyMethod(finishedCallback, "onAnimationFinished",
-                            new Object[]{Boolean.FALSE});
-                } catch (Throwable throwable) {
-                    log(Log.WARN, TAG,
-                            "Failed false-completion without any Shell tracker",
-                            throwable);
-                } finally {
-                    writeField(releaseController,
-                            "mBackAnimationFinishedCallback", null);
-                }
-            }
-            Object infoObject = readField(releaseController, "mBackNavigationInfo");
-            if (infoObject instanceof BackNavigationInfo
-                    && !Boolean.TRUE.equals(readField(releaseController,
-                    "mRealCallbackInvoked"))) {
-                Object callback = ((BackNavigationInfo) infoObject)
-                        .getOnBackInvokedCallback();
-                if (callback != null) {
-                    invokeAnyMethod(releaseController,
-                            "tryDispatchOnBackCancelled", new Object[]{callback});
-                }
-            }
-            writeField(releaseController, "mRealCallbackInvoked", Boolean.FALSE);
-            invokeAnyMethod(releaseController, "finishBackNavigation",
-                    new Object[]{Boolean.FALSE});
-        }
-
-        private void cancelFailedShellRelease(Object releaseController,
+        private void cancelFailedShellRelease(ShellGestureSession session,
                                               Object tracker) {
+            Object releaseController = session.controller;
             try {
+                Object activeTracker = invokeAnyMethod(releaseController,
+                        "getActiveTracker", new Object[0]);
+                Object infoObject = readField(releaseController,
+                        "mBackNavigationInfo");
+                if (tracker == null || tracker != session.tracker
+                        || activeTracker != session.tracker
+                        || infoObject != session.navigation) {
+                    failShellReleaseWithoutTracker(session,
+                            "failedReleaseIdentityMismatch");
+                    return;
+                }
                 writeField(releaseController, "mThresholdCrossed", Boolean.FALSE);
                 writeField(releaseController, "mPointersPilfered", Boolean.FALSE);
                 writeField(releaseController, "mBackGestureStarted", Boolean.FALSE);
-                if (tracker != null) {
-                    invokeAnyMethod(tracker, "setTriggerBack",
+                invokeAnyMethod(tracker, "setTriggerBack",
+                        new Object[]{Boolean.FALSE});
+                setTrackerState(tracker, "FINISHED");
+                if (Boolean.TRUE.equals(readField(releaseController,
+                        "mPostCommitAnimationInProgress"))) {
+                    session.awaitingStockCleanup.set(true);
+                    scheduleShellAnimationTimeout(releaseController);
+                    return;
+                }
+                BackNavigationInfo info = infoObject instanceof BackNavigationInfo
+                        ? (BackNavigationInfo) infoObject : null;
+                if (info == null) {
+                    ((BackTouchTracker) tracker).reset();
+                    invokeAnyMethod(releaseController, "finishBackNavigation",
                             new Object[]{Boolean.FALSE});
-                    setTrackerState(tracker, "FINISHED");
+                    completeShellSessionOnOwner(session,
+                            "failed-null-navigation-cancel");
+                    return;
+                }
+                if (!info.isPrepareRemoteAnimation()) {
                     invokeAnyMethod(releaseController, "invokeOrCancelBack",
                             new Object[]{tracker});
                     ((BackTouchTracker) tracker).reset();
-                } else {
-                    finishShellReleaseWithoutTracker(releaseController,
-                            false, false, false, false);
+                    completeShellSessionOnOwner(session,
+                            "failed-direct-cancel");
+                    return;
                 }
+                session.awaitingStockCleanup.set(true);
+                int runnerState = inspectRemoteRunnerState(
+                        releaseController, info);
+                if (runnerState == REMOTE_RUNNER_MISSING
+                        || runnerState == REMOTE_RUNNER_CANCELLED) {
+                    invokeAnyMethod(releaseController, "invokeOrCancelBack",
+                            new Object[]{tracker});
+                    ((BackTouchTracker) tracker).reset();
+                    completeShellSessionOnOwner(session,
+                            runnerState == REMOTE_RUNNER_MISSING
+                                    ? "failed-runner-missing"
+                                    : "failed-runner-cancelled");
+                    return;
+                }
+                if (runnerState == REMOTE_RUNNER_WAITING
+                        || runnerState == REMOTE_RUNNER_UNKNOWN) {
+                    scheduleShellAnimationTimeout(releaseController);
+                    return;
+                }
+                if (info.getType() == TYPE_RETURN_TO_HOME) {
+                    prepareReturnHomeCancelTransitionCleanup(
+                            releaseController);
+                }
+                invokeAnyMethod(releaseController,
+                        "startPostCommitAnimation", new Object[0]);
             } catch (Throwable throwable) {
                 log(Log.ERROR, TAG, "Failed to cancel broken Shell release transaction",
                         throwable);
+                failShellReleaseWithoutTracker(session,
+                        "failedReleaseCancellationException");
             }
         }
 
@@ -23280,86 +23996,102 @@ public final class MiuiBackGestureHook extends XposedModule {
             return value * context.getResources().getDisplayMetrics().density;
         }
 
-        private void updateTriggerBack(boolean newTriggerBack) {
+        private boolean updateTriggerBack(boolean newTriggerBack) {
             if (triggerBack == newTriggerBack) {
-                return;
+                return false;
             }
             triggerBack = newTriggerBack;
+            log(Log.INFO, TAG,
+                    "SystemUI gesture driver triggerBack=" + newTriggerBack);
+            return true;
+        }
+
+        private boolean queueShellMove(
+                ShellGestureSession session, float rawX, float rawY,
+                float distance, boolean crossedNow,
+                boolean dispatchProgress, boolean triggerChanged,
+                boolean newTriggerBack) {
+            if (session == null || session.completionConsumed.get()
+                    || session.releaseQueued.get()
+                    || session.moveFailed.get()) {
+                return false;
+            }
             try {
-                if (!legacyInterruptGesture && !launcherOpenBreakGesture) {
-                    invokeAnyMethod(controller, "setTriggerBack",
-                            new Object[]{Boolean.valueOf(newTriggerBack)});
-                }
-                log(Log.INFO, TAG, "SystemUI gesture driver triggerBack=" + newTriggerBack);
+                session.executor.execute(() -> {
+                    Object tracker = null;
+                    try {
+                        if (session.completionConsumed.get()
+                                || session.moveFailed.get()) {
+                            return;
+                        }
+                        tracker = invokeAnyMethod(session.controller,
+                                "getActiveTracker", new Object[0]);
+                        Object navigation = readField(session.controller,
+                                "mBackNavigationInfo");
+                        boolean receivedNull = Boolean.TRUE.equals(readField(
+                                session.controller,
+                                "mReceivedNullNavigationInfo"));
+                        if (tracker != session.tracker
+                                || navigation != session.navigation
+                                || (session.navigation == null
+                                && receivedNull
+                                != session.receivedNullNavigation)) {
+                            throw new IllegalStateException(
+                                    "Shell MOVE identity changed"
+                                            + ", tracker="
+                                            + shortObject(tracker)
+                                            + ", navigation="
+                                            + shortObject(navigation)
+                                            + ", receivedNull="
+                                            + receivedNull);
+                        }
+                        applyProgressThresholds(tracker,
+                                session.linearDistance,
+                                session.maxDistance,
+                                session.nonLinearFactor);
+                        ((BackTouchTracker) tracker).update(rawX, rawY);
+                        if (crossedNow) {
+                            invokeAnyMethod(session.controller,
+                                    "onThresholdCrossed", new Object[0]);
+                        }
+                        if (dispatchProgress) {
+                            dispatchExplicitProgressOnShell(
+                                    session, tracker, distance);
+                        }
+                        if (triggerChanged) {
+                            invokeAnyMethod(session.controller,
+                                    "setTriggerBack", new Object[]{
+                                            Boolean.valueOf(newTriggerBack)});
+                        }
+                    } catch (Throwable throwable) {
+                        session.moveFailed.set(true);
+                        log(Log.ERROR, TAG,
+                                "Fixed Shell-owner MOVE failed; cancelling"
+                                        + ", shellSessionId=" + session.id,
+                                throwable);
+                        if (session.releaseQueued.compareAndSet(
+                                false, true)) {
+                            cancelFailedShellRelease(session, tracker);
+                        }
+                    }
+                });
+                return true;
             } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to update triggerBack=" + newTriggerBack,
+                session.moveFailed.set(true);
+                log(Log.ERROR, TAG,
+                        "Failed to queue fixed Shell-owner MOVE"
+                                + ", shellSessionId=" + session.id,
                         throwable);
+                cleanupRejectedShellGesture(session);
+                return false;
             }
         }
 
-        private void syncAospProgressThresholds(Object progressController) {
-            try {
-                invokeAnyMethod(edgeBackGestureHandler, "updateDisplaySize$1", new Object[0]);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to update display size for back progress", throwable);
-            }
-            try {
-                Object tracker = invokeAnyMethod(
-                        progressController, "getActiveTracker", new Object[0]);
-                if (tracker != null) {
-                    applyProgressThresholds(tracker);
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to sync active tracker progress thresholds",
-                        throwable);
-            }
-        }
-
-        private void applyProgressThresholds(Object tracker) {
-            float maxDistance = Math.max(1.0f,
-                    context.getResources().getDisplayMetrics().widthPixels);
-            float linearThreshold = readFloatFieldOrDefault(edgeBackGestureHandler,
-                    "mBackSwipeLinearThreshold", dp(AOSP_PROGRESS_THRESHOLD_DP));
-            float linearDistance = Math.min(maxDistance, linearThreshold);
-            float nonLinearFactor = readFloatFieldOrDefault(edgeBackGestureHandler,
-                    "mNonLinearFactor", 0.0f);
+        private void applyProgressThresholds(
+                Object tracker, float linearDistance,
+                float maxDistance, float nonLinearFactor) {
             ((BackTouchTracker) tracker).setProgressThresholds(
                     linearDistance, maxDistance, nonLinearFactor);
-        }
-
-        private void updateActiveTracker(float rawX, float rawY) {
-            try {
-                Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
-                if (tracker == null) {
-                    return;
-                }
-                applyProgressThresholds(tracker);
-                ((BackTouchTracker) tracker).update(rawX, rawY);
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to update active back tracker", throwable);
-            }
-        }
-
-        private void dispatchExplicitProgress(float distance) {
-            try {
-                Object tracker = invokeAnyMethod(controller, "getActiveTracker", new Object[0]);
-                if (tracker == null) {
-                    return;
-                }
-                Object callback = readField(controller, "mActiveCallback");
-                float progress = Math.max(0.0f,
-                        Math.min(1.0f, distance / Math.max(1.0f, progressDistancePx())));
-                BackMotionEvent progressEvent =
-                        ((BackTouchTracker) tracker).createProgressEvent(progress);
-                invokeAnyMethod(controller, "dispatchOnBackProgressed",
-                        new Object[]{callback, progressEvent});
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to dispatch explicit back progress", throwable);
-            }
-        }
-
-        private float progressDistancePx() {
-            return Math.max(1.0f, context.getResources().getDisplayMetrics().widthPixels);
         }
 
         private void dispatchLegacyInterruptBack() {
