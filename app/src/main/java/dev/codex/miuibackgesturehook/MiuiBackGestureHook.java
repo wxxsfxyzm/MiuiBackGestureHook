@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r44-shell-and-return-home-lifecycle-fix";
+            "systemui-aosp-back-0.7.0-r45-headless-native-sysui-state";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -448,7 +448,7 @@ public final class MiuiBackGestureHook extends XposedModule {
     private volatile boolean predictiveBackApplicationMetadataFailureLogged;
     private String processName;
     private boolean nativePluginDiagnosticsLogged;
-    private boolean headlessImmersiveGesturePolicyLogged;
+    private boolean headlessSysUiStateLogged;
     private volatile Field defaultTransitionAnimationsField;
     private volatile Field defaultTransitionAnimationSizeField;
     private volatile Field defaultTransitionAnimExecutorField;
@@ -21818,25 +21818,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
 
         private Long readSystemUiStateFlags() {
-            boolean headlessPublisher;
-            boolean logHeadlessPublisher = false;
-            synchronized (headlessNavBarLifecycleLock) {
-                HeadlessNavBarLease lease = headlessNavBarLease;
-                headlessPublisher = lease != null
-                        && lease.edgeBackGestureHandler == edgeBackGestureHandler;
-                if (headlessPublisher && !headlessImmersiveGesturePolicyLogged) {
-                    headlessImmersiveGesturePolicyLogged = true;
-                    logHeadlessPublisher = true;
-                }
-            }
-            if (headlessPublisher) {
-                if (logHeadlessPublisher) {
-                    log(Log.INFO, TAG,
-                            "Headless NavigationBar has no system-bar behavior publisher; "
-                                    + "using fail-closed AOSP immersive policy");
-                }
-                return null;
-            }
             try {
                 Object sysUiState = readField(edgeBackGestureHandler, "mSysUiState");
                 Object stateDisplayId = invokeAnyMethod(
@@ -21853,7 +21834,24 @@ public final class MiuiBackGestureHook extends XposedModule {
                                     + ", flags=" + flagsObject);
                     return null;
                 }
-                return Long.valueOf(((Number) flagsObject).longValue());
+                long flags = ((Number) flagsObject).longValue();
+                boolean logHeadlessState = false;
+                synchronized (headlessNavBarLifecycleLock) {
+                    HeadlessNavBarLease lease = headlessNavBarLease;
+                    if (lease != null
+                            && lease.edgeBackGestureHandler == edgeBackGestureHandler
+                            && !headlessSysUiStateLogged) {
+                        headlessSysUiStateLogged = true;
+                        logHeadlessState = true;
+                    }
+                }
+                if (logHeadlessState) {
+                    log(Log.INFO, TAG,
+                            "Authenticated native SysUiState for headless NavigationBar"
+                                    + ", displayId=" + displayId
+                                    + ", flags=0x" + Long.toHexString(flags));
+                }
+                return Long.valueOf(flags);
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG,
                         "Failed to inspect AOSP immersive gesture visibility policy",
