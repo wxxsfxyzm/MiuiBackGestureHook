@@ -2949,6 +2949,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                 + ", currentGeneration="
                                 + miuiLauncherOpenBreakGeneration);
                     } else {
+                        long previousGeneration = miuiLauncherOpenBreakGeneration;
+                        boolean previousAvailable = miuiLauncherOpenBreakAvailable;
                         miuiLauncherOpenBreakGeneration = generation;
                         miuiLauncherOpenBreakAvailable = available;
                         log(Log.INFO, TAG, "MiuiHome launcher OPEN break state changed"
@@ -2956,6 +2958,13 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                 + ", generation=" + generation
                                 + ", uid=" + senderUid
                                 + ", package=" + senderPackage);
+                        if (!available && previousAvailable
+                                && previousGeneration == generation) {
+                            for (NativeBackInputMonitor monitor
+                                    : new ArrayList<>(nativeInputMonitors.values())) {
+                                monitor.driver.onLauncherOpenBreakUnavailable(generation);
+                            }
+                        }
                     }
                 }
                 String state = intent == null ? null : intent.getStringExtra("state");
