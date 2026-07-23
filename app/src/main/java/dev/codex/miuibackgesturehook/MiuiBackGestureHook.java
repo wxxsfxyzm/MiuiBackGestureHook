@@ -86,7 +86,7 @@ import io.github.libxposed.api.XposedModuleInterface;
 public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     private static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r45-headless-native-sysui-state";
+            "systemui-aosp-back-0.7.0-r46-return-home-finish-replacement";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
     private static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -15742,13 +15742,6 @@ public final class MiuiBackGestureHook extends XposedModule {
         private boolean isExactAdoptedNativeCloseFinishSnapshot(
                 ReturnHomeSession session,
                 UnifiedNativeFinishSnapshot snapshot) {
-            boolean currentElementValid = session != null && snapshot != null
-                    && (snapshot.currentElement == session.nativeWindowElement
-                    || (snapshot.currentElement != null
-                    && snapshot.currentElement != session.nativeWindowElement
-                    && snapshot.oldElementRecorded
-                    && isMiuiHomeLauncherOpenType(
-                    snapshot.currentElementType)));
             return hasExactUnifiedNativeFinishIdentity(session, snapshot)
                     && session.nativeAnimationStarted
                     && session.nativeContinuationVerified
@@ -15756,8 +15749,7 @@ public final class MiuiBackGestureHook extends XposedModule {
                     == snapshot.animationIdentity
                     && session.nativeAnimationType != null
                     && session.nativeAnimationType.equals(snapshot.actualType)
-                    && isReturnHomeNativeCloseType(snapshot.actualType)
-                    && currentElementValid;
+                    && isReturnHomeNativeCloseType(snapshot.actualType);
         }
 
         private boolean isConsumableUnifiedNativeFinishSnapshot(
