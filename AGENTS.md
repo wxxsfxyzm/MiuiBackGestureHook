@@ -38,6 +38,10 @@ predictive-back path.
   `BackAnimationController.onGestureStarted(...)`.
 - Do not pause or manually animate the running OPEN animators; let Xiaomi finish or reverse
   them through its native OPEN/CLOSE merge path.
+- If the exact active OPEN snapshot normally loses reversibility while its accepted gesture
+  remains down, leave the native interruption path and start standard Shell navigation with
+  the accumulated coordinates. Seed the tracker on `mShellExecutor` before its runner can
+  start; cancellation, reverse-end, replacement, or stale input/owner identity must not hand off.
 - Commit interruption gestures with a normal BACK. If OPEN has ended or Xiaomi rejects the
   merge, ordinary CLOSE fallback is expected.
 - When no reversible OPEN exists, preserve the existing AOSP predictive-back path.
@@ -496,6 +500,7 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
 - Number experiment directories chronologically as
   `reports/NNN-short-topic/README.md`, starting at `001`. Once assigned, do not renumber or
   reuse a number; later work on the same experiment updates its existing report.
+- Keep `reports/` local and ignored; never stage or commit files under it.
 - Keep behavior, diagnostics, and documentation changes in atomic commits.
 - Preserve the shared signing configuration: when complete local or environment credentials are
   available, debug and release must use the same configured key. Keep keystores and credentials
