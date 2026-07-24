@@ -8874,11 +8874,15 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 handler.post(() -> onStandardShellReturnHomeCommit(signal));
                 return;
             }
+            ReturnHomeSession activeSession = currentSession;
+            boolean bindNow = standardSignalMatchesSession(
+                    signal, activeSession);
             MiuiHomeAcceptedInputToken latestInput =
                     miuiHomeAcceptedInputIdentity.get();
+            boolean latestInputMatches = signal.matchesInput(latestInput);
             if (signal.arbiterGeneration
                     != miuiHomeSystemUiInputArbiterGeneration
-                    || !signal.matchesInput(latestInput)) {
+                    || (!latestInputMatches && !bindNow)) {
                 log(Log.WARN, TAG,
                         "Rejected standard commit without current accepted DOWN"
                                 + ", attempt=" + signal.attempt
@@ -8899,9 +8903,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 return;
             }
             lastStandardCommitSignalAttempt = signal.attempt;
-            ReturnHomeSession activeSession = currentSession;
-            boolean bindNow = standardSignalMatchesSession(
-                    signal, activeSession);
             StandardReturnHomeCommitSignal boundSignal = bindNow
                     ? signal.bindToLauncherSession(
                     activeSession.generation)
@@ -8933,6 +8934,10 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", arbiterGeneration="
                             + boundSignal.arbiterGeneration
                             + ", eventId=" + boundSignal.eventId
+                            + ", inputIdentitySource="
+                            + (latestInputMatches ? "latest" : "activeSession")
+                            + ", latestEventId="
+                            + (latestInput == null ? 0 : latestInput.eventId)
                             + ", launcherGeneration="
                             + boundSignal.launcherSessionGeneration);
             if (bindNow) {
