@@ -9707,7 +9707,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 boolean configLocked) throws Throwable {
             if (args == null || args.length != 4
                     || !MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON.equals(args[0])
-                    || !Boolean.TRUE.equals(args[1])
+                    || !(args[1] instanceof Boolean)
                     || !Boolean.TRUE.equals(args[2])
                     || args[3] == null
                     || Looper.myLooper() != Looper.getMainLooper()) {
@@ -9784,13 +9784,26 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && isExactUnifiedPendingInterruption(
                     session, pendingCommitInterruption,
                     currentElement, currentIdentity, currentType, true);
+            boolean sameElement = pendingIcon instanceof View
+                    && Boolean.TRUE.equals(invokeAnyMethod(
+                    windowElement, "isSameElement",
+                    new Object[]{pendingIcon}));
             if (currentElement != windowElement
                     || currentIdentity != session.nativeAnimationIdentity
                     || (!verifiedClose && !pendingCommit)
                     || !(pendingIcon instanceof View)
-                    || !Boolean.TRUE.equals(invokeAnyMethod(
-                    windowElement, "isSameElement",
-                    new Object[]{pendingIcon}))) {
+                    || sameElement != Boolean.TRUE.equals(args[1])) {
+                return null;
+            }
+            boolean nativeParallelRoute = !sameElement;
+            if (nativeParallelRoute
+                    && (!verifiedClose
+                    || Boolean.TRUE.equals(invokeAnyMethod(
+                    stateManager, "shouldCancelSurfaceAndView",
+                    new Object[]{args[2]}))
+                    || Boolean.TRUE.equals(invokeAnyMethod(
+                    stateManager, "shouldCancelElementAnim",
+                    new Object[0])))) {
                 return null;
             }
             invalidatePendingLauncherOpenBarrier("replacementClick");
@@ -9799,7 +9812,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             session, stateManager, windowElement,
                             session.nativeAnimationIdentity,
                             (View) pendingIcon, originalCallback, signal,
-                            pendingCommit ? pendingCommitInterruption : null);
+                            pendingCommit ? pendingCommitInterruption : null,
+                            nativeParallelRoute);
             token.wrappedCallback = Proxy.newProxyInstance(
                     callbackClass.getClassLoader(),
                     new Class<?>[]{callbackClass},
@@ -9817,6 +9831,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", transitionDebugId="
                             + signal.transitionDebugId
                             + ", pendingCommit=" + pendingCommit
+                            + ", nativeParallelRoute="
+                            + nativeParallelRoute
                             + ", animationIdentity="
                             + shortObject(token.animationIdentity)
                             + ", clickedView="
@@ -9898,9 +9914,11 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 releaseInvalidatedLauncherOpenBarrierCallback(token);
                 return null;
             }
-            if (!token.armed.get() && token.parallelRoute) {
+            if (!token.armed.get()
+                    && (token.parallelRoute
+                    || token.nativeParallelRoute)) {
                 try {
-                    acceptParallelCloseToOpenBoundary(token);
+                    acceptNativeCloseToOpenBoundary(token);
                 } catch (Throwable throwable) {
                     log(Log.WARN, TAG,
                             "Failed Xiaomi CLOSE-to-OPEN completion boundary"
@@ -9938,10 +9956,12 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
         }
 
-        protected boolean acceptParallelCloseToOpenBoundary(
+        protected boolean acceptNativeCloseToOpenBoundary(
                 ReturnHomeLauncherOpenBarrierToken token) throws Throwable {
             if (token == null || pendingLauncherOpenBarrier.get() != token
-                    || token.invalidated.get() || !token.parallelRoute
+                    || token.invalidated.get()
+                    || (!token.parallelRoute
+                    && !token.nativeParallelRoute)
                     || token.armed.get()) {
                 return false;
             }
@@ -9988,9 +10008,10 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             boolean reusable = Boolean.TRUE.equals(
                     invokeAnyMethod(token.windowElement,
                             "isReusefulAnimRunning", new Object[0]));
-            boolean freshOpenReady = "CLOSE_TO_HOME".equals(currentType)
+            boolean freshOpenReady = token.nativeParallelRoute
+                    || ("CLOSE_TO_HOME".equals(currentType)
                     && launcherTarget == token.clickedView
-                    && !hasRecentTransition && !reusable;
+                    && !hasRecentTransition && !reusable);
             boolean valid = currentSession == session
                     && session.finished.get() == 0
                     && session.generation == token.generation
@@ -10023,6 +10044,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                                 + ", type=" + currentType
                                 + ", verifiedClose=" + verifiedClose
                                 + ", pendingCommit=" + pendingCommit
+                                + ", nativeParallelRoute="
+                                + token.nativeParallelRoute
                                 + ", freshOpenReady=" + freshOpenReady);
                 return false;
             }
@@ -10043,6 +10066,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", generation=" + session.generation
                             + ", type=" + currentType
                             + ", pendingCommit=" + pendingCommit
+                            + ", nativeParallelRoute="
+                            + token.nativeParallelRoute
                             + ", animationIdentity="
                             + shortObject(token.animationIdentity));
             finishSession(session,
@@ -10203,6 +10228,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", finishReceived="
                             + token.finishReceived.get()
                             + ", parallelRoute=" + token.parallelRoute
+                            + ", nativeParallelRoute="
+                            + token.nativeParallelRoute
                             + ", freshOpenReady=" + token.freshOpenReady
                             + ", releaseCallback="
                             + releaseCallback
@@ -11829,6 +11856,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             final StandardReturnHomeCommitSignal expectedSignal;
             final UnifiedNativePendingInterruptionSnapshot
                     pendingCommitInterruption;
+            final boolean nativeParallelRoute;
             final AtomicBoolean armed = new AtomicBoolean();
             final AtomicBoolean callbackReceived = new AtomicBoolean();
             final AtomicBoolean finishReceived = new AtomicBoolean();
@@ -11848,7 +11876,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     View clickedView, Object originalCallback,
                     StandardReturnHomeCommitSignal expectedSignal,
                     UnifiedNativePendingInterruptionSnapshot
-                            pendingCommitInterruption) {
+                            pendingCommitInterruption,
+                    boolean nativeParallelRoute) {
                 this.generation = session.generation;
                 this.session = session;
                 this.stateManager = stateManager;
@@ -11859,6 +11888,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 this.expectedSignal = expectedSignal;
                 this.pendingCommitInterruption =
                         pendingCommitInterruption;
+                this.nativeParallelRoute = nativeParallelRoute;
             }
         }
 
