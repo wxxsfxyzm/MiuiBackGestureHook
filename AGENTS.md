@@ -163,10 +163,12 @@ Same-activity and input rules:
   touch band. MiuiHome must publish an explicit identity-sharing accepted-DOWN token carrying
   MotionEvent identity, display, edge, and the current SystemUI arbiter generation. SystemUI
   may start or pilfer only after the token exactly matches its pending spy-channel DOWN.
-- Do not reject a stream merely because its DOWN lies inside a visible IME. Keep Xiaomi's
-  NavigationBar left/right `systemGestures` providers at their native empty sizes; do not
-  republish edge sensitivity through its LayoutParams because MiuiHome's `GestureStubView`
-  owns the physical edge and WMS would otherwise exclude the IME before the accepted-DOWN boundary.
+- Do not reject a stream merely because its DOWN lies inside a visible IME. A real NavigationBar
+  may publish its left/right edge sensitivity through the standard `systemGestures` providers only
+  with an `InsetsSizeOverride(TYPE_INPUT_METHOD, Insets.NONE)` and a zero cutout-safe minimum.
+  WMS applies that minimum to overridden frames, while `InputMethodService` turns the Insets it
+  receives into an exclusion region; either missing guard would redirect the DOWN before the
+  accepted-DOWN boundary. Keep MiuiHome's `GestureStubView` as the physical edge owner.
 - Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
   deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
   `BackPanelController` dispatch, and release-time invoke/cancel.
@@ -385,7 +387,10 @@ Return-to-home rules:
 - Preserve Xiaomi's parallel CLOSE-to-OPEN path when an icon is clicked before CLOSE ends.
   Finish the old Shell runner only after Xiaomi cancels the old application Surface and
   accepts its `setToOld` boundary, before the new OPEN starts; do not cancel or wait for the
-  old floating-icon tail. Route a non-reusable same-icon Local CLOSE only through Xiaomi's
+  old floating-icon tail. Treat runner completion as one-way: hold the launcher OPEN callback
+  until SystemUI confirms Shell cleanup for the exact same runner, finish callback, and immutable
+  commit signal; a missing or stale finish receipt must not release it. Route a non-reusable
+  same-icon Local CLOSE only through Xiaomi's
   existing parallel branch under exact identity guards; never fabricate Recents state or a
   controller, or invoke the real-Recents reversal path. After that exact old-list boundary, a
   module-owned element without a native recent transition must not be reset and reused as the
