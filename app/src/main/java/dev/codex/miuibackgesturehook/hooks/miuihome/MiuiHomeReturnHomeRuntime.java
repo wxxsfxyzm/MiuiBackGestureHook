@@ -445,10 +445,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 return;
             }
             bindPendingStandardCommitToSession(session);
-            if (session.acceptedInputIdentity == null) {
-                session.acceptedInputIdentity =
-                        miuiHomeAcceptedInputIdentity.get();
-            }
             if (startEvent != null) {
                 startPreview(session, startEvent);
             }
@@ -9005,10 +9001,14 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && signal.matchesInput(
                     activeSession.acceptedInputIdentity);
             boolean latestInputMatches = signal.matchesInput(latestInput);
+            boolean inputAuthenticated = bindNow
+                    ? activeSession.acceptedInputIdentity == null
+                    || frozenInputMatches
+                    : latestInputMatches;
             if (signal.arbiterGeneration
                     != miuiHomeSystemUiInputArbiterGeneration
                     || signal.runnerSession == null
-                    || (!frozenInputMatches && !latestInputMatches)) {
+                    || !inputAuthenticated) {
                 log(Log.WARN, TAG,
                         "Rejected standard commit without an authenticated input owner"
                                 + ", attempt=" + signal.attempt
