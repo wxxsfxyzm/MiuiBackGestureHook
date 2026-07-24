@@ -1,5 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import dev.codex.miuibackgesturehook.hooks.core.HookRuntimeCore;
 
 import android.animation.Animator;
@@ -92,6 +93,61 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
     protected final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
+
+    protected volatile SharedPreferences hyperOsIndicatorPreferences;
+    protected volatile boolean hyperOsIndicatorPreferencesFailureLogged;
+
+    protected boolean isHyperOsIndicatorEnabled() {
+        return readHyperOsBooleanPreference(
+                PredictiveBackPreferences.KEY_HYPEROS_INDICATOR,
+                PredictiveBackPreferences.DEFAULT_HYPEROS_INDICATOR);
+    }
+
+    protected boolean isHyperOsHapticsEnabled() {
+        return readHyperOsBooleanPreference(
+                PredictiveBackPreferences.KEY_HYPEROS_HAPTICS,
+                PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS);
+    }
+
+    protected boolean isHyperOsHapticsEnhancedEnabled() {
+        return readHyperOsBooleanPreference(
+                PredictiveBackPreferences.KEY_HYPEROS_HAPTICS_ENHANCED,
+                PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_ENHANCED);
+    }
+
+    @Override
+    protected boolean isHyperOsSlideAnimationEnabled() {
+        return readHyperOsBooleanPreference(
+                PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
+                PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
+    }
+
+    protected boolean readHyperOsBooleanPreference(String key, boolean defaultValue) {
+        try {
+            SharedPreferences preferences = hyperOsIndicatorPreferences;
+            if (preferences == null) {
+                synchronized (this) {
+                    preferences = hyperOsIndicatorPreferences;
+                    if (preferences == null) {
+                        preferences = getRemotePreferences(
+                                PredictiveBackPreferences.GROUP);
+                        hyperOsIndicatorPreferences = preferences;
+                    }
+                }
+            }
+            boolean enabled = preferences.getBoolean(key, defaultValue);
+            hyperOsIndicatorPreferencesFailureLogged = false;
+            return enabled;
+        } catch (Throwable throwable) {
+            if (!hyperOsIndicatorPreferencesFailureLogged) {
+                hyperOsIndicatorPreferencesFailureLogged = true;
+                log(Log.ERROR, TAG, "HyperOS indicator preference unavailable"
+                        + ", policy=failClosedToAospPanel"
+                        + ", key=" + key, throwable);
+            }
+            return false;
+        }
+    }
 
     protected boolean isOpenEndHandoffCurrent(long handoffEpoch) {
         return handoffEpoch != 0L
@@ -1184,6 +1240,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected float downY;
         protected float lastX;
         protected float lastY;
+        protected MiuiStyleBackArrowOverlay miuiStyleOverlay;
+        protected MiuiHapticFeedbackHelper miuiHapticHelper;
+        protected boolean miuiStyleGestureActive;
+        protected boolean miuiStyleSwipeStarted;
+        protected boolean miuiStyleHapticsActive;
 
         SystemUiBackGestureDriver(Context context, Object edgeBackGestureHandler,
                                   Object controller, Object backAnimationImpl)
@@ -1776,6 +1837,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 inputMonitorAttached = false;
                 inputMonitorEpoch.incrementAndGet();
             }
+            teardownMiuiStyleIndicator();
             if (pendingLauncherOpenBreakAttemptId != 0L) {
                 decrementLauncherOpenBreakCommandsInFlight();
             }
@@ -3305,10 +3367,32 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
                 if (plugin == null) {
                     log(Log.WARN, TAG, "NavigationEdgeBackPlugin is null; native panel unavailable");
+                    if (miuiStyleGestureActive) {
+                        miuiStyleGestureActive = false;
+                        MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
+                        if (overlay != null && miuiStyleSwipeStarted) {
+                            overlay.onGestureEnd(-1.0f);
+                        }
+                        miuiStyleSwipeStarted = false;
+                        miuiStyleHapticsActive = false;
+                    }
                     return false;
                 }
                 if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
                     prepareNativeBackPanel(plugin);
+                    miuiStyleGestureActive = prepareMiuiStyleIndicator(edge)
+                            && applyNativePanelSkinVisibility(plugin, true);
+                    if (!miuiStyleGestureActive) {
+                        applyNativePanelSkinVisibility(plugin, false);
+                    }
+                    miuiStyleHapticsActive = miuiStyleGestureActive
+                            && prepareMiuiStyleHaptics();
+                    // May clear miuiStyleHapticsActive on failure, so the overlay must
+                    // learn the final value afterwards or both sources would vibrate.
+                    applyNativePanelHapticSuppression(plugin, miuiStyleHapticsActive);
+                    if (miuiStyleOverlay != null) {
+                        miuiStyleOverlay.setHapticsForGesture(miuiStyleHapticsActive);
+                    }
                 }
                 invokeMethod(plugin, "setIsLeftPanel",
                         new Class<?>[]{boolean.class},
@@ -3317,6 +3401,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 screenEvent.setLocation(event.getRawX(), event.getRawY());
                 invokeMethod(plugin, "onMotionEvent",
                         new Class<?>[]{MotionEvent.class}, new Object[]{screenEvent});
+                if (miuiStyleGestureActive) {
+                    driveMiuiStyleIndicator(event, edge);
+                }
                 return true;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to dispatch event to NavigationEdgeBackPlugin",
@@ -3375,6 +3462,271 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to prepare native AOSP back panel", throwable);
             }
+        }
+
+        protected boolean prepareMiuiStyleIndicator(int edge) {
+            if (!isHyperOsIndicatorEnabled()) {
+                return false;
+            }
+            try {
+                if (miuiStyleOverlay == null) {
+                    miuiStyleOverlay = new MiuiStyleBackArrowOverlay(context,
+                            (priority, message, throwable) -> {
+                                if (throwable == null) {
+                                    log(priority, TAG, message);
+                                } else {
+                                    log(priority, TAG, message, throwable);
+                                }
+                            });
+                }
+                return miuiStyleOverlay.prepare(edge);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to prepare HyperOS-style indicator",
+                        throwable);
+                return false;
+            }
+        }
+
+        /**
+         * The hidden native BackPanelController keeps processing every event for state,
+         * commit thresholds, and haptics; only its View pixels are suppressed while the
+         * HyperOS-style overlay draws. Restoring is best-effort and re-evaluated on the
+         * next ACTION_DOWN, so a failure here can never strand an invisible panel.
+         */
+        protected boolean applyNativePanelSkinVisibility(Object plugin, boolean hide) {
+            try {
+                Object panelView = readField(plugin, "mView");
+                if (!(panelView instanceof View)) {
+                    return false;
+                }
+                float alpha = hide ? 0.0f : 1.0f;
+                View target = (View) panelView;
+                if (target.getAlpha() != alpha) {
+                    target.setAlpha(alpha);
+                    log(Log.INFO, TAG, "Native BackPanel visuals "
+                            + (hide ? "hidden behind HyperOS-style indicator"
+                            : "restored"));
+                }
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to change native BackPanel visibility"
+                        + ", hide=" + hide, throwable);
+                return false;
+            }
+        }
+
+        protected void driveMiuiStyleIndicator(MotionEvent event, int edge) {
+            MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
+            if (overlay == null) {
+                miuiStyleGestureActive = false;
+                miuiStyleSwipeStarted = false;
+                return;
+            }
+            try {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        // Nothing is drawn yet: Xiaomi's processor waits for the 20px
+                        // horizontal intent threshold below before onSwipeStart().
+                        miuiStyleSwipeStarted = false;
+                        break;
+                    case MotionEvent.ACTION_MOVE: {
+                        float offset = miuiStyleGestureOffset(event, edge);
+                        if (!miuiStyleSwipeStarted) {
+                            // Mirrors GesturesBackTouchProcessor: horizontal delta must
+                            // reach 20px and dominate half the vertical delta first.
+                            float verticalDelta =
+                                    Math.abs(event.getRawY() - downY);
+                            if (offset < MIUI_STYLE_SWIPE_START_PX
+                                    || offset < verticalDelta / 2.0f) {
+                                break;
+                            }
+                            miuiStyleSwipeStarted = true;
+                            overlay.onGestureStart(downY, edge);
+                        }
+                        overlay.onGestureProgress(Math.max(0.0f, offset),
+                                offset > MIUI_STYLE_ARROW_SHOW_PX
+                                        && isNativePanelStateLit());
+                        break;
+                    }
+                    case MotionEvent.ACTION_UP: {
+                        float releaseOffset = Math.max(0.0f,
+                                miuiStyleGestureOffset(event, edge));
+                        // Snapshot before onGestureEnd() cancels the arrow animator,
+                        // mirroring Xiaomi reading isArrowFeedBackDone() pre-stop.
+                        boolean handUpEligible = miuiStyleHapticsActive
+                                && miuiStyleSwipeStarted;
+                        boolean arrowFeedbackDone = overlay.isArrowFeedbackDone();
+                        if (miuiStyleSwipeStarted) {
+                            overlay.onGestureEnd(releaseOffset);
+                        }
+                        if (handUpEligible) {
+                            maybePerformMiuiHandUpHaptic(event, releaseOffset,
+                                    arrowFeedbackDone);
+                        }
+                        miuiStyleGestureActive = false;
+                        miuiStyleSwipeStarted = false;
+                        miuiStyleHapticsActive = false;
+                        break;
+                    }
+                    case MotionEvent.ACTION_CANCEL:
+                        if (miuiStyleSwipeStarted) {
+                            overlay.onGestureEnd(-1.0f);
+                        }
+                        overlay.markArrowFeedbackDone();
+                        miuiStyleGestureActive = false;
+                        miuiStyleSwipeStarted = false;
+                        miuiStyleHapticsActive = false;
+                        break;
+                    default:
+                        break;
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to drive HyperOS-style indicator",
+                        throwable);
+                miuiStyleGestureActive = false;
+                miuiStyleSwipeStarted = false;
+            }
+        }
+
+        protected float miuiStyleGestureOffset(MotionEvent event, int edge) {
+            return edge == EDGE_LEFT
+                    ? event.getRawX() - downX
+                    : downX - event.getRawX();
+        }
+
+        // The arrow lights exactly when the hidden native panel would commit on release,
+        // so the HyperOS visuals stay truthful to the module's AOSP trigger semantics.
+        protected boolean isNativePanelStateLit() {
+            String state = readNativePanelState();
+            return "ACTIVE".equals(state) || "FLUNG".equals(state)
+                    || "COMMITTED".equals(state);
+        }
+
+        protected boolean prepareMiuiStyleHaptics() {
+            if (!isHyperOsHapticsEnabled()) {
+                return false;
+            }
+            try {
+                if (miuiHapticHelper == null) {
+                    miuiHapticHelper = new MiuiHapticFeedbackHelper(context,
+                            (priority, message, throwable) -> {
+                                if (throwable == null) {
+                                    log(priority, TAG, message);
+                                } else {
+                                    log(priority, TAG, message, throwable);
+                                }
+                            });
+                }
+                if (!miuiHapticHelper.isSupported()) {
+                    return false;
+                }
+                miuiHapticHelper.setEnhancedMode(isHyperOsHapticsEnhancedEnabled());
+                MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
+                if (overlay != null) {
+                    overlay.setHapticListener(() -> {
+                        MiuiHapticFeedbackHelper helper = miuiHapticHelper;
+                        if (helper != null) {
+                            helper.performReadyBack();
+                        }
+                    });
+                }
+                return true;
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to prepare MIUI two-stage haptics",
+                        throwable);
+                return false;
+            }
+        }
+
+        /**
+         * Mirrors GestureStubView.onSwipeStop: hand-up plays only for a committed
+         * release under the native doFeedBack rule — a slow release on non-V2 devices
+         * or a ready-back haptic that never completed.
+         */
+        protected void maybePerformMiuiHandUpHaptic(MotionEvent event,
+                                                    float releaseOffset,
+                                                    boolean arrowFeedbackDone) {
+            MiuiHapticFeedbackHelper helper = miuiHapticHelper;
+            MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
+            if (helper == null || overlay == null) {
+                return;
+            }
+            try {
+                Boolean panelTrigger = resolveNativePanelReleaseTrigger(
+                        readNativePanelState(), true);
+                if (Boolean.TRUE.equals(panelTrigger)) {
+                    long gestureDuration =
+                            event.getEventTime() - event.getDownTime();
+                    float pxPerMs = gestureDuration > 0
+                            ? releaseOffset / gestureDuration : 0.0f;
+                    // Enhanced mode plays hand-up on every committed release; the
+                    // helper's 140ms blocker still prevents doubles near ready-back.
+                    boolean doFeedback = helper.isEnhancedMode()
+                            || (!helper.isHapticV2() && pxPerMs < 2.0f)
+                            || !arrowFeedbackDone;
+                    if (doFeedback) {
+                        helper.performHandUp();
+                    }
+                }
+                overlay.markArrowFeedbackDone();
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to play MIUI hand-up haptic", throwable);
+            }
+        }
+
+        /**
+         * BackPanel plays its threshold haptics through View.performHapticFeedback on
+         * its own view, so isHapticFeedbackEnabled() suppresses exactly that feedback.
+         * On failure the two-stage haptics are disabled and the native feedback stays.
+         */
+        protected void applyNativePanelHapticSuppression(Object plugin,
+                                                         boolean suppress) {
+            try {
+                Object panelView = readField(plugin, "mView");
+                if (!(panelView instanceof View)) {
+                    if (suppress) {
+                        miuiStyleHapticsActive = false;
+                    }
+                    return;
+                }
+                View target = (View) panelView;
+                boolean enabled = !suppress;
+                if (target.isHapticFeedbackEnabled() != enabled) {
+                    target.setHapticFeedbackEnabled(enabled);
+                    log(Log.INFO, TAG, "Native BackPanel haptics "
+                            + (suppress ? "suppressed for MIUI two-stage haptics"
+                            : "restored"));
+                }
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to change native BackPanel haptics"
+                        + ", suppress=" + suppress, throwable);
+                if (suppress) {
+                    miuiStyleHapticsActive = false;
+                }
+            }
+        }
+
+        protected void teardownMiuiStyleIndicator() {
+            miuiStyleGestureActive = false;
+            miuiStyleSwipeStarted = false;
+            miuiStyleHapticsActive = false;
+            MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
+            miuiStyleOverlay = null;
+            if (overlay != null) {
+                overlay.detach();
+            }
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    Object plugin = readField(edgeBackGestureHandler, "mEdgeBackPlugin");
+                    if (plugin != null) {
+                        applyNativePanelSkinVisibility(plugin, false);
+                        applyNativePanelHapticSuppression(plugin, false);
+                    }
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG, "Failed to restore native BackPanel visuals",
+                            throwable);
+                }
+            });
         }
     }
 }

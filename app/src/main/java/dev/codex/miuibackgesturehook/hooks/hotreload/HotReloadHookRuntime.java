@@ -354,6 +354,18 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             if (!oldHookIds.contains("systemui_back_prepare_reparent")) {
                 hookBackPrepareTransitionReparent(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains("systemui_back_slide_start")
+                    || !oldHookIds.contains("systemui_back_slide_progress")
+                    || !oldHookIds.contains("systemui_back_slide_post_commit")
+                    || !oldHookIds.contains("systemui_back_slide_duration")
+                    || !oldHookIds.contains("systemui_back_slide_finish")) {
+                hookCrossActivitySlideAnimation(hotReloadClassLoader,
+                        !oldHookIds.contains("systemui_back_slide_start"),
+                        !oldHookIds.contains("systemui_back_slide_progress"),
+                        !oldHookIds.contains("systemui_back_slide_post_commit"),
+                        !oldHookIds.contains("systemui_back_slide_duration"),
+                        !oldHookIds.contains("systemui_back_slide_finish"));
+            }
             if (!backCommitCompositionHookReady) {
                 hookBackCommitComposition(hotReloadClassLoader);
             }
@@ -634,6 +646,16 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::trackMiuiOpenCloseMerge;
             case "systemui_back_send_event_guard":
                 return this::guardDuplicateBackEvent;
+            case "systemui_back_slide_start":
+                return this::onCrossActivitySlideStart;
+            case "systemui_back_slide_progress":
+                return this::onCrossActivitySlideProgressRegistration;
+            case "systemui_back_slide_post_commit":
+                return this::onCrossActivitySlidePostCommit;
+            case "systemui_back_slide_duration":
+                return this::onCrossActivitySlideDuration;
+            case "systemui_back_slide_finish":
+                return this::onCrossActivitySlideFinish;
             case "systemui_back_prepare_reparent":
                 return this::correctPredictiveBackPrepareReparent;
             case "systemui_back_commit_composition":

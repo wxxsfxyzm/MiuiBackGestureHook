@@ -106,13 +106,14 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected abstract int readMotionEventDisplayId(MotionEvent event) throws Exception;
     protected abstract boolean isCurrentHeadlessNavBarLifecycle(
             Object edgeBackGestureHandler);
+    protected abstract boolean isHyperOsSlideAnimationEnabled();
     protected abstract Method requireExactDeclaredMethod(
             Class<?> owner, String methodName, String returnTypeName,
             String... parameterTypeNames) throws NoSuchMethodException;
 
     protected static final String TAG = "MiuiBackGestureHook";
     protected static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.0-r51-activity-open-progress-handoff";
+            "systemui-aosp-back-0.7.2-r55-hyperos-slide-back-animation";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -236,6 +237,10 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.miui.utils.configs.MiuiConfigs";
     protected static final String BACK_ANIMATION_CONTROLLER =
             "com.android.wm.shell.back.BackAnimationController";
+    protected static final String CROSS_ACTIVITY_BACK_ANIMATION =
+            "com.android.wm.shell.back.CrossActivityBackAnimation";
+    protected static final String DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION =
+            "com.android.wm.shell.back.DefaultCrossActivityBackAnimation";
     protected static final String BACK_TRANSITION_HANDLER =
             "com.android.wm.shell.back.BackAnimationController$BackTransitionHandler";
     protected static final String DEFAULT_TRANSITION_HANDLER =
@@ -332,6 +337,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     protected static final float PILFER_THRESHOLD_DP = 8.0f;
     protected static final float TRIGGER_THRESHOLD_DP = 48.0f;
+    protected static final float MIUI_STYLE_SWIPE_START_PX = 20.0f;
+    protected static final float MIUI_STYLE_ARROW_SHOW_PX = 180.0f;
     protected static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
     protected static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
     protected static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
@@ -1113,10 +1120,17 @@ public abstract class HookRuntimeCore extends XposedModule {
             Object definitions = readField(registry, "mAnimationDefinition");
             Object defaultCrossActivity = readField(registry, "mDefaultCrossActivityAnimation");
             Object crossTask = readField(registry, "mCrossTaskAnimation");
+            // The slide style renders cross-task with the same hooked cross-activity
+            // animation so both in-app types share one full-width slide implementation.
+            boolean slideStyle = isHyperOsSlideAnimationEnabled()
+                    && defaultCrossActivity != null;
+            Object crossTaskAnimation = slideStyle ? defaultCrossActivity : crossTask;
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_ACTIVITY,
                     defaultCrossActivity, "crossActivity");
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_TASK,
-                    crossTask, "crossTask");
+                    crossTaskAnimation, slideStyle ? "crossTask->slide" : "crossTask");
+            changed |= reconcileCrossTaskRunner(definitions, defaultCrossActivity,
+                    crossTask, slideStyle);
             if (changed) {
                 invokeAnyMethod(registry, "updateSupportedAnimators", new Object[0]);
                 log(Log.INFO, TAG, "Restored AOSP registry definitions from " + source);
@@ -1124,6 +1138,46 @@ public abstract class HookRuntimeCore extends XposedModule {
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to restore AOSP registry definitions from " + source,
                     throwable);
+        }
+    }
+
+    /**
+     * Swaps an already-registered cross-task runner between the two module-managed
+     * animations when the slide-style preference changed. Only entries whose current
+     * value is the other module-known runner are replaced; anything else is foreign
+     * state and stays untouched.
+     */
+    protected boolean reconcileCrossTaskRunner(Object definitions,
+                                               Object defaultCrossActivity,
+                                               Object crossTask,
+                                               boolean slideStyle) {
+        if (!(definitions instanceof SparseArray<?>)) {
+            return false;
+        }
+        try {
+            SparseArray<?> entries = (SparseArray<?>) definitions;
+            int index = entries.indexOfKey(TYPE_CROSS_TASK);
+            if (index < 0) {
+                return false;
+            }
+            Object desiredAnimation = slideStyle ? defaultCrossActivity : crossTask;
+            Object otherAnimation = slideStyle ? crossTask : defaultCrossActivity;
+            if (desiredAnimation == null || otherAnimation == null) {
+                return false;
+            }
+            Object desired = invokeAnyMethod(desiredAnimation, "getRunner", new Object[0]);
+            Object other = invokeAnyMethod(otherAnimation, "getRunner", new Object[0]);
+            Object current = entries.valueAt(index);
+            if (desired == null || current == desired || current != other) {
+                return false;
+            }
+            invokeAnyMethod(definitions, "set",
+                    new Object[]{Integer.valueOf(TYPE_CROSS_TASK), desired});
+            log(Log.INFO, TAG, "Retargeted cross-task runner, slideStyle=" + slideStyle);
+            return true;
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to reconcile cross-task runner", throwable);
+            return false;
         }
     }
 

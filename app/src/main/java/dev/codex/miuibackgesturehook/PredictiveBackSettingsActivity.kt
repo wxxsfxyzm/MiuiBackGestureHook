@@ -12,7 +12,6 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.LruCache
-import android.util.Printer
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,8 +24,8 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -74,9 +73,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -85,7 +84,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.core.graphics.drawable.toBitmap
 import io.github.libxposed.service.XposedService
-import java.util.HashSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -125,6 +123,7 @@ import top.yukonga.miuix.kmp.theme.lightColorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import top.yukonga.miuix.kmp.window.WindowListPopup
+import kotlin.time.Duration.Companion.milliseconds
 
 class PredictiveBackSettingsActivity :
     ComponentActivity(),
@@ -260,13 +259,21 @@ private fun PredictiveBackSettingsScreen(
     var saveError by remember { mutableStateOf<String?>(null) }
     var localWriteGeneration by remember { mutableStateOf(0L) }
     var confirmedPackages by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var hyperOsIndicator by remember { mutableStateOf(false) }
+    var confirmedHyperOsIndicator by remember { mutableStateOf(false) }
+    var hyperOsHaptics by remember { mutableStateOf(false) }
+    var confirmedHyperOsHaptics by remember { mutableStateOf(false) }
+    var hyperOsHapticsEnhanced by remember { mutableStateOf(false) }
+    var confirmedHyperOsHapticsEnhanced by remember { mutableStateOf(false) }
+    var hyperOsSlideAnimation by remember { mutableStateOf(false) }
+    var confirmedHyperOsSlideAnimation by remember { mutableStateOf(false) }
     val writeMutex = remember(preferences) { Mutex() }
     val lazyListState = rememberLazyListState()
     val scrollBehavior = MiuixScrollBehavior()
     val showFloating by remember {
         derivedStateOf {
             lazyListState.firstVisibleItemIndex > 0 ||
-                lazyListState.firstVisibleItemScrollOffset > 0
+                    lazyListState.firstVisibleItemScrollOffset > 0
         }
     }
     val layoutDirection = LocalLayoutDirection.current
@@ -281,7 +288,7 @@ private fun PredictiveBackSettingsScreen(
         appsError = null
         try {
             if (refreshingExistingList) {
-                delay(1_500)
+                delay(1_500.milliseconds)
             }
             val loaded = withContext(Dispatchers.IO) {
                 loadLaunchableApps(
@@ -305,6 +312,14 @@ private fun PredictiveBackSettingsScreen(
         saveError = null
         localWriteGeneration = 0L
         confirmedPackages = emptySet()
+        hyperOsIndicator = false
+        confirmedHyperOsIndicator = false
+        hyperOsHaptics = false
+        confirmedHyperOsHaptics = false
+        hyperOsHapticsEnhanced = false
+        confirmedHyperOsHapticsEnhanced = false
+        hyperOsSlideAnimation = false
+        confirmedHyperOsSlideAnimation = false
         if (!serviceStateObserved) {
             configurationLoading = true
             return@LaunchedEffect
@@ -321,11 +336,37 @@ private fun PredictiveBackSettingsScreen(
                     .getStringSet(PredictiveBackPreferences.KEY_PACKAGES, emptySet())
                     .orEmpty()
                     .filterTo(HashSet()) { it.isNotBlank() }
-                remotePreferences to packages.toSet()
+                val hyperOsFlags = booleanArrayOf(
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_HYPEROS_INDICATOR,
+                        PredictiveBackPreferences.DEFAULT_HYPEROS_INDICATOR,
+                    ),
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_HYPEROS_HAPTICS,
+                        PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS,
+                    ),
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_HYPEROS_HAPTICS_ENHANCED,
+                        PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_ENHANCED,
+                    ),
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
+                        PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION,
+                    ),
+                )
+                Triple(remotePreferences, packages.toSet(), hyperOsFlags)
             }
             preferences = loaded.first
             selectedPackages = loaded.second
             confirmedPackages = loaded.second
+            hyperOsIndicator = loaded.third[0]
+            confirmedHyperOsIndicator = loaded.third[0]
+            hyperOsHaptics = loaded.third[1]
+            confirmedHyperOsHaptics = loaded.third[1]
+            hyperOsHapticsEnhanced = loaded.third[2]
+            confirmedHyperOsHapticsEnhanced = loaded.third[2]
+            hyperOsSlideAnimation = loaded.third[3]
+            confirmedHyperOsSlideAnimation = loaded.third[3]
         } catch (_: Throwable) {
             configurationError = configurationErrorMessage
         } finally {
@@ -374,8 +415,8 @@ private fun PredictiveBackSettingsScreen(
             .filter { app -> showSystemApps || !app.isSystem }
             .filter { app ->
                 query.isEmpty() ||
-                    app.label.contains(query, ignoreCase = true) ||
-                    app.packageName.contains(query, ignoreCase = true)
+                        app.label.contains(query, ignoreCase = true) ||
+                        app.packageName.contains(query, ignoreCase = true)
             }
             .toList()
 
@@ -410,18 +451,22 @@ private fun PredictiveBackSettingsScreen(
             text = serviceLoadingMessage,
             severity = CardSeverity.Info,
         )
+
         configurationError != null -> StatusCardMessage(
             text = configurationError.orEmpty(),
             severity = CardSeverity.Error,
         )
+
         saveError != null -> StatusCardMessage(
             text = saveError.orEmpty(),
             severity = CardSeverity.Error,
         )
+
         serviceStateObserved && service == null -> StatusCardMessage(
             text = serviceUnavailableMessage,
             severity = CardSeverity.Error,
         )
+
         else -> null
     }
     val persistSelection: (Set<String>) -> Unit = { requestedPackages ->
@@ -483,6 +528,89 @@ private fun PredictiveBackSettingsScreen(
                 }
             }
         }
+    }
+
+    val persistBooleanPreference: (
+        String,
+        Boolean,
+        (Boolean) -> Unit,
+        () -> Boolean,
+        (Boolean) -> Unit,
+    ) -> Unit = { key, requestedEnabled, setLocal, getConfirmed, setConfirmed ->
+        val activePreferences = preferences
+        if (activePreferences != null) {
+            setLocal(requestedEnabled)
+            saveError = null
+            scope.launch {
+                val saved = writeMutex.withLock {
+                    val fallbackEnabled = getConfirmed()
+                    val commitSucceeded = withContext(Dispatchers.IO) {
+                        val succeeded = try {
+                            activePreferences.edit()
+                                .putBoolean(key, requestedEnabled)
+                                .commit()
+                        } catch (_: Throwable) {
+                            false
+                        }
+                        if (!succeeded) {
+                            try {
+                                activePreferences.edit()
+                                    .putBoolean(key, fallbackEnabled)
+                                    .commit()
+                            } catch (_: Throwable) {
+                                // Same compensation as persistSelection: restore the cached
+                                // value even when the remote commit fails as well.
+                            }
+                        }
+                        succeeded
+                    }
+                    if (preferences === activePreferences && commitSucceeded) {
+                        setConfirmed(requestedEnabled)
+                    }
+                    commitSucceeded
+                }
+                if (preferences === activePreferences && !saved) {
+                    setLocal(getConfirmed())
+                    saveError = saveErrorMessage
+                }
+            }
+        }
+    }
+    val persistHyperOsIndicator: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_HYPEROS_INDICATOR,
+            requestedEnabled,
+            { hyperOsIndicator = it },
+            { confirmedHyperOsIndicator },
+            { confirmedHyperOsIndicator = it },
+        )
+    }
+    val persistHyperOsHaptics: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_HYPEROS_HAPTICS,
+            requestedEnabled,
+            { hyperOsHaptics = it },
+            { confirmedHyperOsHaptics },
+            { confirmedHyperOsHaptics = it },
+        )
+    }
+    val persistHyperOsHapticsEnhanced: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_HYPEROS_HAPTICS_ENHANCED,
+            requestedEnabled,
+            { hyperOsHapticsEnhanced = it },
+            { confirmedHyperOsHapticsEnhanced },
+            { confirmedHyperOsHapticsEnhanced = it },
+        )
+    }
+    val persistHyperOsSlideAnimation: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
+            requestedEnabled,
+            { hyperOsSlideAnimation = it },
+            { confirmedHyperOsSlideAnimation },
+            { confirmedHyperOsSlideAnimation = it },
+        )
     }
 
     LaunchedEffect(preferences, applicationOptInPackages) {
@@ -688,6 +816,55 @@ private fun PredictiveBackSettingsScreen(
                     ) {
                         item(key = "compatibility_warning") {
                             WarningCard(
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 8.dp),
+                            )
+                        }
+                        item(key = "hyperos_indicator") {
+                            HyperOsSwitchCard(
+                                titleRes = R.string.hyperos_indicator_title,
+                                summaryRes = R.string.hyperos_indicator_summary,
+                                checked = hyperOsIndicator,
+                                enabled = configurationEnabled,
+                                onToggle = persistHyperOsIndicator,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 8.dp),
+                            )
+                        }
+                        item(key = "hyperos_haptics") {
+                            HyperOsSwitchCard(
+                                titleRes = R.string.hyperos_haptics_title,
+                                summaryRes = R.string.hyperos_haptics_summary,
+                                checked = hyperOsHaptics,
+                                enabled = configurationEnabled && hyperOsIndicator,
+                                onToggle = persistHyperOsHaptics,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 8.dp),
+                            )
+                        }
+                        item(key = "hyperos_haptics_enhanced") {
+                            HyperOsSwitchCard(
+                                titleRes = R.string.hyperos_haptics_enhanced_title,
+                                summaryRes = R.string.hyperos_haptics_enhanced_summary,
+                                checked = hyperOsHapticsEnhanced,
+                                enabled = configurationEnabled && hyperOsIndicator &&
+                                        hyperOsHaptics,
+                                onToggle = persistHyperOsHapticsEnhanced,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 8.dp),
+                            )
+                        }
+                        item(key = "hyperos_slide_animation") {
+                            HyperOsSwitchCard(
+                                titleRes = R.string.hyperos_slide_animation_title,
+                                summaryRes = R.string.hyperos_slide_animation_summary,
+                                checked = hyperOsSlideAnimation,
+                                enabled = configurationEnabled,
+                                onToggle = persistHyperOsSlideAnimation,
                                 modifier = Modifier
                                     .padding(horizontal = 12.dp)
                                     .padding(bottom = 8.dp),
@@ -1050,6 +1227,56 @@ private fun EmptyRow() {
 }
 
 @Composable
+private fun HyperOsSwitchCard(
+    titleRes: Int,
+    summaryRes: Int,
+    checked: Boolean,
+    enabled: Boolean,
+    onToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(CardDefaults.CornerRadius))
+            .background(CardDefaults.defaultColors().color),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    enabled = enabled,
+                    onClick = { onToggle(!checked) },
+                )
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterVertically)
+                    .weight(1f),
+            ) {
+                Text(
+                    text = stringResource(titleRes),
+                    style = MiuixTheme.textStyles.title4,
+                )
+                Text(
+                    text = stringResource(summaryRes),
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    style = MiuixTheme.textStyles.subtitle,
+                )
+            }
+            Switch(
+                modifier = Modifier.align(Alignment.CenterVertically),
+                checked = checked,
+                onCheckedChange = onToggle,
+                enabled = enabled,
+            )
+        }
+    }
+}
+
+@Composable
 private fun MiuixAppItem(
     modifier: Modifier = Modifier,
     app: AppEntry,
@@ -1204,8 +1431,8 @@ private fun loadLaunchableApps(
             launcherActivity = ComponentName(packageName, activityInfo.name),
             firstInstallTime = firstInstallTime,
             isSystem = applicationInfo.flags and (
-                ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
-            ) != 0,
+                    ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
+                    ) != 0,
             isAvailable = true,
         )
     }
@@ -1226,7 +1453,7 @@ private fun isApplicationPredictiveBackOptedIn(applicationInfo: ApplicationInfo)
     var dumpResult: Boolean? = null
     runCatching {
         applicationInfo.dump(
-            Printer { line ->
+            { line ->
                 if (line.startsWith(APPLICATION_PREDICTIVE_BACK_DUMP_PREFIX)) {
                     dumpResult = line
                         .removePrefix(APPLICATION_PREDICTIVE_BACK_DUMP_PREFIX)

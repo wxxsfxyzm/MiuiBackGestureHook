@@ -130,9 +130,9 @@ Hot-reload rules:
   forge Taskbar initialization, or write lifecycle booleans directly. Reconcile ownership after
   default-display NavigationBar create/remove and navigation-mode changes; a real NavigationBar
   or Taskbar owns the native listener lifecycle whenever present.
-- In `onHotReloading(...)`, detach module-owned input monitors, unregister receivers, and
-  invalidate pending snapshots/attempts before saving only the state that is explicitly
-  restored. In `onHotReloaded(...)`, replace or neutralize every old hook and restore state
+- In `onHotReloading(...)`, detach module-owned input monitors and indicator overlay
+  windows, unregister receivers, and invalidate pending snapshots/attempts before saving
+  only the state that is explicitly restored. In `onHotReloaded(...)`, replace or neutralize every old hook and restore state
   without duplicating monitors, receivers, or callbacks.
 - When restoring MiuiHome from an older non-touchable Stub build, clear the existing
   `FLAG_NOT_TOUCHABLE` in WMS on each Stub's View owner Looper, request layout and internal
@@ -270,9 +270,49 @@ Remote-animation rules:
   reflection uncertainty, and every other null-navigation path still cancel and clean with
   `finishBackNavigation(false)` without a fallback key.
 - Do not swap closing/entering targets or transform leashes, and do not force
-  alpha/visibility/layer order without new evidence for that exact fault.
-- Use SystemUI's native `BackPanelController` indicator. Avoid Xiaomi/MiuiHome arrow paths
-  and custom-drawn fallbacks except for native-indicator attachment diagnostics.
+  alpha/visibility/layer order without new evidence for that exact fault. The only
+  exception is the `hyperos_slide_back_animation` switch (default off): it restyles the
+  native cross-activity animation's geometry mapping in place — a full-width closing
+  slide mapping the spring-smoothed delivered progress linearly (no gesture
+  interpolator: finger-following but always animated, cancel riding the same spring),
+  no scale and no vertical follow, quarter-width entering parallax at alpha 0.9 -> 1, a
+  cubic ease-out ~400ms commit settle, and the cross-task registry entry reusing the
+  same hooked animation. The per-frame driver replaces the ProgressCallback the
+  animation registers on its own framework BackProgressAnimator, because R8 inlines the
+  private progress method. At commit the subclass rewrites the target rects to its 0.9
+  card pose, so the post-commit hook restores the full slide-out destination; the
+  committed close transition's own reparent (native handleCloseTransition) already keeps
+  the container pixels on the runner leashes. The revealed lower layer follows the finger:
+  its dim scrim scales with drag progress (not only at release) and its corner radius is
+  cleared (only the sliding top card is rounded). Targets, scrim, letterboxes, corner radius, the
+  progress/commit/cancel lifecycle, and `finishAnimation()` stay native; any hook or
+  reflection failure falls back to the stock AOSP animation for that gesture.
+  `TYPE_RETURN_TO_HOME` and `TYPE_CALLBACK` are never restyled.
+- Keep SystemUI's native `BackPanelController` as the sole indicator state owner: it
+  receives every claimed event and owns thresholds, release state, and haptics. The
+  optional HyperOS-style skin (`hyperos_indicator_style` remote preference, default off)
+  only suppresses the native panel's View alpha and draws a module-owned visual-only port
+  of MiuiHome's `GestureBackArrowView` in a non-touchable SystemUI overlay window, with
+  bitmaps loaded at runtime from `com.miui.home` resources. The skin follows Xiaomi's
+  native timing: nothing is drawn before the 20px horizontal, vertical-dominance intent
+  threshold, and the arrow icon lights only when the official 180px rule and the native
+  panel's ACTIVE/FLUNG/COMMITTED state both hold, so a lit arrow always matches the real
+  commit decision. It adds no input handling, and any preference, resource, window, or
+  panel-hide failure fails closed to the visible native panel. Haptics default to the
+  native BackPanel threshold feedback; the optional `hyperos_indicator_haptics` switch
+  (requires the skin) instead reproduces Xiaomi's two-stage haptics through the framework
+  `miui.util.HapticFeedbackUtil` — ready-back on uncancelled arrow fade-in completion (ext
+  effect 162, or 0 on `sys.haptic.version=2.0`), hand-up only on a panel-committed release
+  under Xiaomi's doFeedBack rule (non-V2 slow release or unfinished ready-back), with the
+  linear 140ms hand-up blocker — and suppresses only the hidden panel view's
+  `isHapticFeedbackEnabled` so no other SystemUI haptics change. The additional
+  `hyperos_indicator_haptics_enhanced` switch (requires the haptics switch) strengthens
+  the release stage: every panel-committed release plays hand-up, V2 devices use ext
+  effect 1 for hand-up instead of 0, and the 140ms blocker also applies to V2.
+  Unsupported effects or any failure in this chain fails closed to the native BackPanel
+  haptics. Avoid
+  MiuiHome-process arrow paths and any other custom-drawn fallback except for
+  native-indicator attachment diagnostics.
 - Restore `TYPE_RETURN_TO_HOME` through the standard Shell-to-launcher callback/runner
   registration. The confirmed entry is the Shell `IBackAnimation` binder in
   `LauncherProxyService`'s external-interface bundle; make MiuiHome consume that standard

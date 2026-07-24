@@ -2,86 +2,44 @@ package dev.codex.miuibackgesturehook.hooks.systemui;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
-import android.app.ActivityManager;
-import android.app.BroadcastOptions;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.graphics.Region;
-import android.hardware.input.InputManager;
-import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
-import android.os.Parcelable;
 import android.os.Process;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.util.Log;
-import android.util.Pair;
-import android.util.SparseArray;
-import android.view.Choreographer;
-import android.view.InputChannel;
-import android.view.InputEvent;
-import android.view.InputEventReceiver;
-import android.view.InputMonitor;
-import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.View;
-import android.view.WindowInsets;
-import android.view.WindowManager;
-import android.view.animation.DecelerateInterpolator;
-import android.view.animation.PathInterpolator;
+import android.window.BackEvent;
 import android.window.BackMotionEvent;
 import android.window.BackNavigationInfo;
 import android.window.BackProgressAnimator;
 import android.window.BackTouchTracker;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Array;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
-import java.util.WeakHashMap;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import io.github.libxposed.api.XposedInterface;
-import io.github.libxposed.api.XposedModule;
-import io.github.libxposed.api.XposedModuleInterface;
 
 public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
@@ -303,7 +261,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected void invalidateOpenTransitionSnapshot(OpenTransitionSnapshot snapshot,
-                                                  String reason) {
+                                                    String reason) {
         if (snapshot == null) {
             return;
         }
@@ -1028,9 +986,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected void attachHeadlessNavBarLease(Object controller, Object navBarHelper,
-                                           Object edgeBackGestureHandler,
-                                           Object backAnimation, int navigationMode,
-                                           String reason) throws Exception {
+                                             Object edgeBackGestureHandler,
+                                             Object backAnimation, int navigationMode,
+                                             String reason) throws Exception {
         ClassLoader classLoader = controller.getClass().getClassLoader();
         Class<?> updaterInterface = Class.forName(
                 NAV_BAR_STATE_UPDATER, false, classLoader);
@@ -1447,10 +1405,517 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookBackPrepareTransitionReparent(classLoader);
             hookBackCommitComposition(classLoader);
             hookBackFinishOpenAtomicTransfer(classLoader);
+            hookCrossActivitySlideAnimation(classLoader,
+                    true, true, true, true, true);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
         }
+    }
+
+    /**
+     * Restyles the native cross-activity (and, via the unified registry entry,
+     * cross-task) predictive-back animation into the miuix slide when the preference is
+     * on: the closing surface follows the finger full-width with no scale and no fade,
+     * the entering surface parallaxes in from a quarter width behind at alpha 0.9 -> 1
+     * with its dim scrim tracking the drag and its corner radius cleared, and the commit
+     * settles on a cubic ease-out. Only the geometry, scrim, and entering corner radius
+     * are replaced; targets, letterboxes, and the finish lifecycle stay native.
+     * Return-to-home is untouched.
+     */
+    protected void hookCrossActivitySlideAnimation(ClassLoader classLoader,
+                                                   boolean installStart,
+                                                   boolean installProgress,
+                                                   boolean installPostCommit,
+                                                   boolean installDuration,
+                                                   boolean installFinish) {
+        Class<?> baseClass;
+        Class<?> defaultClass;
+        Class<?> backMotionEventClass;
+        Class<?> backEventClass;
+        try {
+            baseClass = Class.forName(
+                    CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
+            defaultClass = Class.forName(
+                    DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
+            backMotionEventClass = Class.forName(
+                    "android.window.BackMotionEvent", false, classLoader);
+            backEventClass = Class.forName(
+                    "android.window.BackEvent", false, classLoader);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Cross-activity animation classes unavailable",
+                    throwable);
+            return;
+        }
+        // Each hook installs independently: R8 may rename individual members in
+        // Xiaomi's build, and a missing one must only degrade its own stage.
+        if (installStart) {
+            try {
+                Method start = resolveSlideMethod(defaultClass, baseClass,
+                        "startBackAnimation", void.class, backMotionEventClass);
+                recordHookHandle(hook(start)
+                        .setId("systemui_back_slide_start")
+                        .intercept(this::onCrossActivitySlideStart));
+                log(Log.INFO, TAG, "Hooked slide start as " + start.getName());
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook slide start", throwable);
+            }
+        }
+        if (installProgress) {
+            try {
+                // R8 inlines the private per-frame method into its registration
+                // lambda, so the stable interception point is the framework
+                // BackProgressAnimator: swap the registered ProgressCallback for the
+                // armed animation's own animator and drive the frames ourselves.
+                Method register = BackProgressAnimator.class.getDeclaredMethod(
+                        "onBackStarted", BackMotionEvent.class,
+                        BackProgressAnimator.ProgressCallback.class);
+                register.setAccessible(true);
+                recordHookHandle(hook(register)
+                        .setId("systemui_back_slide_progress")
+                        .intercept(this::onCrossActivitySlideProgressRegistration));
+                log(Log.INFO, TAG,
+                        "Hooked slide progress via BackProgressAnimator registration");
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook slide progress", throwable);
+            }
+        }
+        if (installPostCommit) {
+            try {
+                Method postCommit = resolveSlideMethod(defaultClass, baseClass,
+                        "onPostCommitProgress", void.class, float.class);
+                // Hooked on the base class means this is the super-call position:
+                // the subclass override keeps writing its native geometry after our
+                // interceptor returns, so our frame must be applied afterwards.
+                miuixSlidePostCommitOnBase =
+                        postCommit.getDeclaringClass() == baseClass;
+                recordHookHandle(hook(postCommit)
+                        .setId("systemui_back_slide_post_commit")
+                        .intercept(this::onCrossActivitySlidePostCommit));
+                log(Log.INFO, TAG, "Hooked slide post-commit as "
+                        + postCommit.getDeclaringClass().getSimpleName()
+                        + "." + postCommit.getName()
+                        + ", superPosition=" + miuixSlidePostCommitOnBase);
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook slide post-commit", throwable);
+            }
+        }
+        if (installDuration) {
+            try {
+                Method duration = resolveSlideMethod(defaultClass, baseClass,
+                        "getPostCommitAnimationDuration", long.class);
+                recordHookHandle(hook(duration)
+                        .setId("systemui_back_slide_duration")
+                        .intercept(this::onCrossActivitySlideDuration));
+                log(Log.INFO, TAG, "Hooked slide duration as " + duration.getName());
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook slide duration", throwable);
+            }
+        }
+        if (installFinish) {
+            try {
+                Method finish = resolveSlideMethod(defaultClass, baseClass,
+                        "finishAnimation", void.class);
+                recordHookHandle(hook(finish)
+                        .setId("systemui_back_slide_finish")
+                        .intercept(this::onCrossActivitySlideFinish));
+                log(Log.INFO, TAG, "Hooked slide finish as "
+                        + finish.getDeclaringClass().getSimpleName()
+                        + "." + finish.getName());
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook slide finish", throwable);
+            }
+        }
+    }
+
+    // finishAnimation() is the animation's natural end; clear the session flag so a
+    // later gesture re-arms cleanly. The original always runs.
+    protected Object onCrossActivitySlideFinish(XposedInterface.Chain chain)
+            throws Throwable {
+        miuixSlideAnimActive = false;
+        return chain.proceed();
+    }
+
+    /**
+     * Resolves an animation-class member by name first, then falls back to a unique
+     * signature match so an R8-renamed member is still found. Same-name declarations
+     * across the hierarchy are one virtual method — the most-derived one wins;
+     * different-name candidates at the same level are ambiguous and fail.
+     */
+    protected Method resolveSlideMethod(Class<?> leaf, Class<?> stop, String name,
+                                        Class<?> returnType, Class<?>... parameters)
+            throws NoSuchMethodException {
+        try {
+            return findDeclaredMethodInHierarchy(leaf, stop, name, parameters);
+        } catch (NoSuchMethodException ignored) {
+        }
+        Class<?> current = leaf;
+        while (current != null) {
+            Method match = null;
+            for (Method candidate : current.getDeclaredMethods()) {
+                if (candidate.isSynthetic()
+                        || candidate.getReturnType() != returnType
+                        || !Arrays.equals(candidate.getParameterTypes(), parameters)) {
+                    continue;
+                }
+                if (match != null) {
+                    throw new NoSuchMethodException(name
+                            + ": ambiguous signature fallback in " + current.getName()
+                            + " (" + match.getName() + " vs " + candidate.getName()
+                            + ")");
+                }
+                match = candidate;
+            }
+            if (match != null) {
+                match.setAccessible(true);
+                log(Log.INFO, TAG, "Resolved " + name + " by signature as "
+                        + current.getName() + "." + match.getName());
+                return match;
+            }
+            if (current == stop) {
+                break;
+            }
+            current = current.getSuperclass();
+        }
+        throw new NoSuchMethodException(leaf.getName() + "." + name);
+    }
+
+    protected Method findDeclaredMethodInHierarchy(Class<?> leaf, Class<?> stop,
+                                                   String name, Class<?>... parameters)
+            throws NoSuchMethodException {
+        Class<?> current = leaf;
+        while (current != null) {
+            try {
+                Method method = current.getDeclaredMethod(name, parameters);
+                method.setAccessible(true);
+                return method;
+            } catch (NoSuchMethodException ignored) {
+            }
+            if (current == stop) {
+                break;
+            }
+            current = current.getSuperclass();
+        }
+        throw new NoSuchMethodException(leaf.getName() + "." + name);
+    }
+
+    protected volatile boolean miuixSlideAnimActive;
+    protected final RectF miuixSlideCommitClosing = new RectF();
+    protected final RectF miuixSlideCommitEntering = new RectF();
+    protected boolean miuixSlideCommitPoseCaptured;
+    protected float miuixSlideCommitEnteringAlpha = 1.0f;
+    protected float miuixSlideCommitScrimRemaining = 1.0f;
+    protected boolean miuixSlidePostCommitOnBase;
+    protected volatile WeakReference<Object> miuixSlideArmedAnimation;
+    protected boolean miuixSlideRegistrationReentry;
+    protected volatile Method crossActivityApplyTransform;
+    protected volatile Object crossActivityNoFling;
+
+    protected static final long MIUIX_SLIDE_SETTLE_DURATION_MS = 400L;
+    protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
+    protected static final float MIUIX_SLIDE_PARALLAX_FRACTION = 0.25f;
+
+    protected Object onCrossActivitySlideStart(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        try {
+            Object animation = chain.getThisObject();
+            miuixSlideCommitPoseCaptured = false;
+            if (!isHyperOsSlideAnimationEnabled()) {
+                miuixSlideAnimActive = false;
+                return result;
+            }
+            if (readField(animation, "closingTarget") == null
+                    || readField(animation, "enteringTarget") == null) {
+                miuixSlideAnimActive = false;
+                return result;
+            }
+            Rect backAnimRect = (Rect) readField(animation, "backAnimRect");
+            float width = backAnimRect.width();
+            if (width <= 0f) {
+                miuixSlideAnimActive = false;
+                return result;
+            }
+            Context animationContext = (Context) readField(animation, "context");
+            boolean rtl = animationContext.getResources().getConfiguration()
+                    .getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+            float slide = rtl ? -width : width;
+            RectF startClosing = (RectF) readField(animation, "startClosingRect");
+            RectF targetClosing = (RectF) readField(animation, "targetClosingRect");
+            RectF startEntering = (RectF) readField(animation, "startEnteringRect");
+            RectF targetEntering = (RectF) readField(animation, "targetEnteringRect");
+            startClosing.set(backAnimRect);
+            targetClosing.set(backAnimRect);
+            targetClosing.offset(slide, 0f);
+            targetEntering.set(backAnimRect);
+            startEntering.set(backAnimRect);
+            startEntering.offset(-slide * MIUIX_SLIDE_PARALLAX_FRACTION, 0f);
+            miuixSlideArmedAnimation = new WeakReference<>(animation);
+            miuixSlideAnimActive = true;
+            log(Log.INFO, TAG, "Armed miuix slide back animation"
+                    + ", width=" + width + ", rtl=" + rtl);
+        } catch (Throwable throwable) {
+            miuixSlideAnimActive = false;
+            log(Log.WARN, TAG, "Failed to arm miuix slide geometry", throwable);
+        }
+        return result;
+    }
+
+    /**
+     * Fires when any BackProgressAnimator registers its per-gesture ProgressCallback.
+     * For the armed cross-activity animation's own animator, the native callback (the
+     * inlined geometry) is replaced with the miuix frame driver; every other animator
+     * registers untouched.
+     */
+    protected Object onCrossActivitySlideProgressRegistration(
+            XposedInterface.Chain chain) throws Throwable {
+        if (miuixSlideRegistrationReentry || !miuixSlideAnimActive) {
+            return chain.proceed();
+        }
+        WeakReference<Object> armedReference = miuixSlideArmedAnimation;
+        Object animation = armedReference == null ? null : armedReference.get();
+        if (animation == null) {
+            return chain.proceed();
+        }
+        Object progressAnimator;
+        try {
+            progressAnimator = readField(animation, "progressAnimator");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to read progressAnimator", throwable);
+            return chain.proceed();
+        }
+        if (progressAnimator != chain.getThisObject()) {
+            return chain.proceed();
+        }
+        Object originalCallback = chain.getArg(1);
+        BackProgressAnimator.ProgressCallback replacement = event -> {
+            try {
+                onMiuixSlideFrame(animation, event);
+            } catch (Throwable throwable) {
+                miuixSlideAnimActive = false;
+                log(Log.WARN, TAG, "miuix slide frame failed"
+                        + ", fallingBackToNativeCallback=true", throwable);
+                if (originalCallback instanceof BackProgressAnimator.ProgressCallback) {
+                    ((BackProgressAnimator.ProgressCallback) originalCallback)
+                            .onProgressUpdate(event);
+                }
+            }
+        };
+        miuixSlideRegistrationReentry = true;
+        try {
+            ((BackProgressAnimator) chain.getThisObject()).onBackStarted(
+                    (BackMotionEvent) chain.getArg(0), replacement);
+        } finally {
+            miuixSlideRegistrationReentry = false;
+        }
+        log(Log.INFO, TAG, "miuix slide progress callback proxied");
+        return null;
+    }
+
+    protected void onMiuixSlideFrame(Object animation, BackEvent backEvent)
+            throws Exception {
+        if (!miuixSlideAnimActive) {
+            return;
+        }
+        // The delivered progress already tracks the finger through
+        // BackProgressAnimator's smoothing spring (cancel rides it back to zero); mapping
+        // it linearly, without the native gesture interpolator, is the miuix slide.
+        float progress = Math.max(0.0f, Math.min(1.0f, backEvent.getProgress()));
+        writeField(animation, "gestureProgress", Float.valueOf(progress));
+        applyMiuixSlideFrame(animation, progress,
+                MIUIX_SLIDE_ENTERING_MIN_ALPHA
+                        + (1.0f - MIUIX_SLIDE_ENTERING_MIN_ALPHA) * progress);
+    }
+
+    protected Object onCrossActivitySlidePostCommit(XposedInterface.Chain chain)
+            throws Throwable {
+        if (!miuixSlideAnimActive) {
+            return chain.proceed();
+        }
+        try {
+            Object animation = chain.getThisObject();
+            float linear = ((Number) chain.getArg(0)).floatValue();
+            if (!miuixSlideCommitPoseCaptured) {
+                miuixSlideCommitClosing.set((RectF) readField(
+                        animation, "currentClosingRect"));
+                miuixSlideCommitEntering.set((RectF) readField(
+                        animation, "currentEnteringRect"));
+                float commitProgress = readFloatFieldOrDefault(
+                        animation, "gestureProgress", 0.0f);
+                miuixSlideCommitEnteringAlpha = MIUIX_SLIDE_ENTERING_MIN_ALPHA
+                        + (1.0f - MIUIX_SLIDE_ENTERING_MIN_ALPHA) * commitProgress;
+                // Continue the scrim fade from wherever the drag left it, not from full.
+                miuixSlideCommitScrimRemaining = 1.0f - commitProgress;
+                // The subclass onGestureCommitted (not hooked) rewrites the target
+                // rects to its own 0.9 card pose, so the slide would settle short of
+                // the edge. Restore the full slide-out destination for the settle.
+                Rect backAnimRect = (Rect) readField(animation, "backAnimRect");
+                Context animationContext = (Context) readField(animation, "context");
+                boolean rtl = animationContext.getResources().getConfiguration()
+                        .getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+                float slide = rtl ? -backAnimRect.width() : backAnimRect.width();
+                RectF targetClosing = (RectF) readField(
+                        animation, "targetClosingRect");
+                RectF targetEntering = (RectF) readField(
+                        animation, "targetEnteringRect");
+                targetClosing.set(backAnimRect);
+                targetClosing.offset(slide, 0f);
+                targetEntering.set(backAnimRect);
+                miuixSlideCommitPoseCaptured = true;
+            }
+            if (miuixSlidePostCommitOnBase) {
+                // Super-call position: the subclass override writes its native
+                // geometry after this hook returns. Reapply ours behind it on the
+                // same looper turn so the miuix frame is what reaches the compositor.
+                Handler frameHandler = new Handler(Objects.requireNonNull(Looper.myLooper()));
+                frameHandler.post(() -> {
+                    try {
+                        if (miuixSlideAnimActive) {
+                            applyMiuixSlidePostCommitFrame(animation, linear);
+                        }
+                    } catch (Throwable throwable) {
+                        miuixSlideAnimActive = false;
+                        log(Log.WARN, TAG, "miuix slide deferred post-commit failed",
+                                throwable);
+                    }
+                });
+                return null;
+            }
+            applyMiuixSlidePostCommitFrame(animation, linear);
+            return null;
+        } catch (Throwable throwable) {
+            miuixSlideAnimActive = false;
+            log(Log.WARN, TAG, "miuix slide post-commit frame failed", throwable);
+            return chain.proceed();
+        }
+    }
+
+    protected Object onCrossActivitySlideDuration(XposedInterface.Chain chain)
+            throws Throwable {
+        if (miuixSlideAnimActive) {
+            return Long.valueOf(MIUIX_SLIDE_SETTLE_DURATION_MS);
+        }
+        return chain.proceed();
+    }
+
+    protected void applyMiuixSlidePostCommitFrame(Object animation, float linear)
+            throws Exception {
+        float eased = miuixSlideSettleEase(linear);
+        RectF targetClosing = (RectF) readField(animation, "targetClosingRect");
+        RectF targetEntering = (RectF) readField(animation, "targetEnteringRect");
+        RectF currentClosing = (RectF) readField(animation, "currentClosingRect");
+        RectF currentEntering = (RectF) readField(animation, "currentEnteringRect");
+        lerpRectF(miuixSlideCommitClosing, targetClosing, eased, currentClosing);
+        lerpRectF(miuixSlideCommitEntering, targetEntering, eased, currentEntering);
+        float enteringAlpha = miuixSlideCommitEnteringAlpha
+                + (1.0f - miuixSlideCommitEnteringAlpha) * eased;
+        applyMiuixSlideScrim(animation,
+                miuixSlideCommitScrimRemaining * (1.0f - linear));
+        applyMiuixSlideTransforms(animation, currentClosing, currentEntering,
+                enteringAlpha);
+    }
+
+    // Dims the revealed layer proportionally to how much of the top page still covers
+    // it: remainingDim 1 = fully dimmed (top at rest), 0 = top gone. Follows the finger
+    // during the drag instead of snapping only at release.
+    protected void applyMiuixSlideScrim(Object animation, float remainingDim)
+            throws Exception {
+        Object scrim = readField(animation, "scrimLayer");
+        if (scrim instanceof SurfaceControl && ((SurfaceControl) scrim).isValid()) {
+            float maxScrimAlpha = readFloatFieldOrDefault(
+                    animation, "maxScrimAlpha", 0.0f);
+            ((SurfaceControl.Transaction) readField(animation, "transaction"))
+                    .setAlpha((SurfaceControl) scrim,
+                            maxScrimAlpha * Math.max(0.0f, Math.min(1.0f, remainingDim)));
+        }
+    }
+
+    protected void applyMiuixSlideFrame(Object animation, float progress,
+                                        float enteringAlpha) throws Exception {
+        RectF startClosing = (RectF) readField(animation, "startClosingRect");
+        RectF targetClosing = (RectF) readField(animation, "targetClosingRect");
+        RectF startEntering = (RectF) readField(animation, "startEnteringRect");
+        RectF targetEntering = (RectF) readField(animation, "targetEnteringRect");
+        RectF currentClosing = (RectF) readField(animation, "currentClosingRect");
+        RectF currentEntering = (RectF) readField(animation, "currentEnteringRect");
+        lerpRectF(startClosing, targetClosing, progress, currentClosing);
+        lerpRectF(startEntering, targetEntering, progress, currentEntering);
+        applyMiuixSlideScrim(animation, 1.0f - progress);
+        applyMiuixSlideTransforms(animation, currentClosing, currentEntering,
+                enteringAlpha);
+    }
+
+    protected void applyMiuixSlideTransforms(Object animation, RectF closingRect,
+                                             RectF enteringRect, float enteringAlpha)
+            throws Exception {
+        Object closingLeash = readFieldOrNull(
+                readField(animation, "closingTarget"), "leash");
+        Object enteringLeash = readFieldOrNull(
+                readField(animation, "enteringTarget"), "leash");
+        applyCrossActivityTransform(animation, closingLeash, closingRect, 1.0f);
+        applyCrossActivityTransform(animation, enteringLeash, enteringRect,
+                enteringAlpha);
+        // The revealed lower stack is full-screen behind the sliding top page; only the
+        // top card is rounded. Native applyTransform rounds both, so clear the corner
+        // radius the native call just set on the entering leash.
+        if (enteringLeash instanceof SurfaceControl
+                && ((SurfaceControl) enteringLeash).isValid()) {
+            Object transaction = readField(animation, "transaction");
+            invokeMethod(transaction, "setCornerRadius",
+                    new Class<?>[]{SurfaceControl.class, float.class},
+                    new Object[]{enteringLeash, Float.valueOf(0.0f)});
+        }
+        invokeAnyMethod(animation, "applyTransaction", new Object[0]);
+        Object background = readField(animation, "background");
+        if (background != null) {
+            invokeAnyMethod(background, "customizeStatusBarAppearance",
+                    new Object[]{Integer.valueOf((int) closingRect.top)});
+        }
+    }
+
+    protected void applyCrossActivityTransform(Object animation, Object leash,
+                                               RectF rect, float alpha)
+            throws Exception {
+        Method method = crossActivityApplyTransform;
+        if (method == null || !method.getDeclaringClass().isInstance(animation)) {
+            method = null;
+            for (Class<?> current = animation.getClass(); current != null;
+                 current = current.getSuperclass()) {
+                for (Method candidate : current.getDeclaredMethods()) {
+                    if ("applyTransform".equals(candidate.getName())
+                            && candidate.getParameterCount() == 5) {
+                        candidate.setAccessible(true);
+                        method = candidate;
+                        break;
+                    }
+                }
+                if (method != null) {
+                    break;
+                }
+            }
+            if (method == null) {
+                throw new NoSuchMethodException("applyTransform");
+            }
+            crossActivityApplyTransform = method;
+            crossActivityNoFling = method.getParameterTypes()[4].getEnumConstants()[0];
+        }
+        method.invoke(animation, leash, rect, Float.valueOf(alpha), null,
+                crossActivityNoFling);
+    }
+
+    protected void lerpRectF(RectF start, RectF target, float progress, RectF out) {
+        out.left = start.left + (target.left - start.left) * progress;
+        out.top = start.top + (target.top - start.top) * progress;
+        out.right = start.right + (target.right - start.right) * progress;
+        out.bottom = start.bottom + (target.bottom - start.bottom) * progress;
+    }
+
+    // Cubic ease-out: full speed at release for a continuous handoff from the finger,
+    // then a decisive settle — a critically damped closed form starts at zero velocity
+    // (a visible hitch at release) and crawls sub-pixel through its final stretch.
+    protected float miuixSlideSettleEase(float linearProgress) {
+        float remaining = 1.0f - Math.max(0.0f, Math.min(1.0f, linearProgress));
+        return 1.0f - remaining * remaining * remaining;
     }
 
     protected void hookBackPrepareTransitionReparent(ClassLoader classLoader) {
@@ -2032,7 +2497,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected ReturnHomeFinishTransferCandidate
-            captureReturnHomeFinishTransferCandidate(
+    captureReturnHomeFinishTransferCandidate(
             XposedInterface.Chain chain) throws Exception {
         Thread ownerThread = Thread.currentThread();
         if (!isReturnHomeFinishTransferReady()
@@ -2395,9 +2860,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         boolean preparedWallpaperMatches = preparedWallpaperExpected
                 ? preparedWallpaperLeash != null
-                && !surfacesAreSame(preparedWallpaperLeash, appLeash)
-                && !surfacesAreSame(preparedWallpaperLeash, homeLeash)
-                && !surfacesAreSame(preparedWallpaperLeash, elementLeash)
+                  && !surfacesAreSame(preparedWallpaperLeash, appLeash)
+                  && !surfacesAreSame(preparedWallpaperLeash, homeLeash)
+                  && !surfacesAreSame(preparedWallpaperLeash, elementLeash)
                 : preparedWallpaperLeash == null;
         if (preparedAppLeash == null || preparedHomeLeash == null
                 || !preparedWallpaperMatches
@@ -2804,7 +3269,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected void hookShellAnimationFinished(Class<?> controllerClass, String methodName,
-                                            String hookId, boolean optional)
+                                              String hookId, boolean optional)
             throws NoSuchMethodException {
         try {
             Method method = controllerClass.getDeclaredMethod(methodName);
@@ -3080,7 +3545,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected boolean isTrustedMiuiHomeBroadcastSender(Context context, int uid,
-                                                      String senderPackage) {
+                                                       String senderPackage) {
         if (context == null || uid == Process.INVALID_UID
                 || !MIUI_HOME.equals(senderPackage)) {
             return false;
@@ -3116,7 +3581,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected synchronized void updateMiuiOverviewState(boolean overviewVisible,
-                                                      String state, String source) {
+                                                        String state, String source) {
         long now = SystemClock.uptimeMillis();
         long pendingUntil = miuiOverviewDismissPendingUntilUptime;
         if (overviewVisible && pendingUntil > now) {
@@ -3240,7 +3705,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected void ensureBackInputInstalledFromHandler(Object edgeBackGestureHandler,
-                                                     String reason) {
+                                                       String reason) {
         if (!acceptingBackInputInstalls || edgeBackGestureHandler == null) {
             return;
         }
