@@ -1940,19 +1940,27 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 return result;
             }
 
-            Object controller = miuiHomeOpenBreakController;
-            if (controller == null) {
-                log(Log.WARN, TAG, "Cannot restore reused CLOSE-to-OPEN break state"
-                        + ", controller=null"
-                        + ", currentAnimType=" + currentAnimType
-                        + ", windowElement=" + shortObject(openingElement));
-                return result;
-            }
             Object animationIdentity = invokeAnyMethod(
                     openingElement, "getAnimSymbol", new Object[0]);
             if (animationIdentity == null) {
                 log(Log.WARN, TAG, "Cannot identify reused CLOSE-to-OPEN animation"
                         + ", animationIdentity=null"
+                        + ", currentAnimType=" + currentAnimType
+                        + ", windowElement=" + shortObject(openingElement));
+                return result;
+            }
+
+            MiuiHomeReturnHomeController returnHomeController =
+                    miuiHomeReturnHomeController;
+            if (returnHomeController != null) {
+                returnHomeController.finishUnifiedCancelForReusedOpen(
+                        stateManager, openingElement, animationIdentity);
+            }
+
+            Object controller = miuiHomeOpenBreakController;
+            if (controller == null) {
+                log(Log.WARN, TAG, "Cannot restore reused CLOSE-to-OPEN break state"
+                        + ", controller=null"
                         + ", currentAnimType=" + currentAnimType
                         + ", windowElement=" + shortObject(openingElement));
                 return result;

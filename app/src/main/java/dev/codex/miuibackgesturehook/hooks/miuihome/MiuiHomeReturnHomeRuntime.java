@@ -136,6 +136,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
         protected BackMotionEvent pendingStartEvent;
         protected BackMotionEvent pendingProgressEvent;
         protected int pendingTerminalAction = RETURN_HOME_TERMINAL_NONE;
+        protected boolean discardRejectedRunnerCallback;
         protected Constructor<?> nativeTargetSetConstructor;
         protected Constructor<?> nativeWindowAnimParamsConstructor;
         protected Constructor<?> nativeRectFParamsConstructor;
@@ -194,6 +195,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 attached = false;
                 invalidatePendingFreshOpen("deferredControllerReplacement:" + reason);
                 clearPendingCallbackState();
+                discardRejectedRunnerCallback = false;
                 pendingStandardCommitSignal.set(null);
                 pendingUnifiedNativeFinishDispatches.clear();
             }
@@ -260,6 +262,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         shouldRestorePreview(session));
             }
             clearPendingCallbackState();
+            discardRejectedRunnerCallback = false;
             pendingStandardCommitSignal.set(null);
             pendingUnifiedNativeFinishDispatches.clear();
             if (clearShell && !shellBinderDead
@@ -291,8 +294,12 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             // A callback start is the generation boundary even if the preceding runner never
             // arrived. Do not let its last progress sample bleed into this gesture.
             clearPendingCallbackState();
+            if (discardRejectedRunnerCallback) {
+                releaseBackMotionEventTarget(event);
+                return;
+            }
             ReturnHomeSession session = currentSession;
-            if (session == null) {
+            if (session == null || session.progressFrozen) {
                 pendingStartEvent = event;
                 return;
             }
@@ -303,8 +310,11 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             if (!attached || event == null) {
                 return;
             }
+            if (discardRejectedRunnerCallback) {
+                return;
+            }
             ReturnHomeSession session = currentSession;
-            if (session == null) {
+            if (session == null || session.progressFrozen) {
                 pendingProgressEvent = event;
                 return;
             }
@@ -319,8 +329,15 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
         }
 
         void onBackCancelled() {
+            if (discardRejectedRunnerCallback) {
+                discardRejectedRunnerCallback = false;
+                clearPendingCallbackState();
+                log(Log.INFO, TAG,
+                        "Discarded cancel callback for rejected return-home runner");
+                return;
+            }
             ReturnHomeSession session = currentSession;
-            if (session == null) {
+            if (session == null || session.progressFrozen) {
                 pendingTerminalAction = RETURN_HOME_TERMINAL_CANCEL;
                 return;
             }
@@ -329,8 +346,15 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
         }
 
         void onBackInvoked() {
+            if (discardRejectedRunnerCallback) {
+                discardRejectedRunnerCallback = false;
+                clearPendingCallbackState();
+                log(Log.INFO, TAG,
+                        "Discarded invoke callback for rejected return-home runner");
+                return;
+            }
             ReturnHomeSession session = currentSession;
-            if (session == null) {
+            if (session == null || session.progressFrozen) {
                 pendingTerminalAction = RETURN_HOME_TERMINAL_INVOKE;
                 log(Log.INFO, TAG, "Return-to-home invoke waiting for remote targets");
                 return;
@@ -361,6 +385,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         startUnifiedNativeCancel(
                                 previous, "supersededRunner");
                     }
+                    discardRejectedRunnerCallback =
+                            pendingTerminalAction == RETURN_HOME_TERMINAL_NONE;
                     clearPendingCallbackState();
                     discardMatchingUnboundStandardSignal(
                             miuiHomeAcceptedInputIdentity.get(),
@@ -8642,6 +8668,43 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 return;
             }
             consumeUnifiedNativeFinishSnapshot(session, reason);
+        }
+
+        void finishUnifiedCancelForReusedOpen(
+                Object stateManager, Object windowElement,
+                Object animationIdentity) {
+            ReturnHomeSession session = currentSession;
+            UnifiedNativeConfiguredAnimToSnapshot configured = session == null
+                    ? null : session.unifiedNativeConfiguredAnimTo.get();
+            if (Looper.myLooper() != Looper.getMainLooper()
+                    || session == null || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || session.stateManager != stateManager
+                    || session.nativeWindowElement != windowElement
+                    || session.unifiedNativeAnimationIdentity != animationIdentity
+                    || session.nativeHandoffStarted
+                    || session.nativeAnimationStarted
+                    || session.unifiedNativeCommitPending
+                    || !isExactUnifiedConfiguredAnimTo(
+                    session, configured, windowElement,
+                    animationIdentity, "APP_TO_APP")) {
+                return;
+            }
+            Runnable timeout = session.unifiedNativeCancelTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            session.unifiedNativeCancelTimeout = null;
+            session.unifiedNativeCancelPending = false;
+            session.unifiedNativeCancelRetargeted = false;
+            session.unifiedNativeCleanupVerified = true;
+            log(Log.INFO, TAG,
+                    "Finished cancelled return-home owner at reused launcher OPEN"
+                            + ", generation=" + session.generation
+                            + ", animToEpoch=" + configured.animToEpoch
+                            + ", animationIdentity="
+                            + shortObject(animationIdentity));
+            finishSession(session, "cancelReusedForLauncherOpen", false);
         }
 
         protected boolean isStandardSingleTaskReturnHome(ReturnHomeSession session) {
