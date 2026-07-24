@@ -511,38 +511,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         }
     }
 
-    protected void hookMiuiHomeReturnHomeCloseInterruption(
-            ClassLoader classLoader, boolean hookCancelSurface, boolean hookSetToOld)
-            throws ClassNotFoundException, NoSuchMethodException {
-        Class<?> windowElementClass = Class.forName(
-                MIUI_HOME_WINDOW_ELEMENT, false, classLoader);
-        if (hookCancelSurface) {
-            Class<?> shellTransitionCallbackClass = Class.forName(
-                    MIUI_HOME_SHELL_TRANSITION_CALLBACK, false, classLoader);
-            Method cancelSurface = windowElementClass.getDeclaredMethod(
-                    "cancelSurfaceAnimOnly", String.class, boolean.class,
-                    shellTransitionCallbackClass, Boolean.class, boolean.class,
-                    shellTransitionCallbackClass, shellTransitionCallbackClass);
-            cancelSurface.setAccessible(true);
-            recordHookHandle(hook(cancelSurface)
-                    .setId("miui_home_return_home_cancel_surface")
-                    .intercept(this::captureMiuiHomeReturnHomeCloseInterruption));
-        }
-        if (hookSetToOld) {
-            Class<?> stateManagerClass = Class.forName(
-                    MIUI_HOME_STATE_MANAGER, false, classLoader);
-            Method setToOld = stateManagerClass.getDeclaredMethod(
-                    "setToOld", windowElementClass);
-            setToOld.setAccessible(true);
-            recordHookHandle(hook(setToOld)
-                    .setId("miui_home_return_home_set_to_old")
-                    .intercept(this::finishMiuiHomeReturnHomeCloseInterruption));
-        }
-        log(Log.INFO, TAG, "Hooked Xiaomi interrupted return-home handoff"
-                + ", cancelSurface=" + hookCancelSurface
-                + ", setToOld=" + hookSetToOld);
-    }
-
     protected void hookMiuiHomeReturnHomeDirectCancel(ClassLoader classLoader)
             throws ClassNotFoundException, NoSuchMethodException {
         Class<?> windowElementClass = Class.forName(
@@ -946,7 +914,12 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             return null;
         }
         try {
-            return chain.proceed();
+            Object result = chain.proceed();
+            if (controller != null && token != null) {
+                controller.completeUnconfiguredCancelledCommitFinish(
+                        token);
+            }
+            return result;
         } catch (Throwable throwable) {
             if (controller != null && token != null) {
                 controller.abortUnifiedNativeFinishDispatch(
@@ -1755,59 +1728,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         }
     }
 
-    protected Object captureMiuiHomeReturnHomeCloseInterruption(
-            XposedInterface.Chain chain) throws Throwable {
-        Object windowElement = chain.getThisObject();
-        Object reasonObject = chain.getArg(0);
-        String reason = reasonObject instanceof String
-                ? (String) reasonObject : null;
-        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
-        if (controller != null) {
-            try {
-                controller.prepareNativeCloseInterruption(
-                        windowElement, reason);
-            } catch (Throwable throwable) {
-                // This runs before Xiaomi mutates the WindowElement. A failed bookkeeping
-                // adoption must leave the native icon-click path untouched.
-                log(Log.WARN, TAG,
-                        "Failed to adopt return-home CLOSE before native interruption",
-                        throwable);
-            }
-        }
-        Object result = chain.proceed();
-        if (controller != null) {
-            try {
-                controller.onNativeCloseCancelSurface(
-                        windowElement, reason);
-            } catch (Throwable throwable) {
-                // Xiaomi has already queued its native cancellation. Module bookkeeping must
-                // never turn an icon click into a launcher exception.
-                log(Log.WARN, TAG,
-                        "Failed to capture interrupted Xiaomi return-home CLOSE", throwable);
-            }
-        }
-        return result;
-    }
-
-    protected Object finishMiuiHomeReturnHomeCloseInterruption(
-            XposedInterface.Chain chain) throws Throwable {
-        Object stateManager = chain.getThisObject();
-        Object windowElement = chain.getArg(0);
-        Object result = chain.proceed();
-        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
-        if (controller != null) {
-            try {
-                controller.onNativeCloseSetToOld(stateManager, windowElement);
-            } catch (Throwable throwable) {
-                // Preserve Xiaomi's completed callback chain. The old native animation-end
-                // listener and watchdog remain valid fallbacks when verification fails.
-                log(Log.WARN, TAG,
-                        "Failed to finish interrupted Xiaomi return-home CLOSE", throwable);
-            }
-        }
-        return result;
-    }
-
     protected Object routeMiuiHomeReturnHomeSameIconParallel(
             XposedInterface.Chain chain) throws Throwable {
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
@@ -1815,6 +1735,16 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             return chain.proceed();
         }
         Object[] originalArgs = chain.getArgs().toArray();
+        MiuiHomeReturnHomeController.ReturnHomeLauncherOpenBarrierToken
+                launcherOpenBarrier = null;
+        try {
+            launcherOpenBarrier = controller.prepareLauncherOpenBarrier(
+                    chain.getThisObject(), originalArgs);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to prepare Xiaomi CLOSE-to-OPEN handoff",
+                    throwable);
+        }
         boolean routeThroughNativeParallel;
         try {
             routeThroughNativeParallel = controller.shouldRouteSameIconThroughNativeParallel(
@@ -1823,17 +1753,44 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             log(Log.WARN, TAG,
                     "Failed to inspect Xiaomi same-icon parallel routing",
                     throwable);
+            routeThroughNativeParallel = false;
+        }
+        if (!routeThroughNativeParallel && launcherOpenBarrier == null) {
             return chain.proceed();
         }
-        if (!routeThroughNativeParallel) {
+        if (routeThroughNativeParallel && launcherOpenBarrier == null) {
             return chain.proceed();
         }
         Object[] routedArgs = originalArgs.clone();
-        // StateManager's second argument is the same-element/direct-cancel selector. Xiaomi's
-        // false branch already keeps the old WindowElement in its native cancellation lifecycle,
-        // moves it to the old list, and starts FastLaunch OPEN from the native callback.
-        routedArgs[1] = Boolean.FALSE;
-        return chain.proceed(routedArgs);
+        if (routeThroughNativeParallel) {
+            // StateManager's second argument is the same-element/direct-cancel selector.
+            // Xiaomi's false branch keeps the old element in its native cancellation lifecycle.
+            try {
+                routeThroughNativeParallel =
+                        controller.armLauncherOpenParallelRoute(
+                                launcherOpenBarrier);
+            } catch (Throwable throwable) {
+                routeThroughNativeParallel = false;
+                log(Log.WARN, TAG,
+                        "Failed to arm Xiaomi CLOSE-to-OPEN parallel boundary",
+                        throwable);
+            }
+            if (routeThroughNativeParallel) {
+                routedArgs[1] = Boolean.FALSE;
+            }
+        }
+        if (launcherOpenBarrier != null) {
+            routedArgs[3] = launcherOpenBarrier.wrappedCallback;
+        }
+        try {
+            return chain.proceed(routedArgs);
+        } catch (Throwable throwable) {
+            if (launcherOpenBarrier != null) {
+                controller.invalidateLauncherOpenBarrier(
+                        launcherOpenBarrier, "stateManagerCancelThrew");
+            }
+            throw throwable;
+        }
     }
 
     protected Object forceMiuiHomeReturnHomeFreshOpen(
@@ -2617,6 +2574,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 || miuiHomeReturnHomeController != retiredController
                 || !retiredController.deferredControllerReplacement
                 || retiredController.currentSession != null
+                || retiredController.pendingLauncherOpenBarrier.get() != null
                 || !retiredController
                 .pendingUnifiedInterruptedAnimToConfigs.isEmpty()) {
             return;
@@ -2778,13 +2736,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                                 displayId, edge,
                                 miuiHomeSystemUiInputArbiterGeneration);
                 miuiHomeAcceptedInputIdentity.set(inputIdentity);
-                MiuiHomeReturnHomeController returnHomeController =
-                        miuiHomeReturnHomeController;
-                if (returnHomeController != null) {
-                    returnHomeController
-                            .onMiuiHomeAcceptedInputIdentityChanged(
-                                    inputIdentity);
-                }
                 sendAuthenticatedMiuiHomeState(stub.getContext(), acceptedIntent);
                 log(Log.INFO, TAG, "Published MiuiHome accepted input token"
                         + ", eventId=" + eventId
@@ -2841,29 +2792,50 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 }
                 long generation = intent.getLongExtra(
                         EXTRA_INPUT_ARBITER_GENERATION, 0L);
-                boolean ready = intent.getBooleanExtra(EXTRA_INPUT_ARBITER_READY, false);
                 if (generation == 0L) {
                     return;
                 }
-                boolean newGeneration = generation > miuiHomeSystemUiInputArbiterGeneration;
-                if (generation >= miuiHomeSystemUiInputArbiterGeneration) {
+                boolean stateUpdate = intent.hasExtra(
+                        EXTRA_INPUT_ARBITER_READY);
+                boolean ready = stateUpdate
+                        ? intent.getBooleanExtra(
+                        EXTRA_INPUT_ARBITER_READY, false)
+                        : miuiHomeSystemUiInputArbiterReady;
+                boolean newGeneration = stateUpdate && generation
+                        > miuiHomeSystemUiInputArbiterGeneration;
+                if (stateUpdate && generation
+                        >= miuiHomeSystemUiInputArbiterGeneration) {
                     miuiHomeSystemUiInputArbiterGeneration = generation;
                     miuiHomeSystemUiInputArbiterReady = ready;
                 }
-                log(Log.INFO, TAG, "SystemUI input arbiter state changed"
-                        + ", ready=" + miuiHomeSystemUiInputArbiterReady
-                        + ", generation="
-                        + miuiHomeSystemUiInputArbiterGeneration
-                        + ", senderGeneration=" + generation);
+                if (stateUpdate) {
+                    log(Log.INFO, TAG, "SystemUI input arbiter state changed"
+                            + ", ready=" + miuiHomeSystemUiInputArbiterReady
+                            + ", generation="
+                            + miuiHomeSystemUiInputArbiterGeneration
+                            + ", senderGeneration=" + generation);
+                }
                 if (newGeneration) {
                     miuiHomeAcceptedInputIdentity.set(null);
                     miuiHomeEditingStatePublished = false;
                     refreshMiuiHomeEditingState(
                             receiverContext.getClassLoader(), "systemUiArbiterGeneration");
                 }
-                if (intent.hasExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT)) {
-                    long attempt = intent.getLongExtra(
-                            EXTRA_RETURN_HOME_COMMIT_ATTEMPT, 0L);
+                MiuiHomeReturnHomeController controller =
+                        miuiHomeReturnHomeController;
+                if (stateUpdate && (newGeneration || !ready)
+                        && controller != null) {
+                    controller.invalidatePendingLauncherOpenBarrier(
+                            "systemUiArbiterStateChanged", true);
+                }
+                boolean finishReceipt = intent.hasExtra(
+                        EXTRA_RETURN_HOME_FINISH_ATTEMPT);
+                if (finishReceipt
+                        || intent.hasExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT)) {
+                    long attempt = intent.getLongExtra(finishReceipt
+                                    ? EXTRA_RETURN_HOME_FINISH_ATTEMPT
+                                    : EXTRA_RETURN_HOME_COMMIT_ATTEMPT,
+                            0L);
                     int taskId = intent.getIntExtra(
                             EXTRA_RETURN_HOME_COMMIT_TASK_ID, -1);
                     int transitionDebugId = intent.getIntExtra(
@@ -2880,8 +2852,10 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                             EXTRA_INPUT_DISPLAY_ID, Integer.MIN_VALUE);
                     int edge = intent.getIntExtra(
                             EXTRA_INPUT_EDGE, -1);
-                    MiuiHomeReturnHomeController controller =
-                            miuiHomeReturnHomeController;
+                    Bundle signalExtras = intent.getExtras();
+                    IBinder runnerSession = signalExtras == null
+                            ? null : signalExtras.getBinder(
+                            EXTRA_RETURN_HOME_RUNNER_SESSION);
                     if (attempt <= 0L || taskId < 0
                             || transitionDebugId < 0
                             || !intent.hasExtra(EXTRA_INPUT_EVENT_ID)
@@ -2889,12 +2863,15 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                             || deviceId == Integer.MIN_VALUE
                             || displayId == Integer.MIN_VALUE
                             || (edge != EDGE_LEFT && edge != EDGE_RIGHT)
+                            || runnerSession == null
                             || generation
                             != miuiHomeSystemUiInputArbiterGeneration
                             || !miuiHomeSystemUiInputArbiterReady
                             || controller == null) {
                         log(Log.WARN, TAG,
-                                "Rejected stale standard return-home commit signal"
+                                "Rejected stale standard return-home "
+                                        + (finishReceipt
+                                        ? "finish receipt" : "commit signal")
                                         + ", attempt=" + attempt
                                         + ", taskId=" + taskId
                                         + ", transitionDebugId="
@@ -2909,15 +2886,22 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                                         + ", eventId=" + eventId
                                         + ", downTime=" + downTime
                                         + ", displayId=" + displayId
-                                        + ", edge=" + edge);
+                                        + ", edge=" + edge
+                                        + ", runnerSession="
+                                        + shortObject(runnerSession));
                         return;
                     }
-                    controller.onStandardShellReturnHomeCommit(
+                    StandardReturnHomeCommitSignal signal =
                             new StandardReturnHomeCommitSignal(
                                     attempt, generation, taskId,
                                     transitionDebugId, eventId,
                                     downTime, deviceId, source,
-                                    displayId, edge));
+                                    displayId, edge, runnerSession);
+                    if (finishReceipt) {
+                        controller.onStandardShellReturnHomeFinished(signal);
+                    } else {
+                        controller.onStandardShellReturnHomeCommit(signal);
+                    }
                 }
             }
         };
@@ -3032,31 +3016,72 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                             + (input == null ? 0L : input.generation));
             return;
         }
-        if (!systemUiReturnHomeCommitIdentity.compareAndSet(
-                identity, null)) {
+        IBinder runnerSession;
+        try {
+            runnerSession = captureReturnHomeRunnerSession(
+                    compositionController);
+        } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
-                    "Lost committed return-home input identity before publish"
+                    "Could not capture exact Shell return-home runner session"
                             + ", attempt=" + attempt
                             + ", taskId=" + taskId
-                            + ", eventId=" + input.eventId);
+                            + ", transitionDebugId=" + transitionDebugId,
+                    throwable);
+            return;
+        }
+        StandardReturnHomeCommitSignal signal =
+                new StandardReturnHomeCommitSignal(
+                        attempt, systemUiInputArbiterGeneration,
+                        taskId, transitionDebugId,
+                        input.eventId, input.downTime,
+                        input.deviceId, input.source,
+                        input.displayId, input.edge, runnerSession);
+        Object finishCallback = null;
+        try {
+            Object handler = readField(compositionController,
+                    "mBackTransitionHandler");
+            finishCallback = readField(handler,
+                    "mOnAnimationFinishCallback");
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Could not capture Shell return-home finish callback",
+                    throwable);
+        }
+        boolean finishCallbackBound = finishCallback != null
+                && identity.finishCallback.compareAndSet(
+                null, finishCallback);
+        boolean finishReceiptBound = finishCallbackBound
+                && identity.finishSignal.compareAndSet(null, signal);
+        boolean identityCurrent = finishReceiptBound
+                && systemUiReturnHomeCommitIdentity.get() == identity;
+        if (!identityCurrent) {
+            if (finishReceiptBound) {
+                identity.finishSignal.compareAndSet(signal, null);
+            }
+            if (finishCallbackBound) {
+                identity.finishCallback.compareAndSet(
+                        finishCallback, null);
+            }
+            log(Log.ERROR, TAG,
+                    "Could not bind Shell return-home finish receipt"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", shellSessionId="
+                            + identity.shellSessionId
+                            + ", eventId=" + input.eventId
+                            + ", finishCallback="
+                            + shortObject(finishCallback)
+                            + ", identityCurrent="
+                            + (systemUiReturnHomeCommitIdentity.get()
+                            == identity));
             return;
         }
         try {
             Intent intent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
             intent.setPackage(MIUI_HOME);
-            intent.putExtra(EXTRA_INPUT_ARBITER_READY, true);
-            intent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
-                    systemUiInputArbiterGeneration);
             intent.putExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT, attempt);
-            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_TASK_ID, taskId);
-            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_DEBUG_ID,
-                    transitionDebugId);
-            intent.putExtra(EXTRA_INPUT_EVENT_ID, input.eventId);
-            intent.putExtra(EXTRA_INPUT_DOWN_TIME, input.downTime);
-            intent.putExtra(EXTRA_INPUT_DEVICE_ID, input.deviceId);
-            intent.putExtra(EXTRA_INPUT_SOURCE, input.source);
-            intent.putExtra(EXTRA_INPUT_DISPLAY_ID, input.displayId);
-            intent.putExtra(EXTRA_INPUT_EDGE, input.edge);
+            putStandardReturnHomeSignal(intent, signal);
             Bundle options = BroadcastOptions.makeBasic()
                     .setShareIdentityEnabled(true)
                     .toBundle();
@@ -3069,7 +3094,9 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                             + ", eventId=" + input.eventId
                             + ", downTime=" + input.downTime
                             + ", arbiterGeneration="
-                            + systemUiInputArbiterGeneration);
+                            + systemUiInputArbiterGeneration
+                            + ", runnerSession="
+                            + shortObject(runnerSession));
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
                     "Failed to publish standard return-home commit"
@@ -3080,7 +3107,147 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         }
     }
 
-    protected void clearSystemUiReturnHomeCommitIdentity(
+    protected void putStandardReturnHomeSignal(
+            Intent intent, StandardReturnHomeCommitSignal signal) {
+        intent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
+                signal.arbiterGeneration);
+        intent.putExtra(EXTRA_RETURN_HOME_COMMIT_TASK_ID, signal.taskId);
+        intent.putExtra(EXTRA_RETURN_HOME_COMMIT_DEBUG_ID,
+                signal.transitionDebugId);
+        intent.putExtra(EXTRA_INPUT_EVENT_ID, signal.eventId);
+        intent.putExtra(EXTRA_INPUT_DOWN_TIME, signal.downTime);
+        intent.putExtra(EXTRA_INPUT_DEVICE_ID, signal.deviceId);
+        intent.putExtra(EXTRA_INPUT_SOURCE, signal.source);
+        intent.putExtra(EXTRA_INPUT_DISPLAY_ID, signal.displayId);
+        intent.putExtra(EXTRA_INPUT_EDGE, signal.edge);
+        Bundle binderExtras = new Bundle();
+        binderExtras.putBinder(EXTRA_RETURN_HOME_RUNNER_SESSION,
+                signal.runnerSession);
+        intent.putExtras(binderExtras);
+    }
+
+    protected IBinder captureReturnHomeRunnerSession(Object controller)
+            throws Throwable {
+        Object registry = readField(controller, "mShellBackAnimationRegistry");
+        Object definitions = readField(registry, "mAnimationDefinition");
+        Object runner = invokeAnyMethod(definitions, "get",
+                new Object[]{Integer.valueOf(TYPE_RETURN_TO_HOME)});
+        Object remoteCallback = runner == null ? null
+                : readField(runner, "mRemoteCallback");
+        Object runnerApps = runner == null ? null : readField(runner, "mApps");
+        Object controllerApps = readField(controller, "mApps");
+        Object waiting = runner == null ? null
+                : readField(runner, "mWaitingAnimation");
+        Object cancelled = runner == null ? null
+                : readField(runner, "mAnimationCancelled");
+        IBinder session = remoteCallback instanceof IInterface
+                ? ((IInterface) remoteCallback).asBinder() : null;
+        if (runner == null || session == null || runnerApps != controllerApps
+                || !Boolean.FALSE.equals(waiting)
+                || !Boolean.FALSE.equals(cancelled)) {
+            throw new IllegalStateException(
+                    "return-home runner is not the exact active session"
+                            + ", runner=" + shortObject(runner)
+                            + ", remoteCallback="
+                            + shortObject(remoteCallback)
+                            + ", sameApps="
+                            + (runnerApps == controllerApps)
+                            + ", waiting=" + waiting
+                            + ", cancelled=" + cancelled);
+        }
+        return session;
+    }
+
+    @Override
+    protected void publishSystemUiReturnHomeFinish(
+            Object controller, long shellSessionId,
+            Object finishCallback, String reason) {
+        SystemUiReturnHomeCommitIdentity identity =
+                systemUiReturnHomeCommitIdentity.get();
+        StandardReturnHomeCommitSignal signal = identity == null
+                ? null : identity.finishSignal.get();
+        Object expectedFinishCallback = identity == null
+                ? null : identity.finishCallback.get();
+        if (identity == null || signal == null
+                || identity.controller != controller
+                || identity.shellSessionId != shellSessionId
+                || finishCallback == null
+                || finishCallback != expectedFinishCallback) {
+            return;
+        }
+        Context context = miuiOverviewReceiverContext;
+        boolean cleanupComplete = false;
+        try {
+            Object handler = readField(controller,
+                    "mBackTransitionHandler");
+            cleanupComplete = readField(handler,
+                    "mOnAnimationFinishCallback") == null
+                    && readField(handler, "mFinishOpenTransaction") == null
+                    && readField(handler,
+                    "mFinishOpenTransitionCallback") == null
+                    && readField(handler, "mPrepareOpenTransition") == null
+                    && readField(handler, "mClosePrepareTransition") == null
+                    && readField(handler, "mOpenTransitionInfo") == null
+                    && !Boolean.TRUE.equals(readField(handler,
+                    "mCloseTransitionRequested"));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Could not prove completed Shell return-home cleanup",
+                    throwable);
+        }
+        if (identity.taskId != signal.taskId
+                || signal.arbiterGeneration
+                != systemUiInputArbiterGeneration
+                || !signal.matchesInput(identity.input)
+                || context == null
+                || !cleanupComplete
+                || !acceptingBackInputInstalls
+                || systemUiInputArbiterMonitorCount.get() <= 0) {
+            if (signal != null && !cleanupComplete) {
+                log(Log.WARN, TAG,
+                        "Withheld premature Shell return-home finish receipt"
+                                + ", attempt=" + signal.attempt
+                                + ", taskId=" + signal.taskId
+                                + ", transitionDebugId="
+                                + signal.transitionDebugId
+                                + ", shellSessionId=" + shellSessionId);
+            }
+            return;
+        }
+        try {
+            Intent intent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+            intent.setPackage(MIUI_HOME);
+            intent.putExtra(EXTRA_RETURN_HOME_FINISH_ATTEMPT,
+                    signal.attempt);
+            putStandardReturnHomeSignal(intent, signal);
+            Bundle options = BroadcastOptions.makeBasic()
+                    .setShareIdentityEnabled(true)
+                    .toBundle();
+            context.sendBroadcast(intent, null, options);
+            clearSystemUiReturnHomeCommitIdentity(
+                    controller, shellSessionId,
+                    "finishReceipt:" + reason);
+            log(Log.INFO, TAG,
+                    "Published completed Shell return-home receipt"
+                            + ", attempt=" + signal.attempt
+                            + ", taskId=" + signal.taskId
+                            + ", transitionDebugId="
+                            + signal.transitionDebugId
+                            + ", shellSessionId=" + shellSessionId
+                            + ", eventId=" + signal.eventId
+                            + ", reason=" + reason);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to publish completed Shell return-home receipt"
+                            + ", attempt=" + signal.attempt
+                            + ", taskId=" + signal.taskId
+                            + ", transitionDebugId="
+                            + signal.transitionDebugId,
+                    throwable);
+        }
+    }
+
+    protected boolean clearSystemUiReturnHomeCommitIdentity(
             Object controller, long shellSessionId, String reason) {
         while (true) {
             SystemUiReturnHomeCommitIdentity identity =
@@ -3090,7 +3257,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     && identity.controller != controller)
                     || (shellSessionId != 0L
                     && identity.shellSessionId != shellSessionId)) {
-                return;
+                return false;
             }
             if (systemUiReturnHomeCommitIdentity.compareAndSet(
                     identity, null)) {
@@ -3102,7 +3269,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                                 + ", shellSessionId="
                                 + identity.shellSessionId
                                 + ", reason=" + reason);
-                return;
+                return true;
             }
         }
     }

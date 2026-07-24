@@ -90,7 +90,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected abstract void sendAuthenticatedMiuiHomeOpenBreakCommand(
             Context context, long generation, long attemptId,
             SystemUiBackGestureDriver driver);
-
+    protected abstract void publishSystemUiReturnHomeFinish(
+            Object controller, long shellSessionId,
+            Object finishCallback, String reason);
     protected final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -261,10 +263,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         Runnable captureShellAnimationCompletion(
                 Object finishedController, Object currentTracker,
-                Object queuedTracker, Object navigation, String reason) {
+                Object queuedTracker, Object navigation,
+                Object finishCallback, String reason) {
             return driver.captureShellAnimationCompletion(
                     finishedController, currentTracker, queuedTracker,
-                    navigation, reason);
+                    navigation, finishCallback, reason);
         }
 
         @Override
@@ -2519,7 +2522,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected Runnable captureShellAnimationCompletion(
                 Object finishedController, Object currentTracker,
-                Object queuedTracker, Object navigation, String reason) {
+                Object queuedTracker, Object navigation,
+                Object finishCallback, String reason) {
             ShellGestureSession session = activeShellSession;
             boolean exactIdentity = session != null
                     && session.navigation == navigation
@@ -2563,6 +2567,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             "Accepted definitive stock cleanup for orphaned Shell session"
                                     + ", shellSessionId=" + session.id);
                 }
+                publishSystemUiReturnHomeFinish(
+                        session.controller, session.id,
+                        finishCallback, reason);
                 completeShellSessionOnOwner(
                         session, "stock-finish:" + reason);
             };

@@ -95,7 +95,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected abstract void publishStandardReturnHomeCommit(
             int taskId, int transitionDebugId, Object compositionController);
     protected abstract void clearLegacyBackGuard(String reason);
-    protected abstract void clearSystemUiReturnHomeCommitIdentity(
+    protected abstract boolean clearSystemUiReturnHomeCommitIdentity(
             Object controller, long attemptId, String reason);
     protected abstract LegacyBackAttempt armLegacyBackGuard(
             Object controller, Object runningInfo);
@@ -310,6 +310,10 @@ public abstract class HookRuntimeCore extends XposedModule {
             "return_home_commit_debug_id";
     protected static final String EXTRA_RETURN_HOME_COMMIT_ATTEMPT =
             "return_home_commit_attempt";
+    protected static final String EXTRA_RETURN_HOME_FINISH_ATTEMPT =
+            "return_home_finish_attempt";
+    protected static final String EXTRA_RETURN_HOME_RUNNER_SESSION =
+            "return_home_runner_session";
     protected static final int LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER = 0;
     protected static final int LAUNCHER_OPEN_BREAK_RESULT_REJECTED = 1;
     protected static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
@@ -822,24 +826,14 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int source;
         public final int displayId;
         public final int edge;
-        public final long launcherSessionGeneration;
-
-        public StandardReturnHomeCommitSignal(long attempt, long arbiterGeneration,
-                                       int taskId, int transitionDebugId,
-                                       int eventId, long downTime,
-                                       int deviceId, int source,
-                                       int displayId, int edge) {
-            this(attempt, arbiterGeneration, taskId, transitionDebugId,
-                    eventId, downTime, deviceId, source, displayId, edge,
-                    0L);
-        }
+        public final IBinder runnerSession;
 
         public StandardReturnHomeCommitSignal(
                 long attempt, long arbiterGeneration,
                 int taskId, int transitionDebugId,
                 int eventId, long downTime,
                 int deviceId, int source, int displayId, int edge,
-                long launcherSessionGeneration) {
+                IBinder runnerSession) {
             this.attempt = attempt;
             this.arbiterGeneration = arbiterGeneration;
             this.taskId = taskId;
@@ -850,16 +844,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.source = source;
             this.displayId = displayId;
             this.edge = edge;
-            this.launcherSessionGeneration = launcherSessionGeneration;
-        }
-
-        public StandardReturnHomeCommitSignal bindToLauncherSession(
-                long sessionGeneration) {
-            return new StandardReturnHomeCommitSignal(
-                    attempt, arbiterGeneration, taskId,
-                    transitionDebugId, eventId, downTime,
-                    deviceId, source, displayId, edge,
-                    sessionGeneration);
+            this.runnerSession = runnerSession;
         }
 
         public boolean matchesInput(MiuiHomeAcceptedInputToken token) {
@@ -879,6 +864,10 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final long shellSessionId;
         public final int taskId;
         public final MiuiHomeAcceptedInputToken input;
+        public final AtomicReference<StandardReturnHomeCommitSignal>
+                finishSignal = new AtomicReference<>();
+        public final AtomicReference<Object> finishCallback =
+                new AtomicReference<>();
 
         public SystemUiReturnHomeCommitIdentity(
                 Object controller, long shellSessionId, int taskId,

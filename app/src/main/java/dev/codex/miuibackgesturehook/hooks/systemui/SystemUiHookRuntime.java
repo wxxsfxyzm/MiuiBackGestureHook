@@ -3320,11 +3320,16 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Object currentTracker = readField(controller, "mCurrentTracker");
             Object queuedTracker = readField(controller, "mQueuedTracker");
             Object navigation = readField(controller, "mBackNavigationInfo");
+            Object transitionHandler = readField(controller,
+                    "mBackTransitionHandler");
+            Object finishCallback = readField(transitionHandler,
+                    "mOnAnimationFinishCallback");
             for (NativeBackInputMonitor monitor
                     : new ArrayList<>(nativeInputMonitors.values())) {
                 Runnable completion = monitor.captureShellAnimationCompletion(
                         controller, currentTracker, queuedTracker,
-                        navigation, chain.getExecutable().getName());
+                        navigation, finishCallback,
+                        chain.getExecutable().getName());
                 if (completion != null) {
                     completions.add(completion);
                 }
