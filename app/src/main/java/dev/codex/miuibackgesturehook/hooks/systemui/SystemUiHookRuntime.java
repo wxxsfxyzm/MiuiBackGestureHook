@@ -7,6 +7,12 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Insets;
+import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
@@ -50,6 +56,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookNavigationBarTransientAutoHide(classLoader);
             hookNavigationBarTransientAppearance(classLoader);
             hookStatusBarTransientAppearance(classLoader);
+            hookNavigationBarGestureInsets(classLoader);
             hookEdgeBackGestureHandler(classLoader);
             hookNavigationBarControllerCreate(classLoader);
             hookNavigationBarControllerRemove(classLoader);
@@ -568,6 +575,101 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             reply.writeNoException();
         }
         return Boolean.TRUE;
+    }
+
+    protected void hookNavigationBarGestureInsets(ClassLoader classLoader) {
+        try {
+            Class<?> navigationBarClass = Class.forName(NAVIGATION_BAR, false, classLoader);
+            Method method = navigationBarClass.getDeclaredMethod(
+                    "getBarLayoutParamsForRotation", int.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("systemui_navigation_bar_gesture_insets")
+                    .intercept(this::restoreNavigationBarGestureInsets));
+            log(Log.INFO, TAG,
+                    "Hooked NavigationBar application gesture Insets restoration");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook NavigationBar application gesture Insets", throwable);
+        }
+    }
+
+    protected Object restoreNavigationBarGestureInsets(XposedInterface.Chain chain)
+            throws Throwable {
+        Object result = chain.proceed();
+        if (!(result instanceof WindowManager.LayoutParams)) {
+            return result;
+        }
+
+        try {
+            Object navigationBar = chain.getThisObject();
+            Object edgeBackGestureHandler = readField(
+                    navigationBar, "mEdgeBackGestureHandler");
+            if (!Boolean.TRUE.equals(readField(edgeBackGestureHandler, "mInGestureNavMode"))
+                    || !Boolean.TRUE.equals(readField(
+                    edgeBackGestureHandler, "mIsBackGestureAllowed"))) {
+                return result;
+            }
+
+            Context context = (Context) readField(navigationBar, "mContext");
+            EdgeWidthSnapshot widths = readEdgeWidthSnapshot(edgeBackGestureHandler,
+                    context.getResources().getDisplayMetrics().density);
+            Class<?> overrideClass = Class.forName(
+                    "android.view.InsetsFrameProvider$InsetsSizeOverride", false,
+                    navigationBar.getClass().getClassLoader());
+            Constructor<?> overrideConstructor = overrideClass.getDeclaredConstructor(
+                    int.class, Insets.class);
+            overrideConstructor.setAccessible(true);
+            Object imeOverride = overrideConstructor.newInstance(
+                    WindowManager.LayoutParams.TYPE_INPUT_METHOD, Insets.NONE);
+            Object imeOverrides = Array.newInstance(overrideClass, 1);
+            Array.set(imeOverrides, 0, imeOverride);
+
+            Object providers = readField(result, "providedInsets");
+            if (providers == null || !providers.getClass().isArray()) {
+                return result;
+            }
+            int restored = 0;
+            int systemGestureType = WindowInsets.Type.systemGestures();
+            for (int i = 0; i < Array.getLength(providers); i++) {
+                Object provider = Array.get(providers, i);
+                Object type = provider == null ? null
+                        : invokeAnyMethod(provider, "getType", new Object[0]);
+                if (!(type instanceof Number)
+                        || ((Number) type).intValue() != systemGestureType) {
+                    continue;
+                }
+                Object index = invokeAnyMethod(provider, "getIndex", new Object[0]);
+                if (!(index instanceof Number)) {
+                    continue;
+                }
+                int providerIndex = ((Number) index).intValue();
+                Insets size;
+                if (providerIndex == 0) {
+                    size = Insets.of(widths.leftSensitivity, 0, 0, 0);
+                } else if (providerIndex == 1) {
+                    size = Insets.of(0, 0, widths.rightSensitivity, 0);
+                } else {
+                    continue;
+                }
+                // WMS also applies the cutout-safe minimum to overridden frames, so keep it zero.
+                invokeAnyMethod(provider, "setInsetsSizeOverrides",
+                        new Object[]{imeOverrides});
+                invokeAnyMethod(provider, "setMinimalInsetsSizeInDisplayCutoutSafe",
+                        new Object[]{Insets.NONE});
+                invokeAnyMethod(provider, "setInsetsSize", new Object[]{size});
+                restored++;
+            }
+            log(restored == 2 ? Log.INFO : Log.WARN, TAG,
+                    "Restored application system-gesture Insets with zero IME override"
+                            + ", left=" + widths.leftSensitivity
+                            + ", right=" + widths.rightSensitivity
+                            + ", providers=" + restored);
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to restore IME-safe application gesture Insets", throwable);
+        }
+        return result;
     }
 
     protected void hookNavigationBarTransientAutoHide(ClassLoader classLoader) {

@@ -332,6 +332,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             if (!oldHookIds.contains("systemui_status_bar_transient_appearance")) {
                 hookStatusBarTransientAppearance(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains("systemui_navigation_bar_gesture_insets")) {
+                hookNavigationBarGestureInsets(hotReloadClassLoader);
+            }
             if (!oldHookIds.contains("systemui_navigation_bar_controller_create")) {
                 hookNavigationBarControllerCreate(hotReloadClassLoader);
             }
@@ -550,6 +553,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::preserveTransientBarAppearance;
             case "systemui_navigation_bar_show_transient":
                 return this::preserveTransientBarAutoHide;
+            case "systemui_navigation_bar_gesture_insets":
+                return this::restoreNavigationBarGestureInsets;
             case "systemui_navigation_bar_controller_create":
                 return this::reconcileAfterNavigationBarCreate;
             case "systemui_navigation_bar_controller_remove":
