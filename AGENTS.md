@@ -286,6 +286,11 @@ Return-to-home rules:
   assume delivery order. Retain only the current generation's latest start/progress and at
   most one terminal action, consume them exactly once when the runner arrives, and discard
   them even when its targets are invalid.
+- Authenticate an unbound standard commit against the latest accepted DOWN. Once the exact
+  current runner session exists, bind a delayed commit against that session's immutable input
+  identity even if a newer accepted DOWN has replaced the process-global latest identity.
+  Preserve arbiter-generation, task, transition, attempt-order, and session ownership checks;
+  a current session must not authenticate a signal that fails its exact frozen identity.
 - Follow the platform `removeDepartTargetFromMotion()` split: use the `BackMotionEvent`
   departing target when the flag is false and the runner closing target when it is true.
   Use the platform `BackProgressAnimator` for smoothed progress and drive the same Xiaomi
@@ -331,6 +336,12 @@ Return-to-home rules:
 - For one animation and `animTo` epoch, preserve the first exact pre-clear finish snapshot.
   A duplicate `StateManager` end callback after element/target cleanup must not overwrite
   that terminal identity or keep the Shell runner alive.
+- When an exact cancelled `APP_TO_APP` preview spring is reused in place as launcher
+  `OPEN_FROM_HOME` before cancellation cleanup completes, finish the old return-home owner at
+  the verified main-Looper StateManager, element, animation, and configured-epoch boundary
+  without restoring its Surface, then let launcher OPEN adopt that spring. If an overlapping
+  runner is explicitly rejected while an existing owner remains, discard that runner's
+  remaining callback sequence exactly once; never let it seed the next runner.
 - Preserve Xiaomi's parallel CLOSE-to-OPEN path when an icon is clicked before CLOSE ends.
   Finish the old Shell runner only after Xiaomi cancels the old application Surface and
   accepts its `setToOld` boundary, before the new OPEN starts; do not cancel or wait for the
