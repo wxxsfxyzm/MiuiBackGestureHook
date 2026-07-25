@@ -2,82 +2,34 @@ package dev.codex.miuibackgesturehook.hooks.core;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
-import android.annotation.SuppressLint;
-import android.app.ActivityManager;
-import android.app.BroadcastOptions;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Matrix;
 import android.graphics.Rect;
-import android.graphics.RectF;
-import android.graphics.Region;
-import android.hardware.input.InputManager;
-import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.IInterface;
-import android.os.Looper;
-import android.os.Parcel;
-import android.os.Parcelable;
-import android.os.Process;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
 import android.util.SparseArray;
-import android.view.Choreographer;
-import android.view.InputChannel;
-import android.view.InputEvent;
-import android.view.InputEventReceiver;
-import android.view.InputMonitor;
 import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.View;
-import android.view.WindowInsets;
-import android.view.WindowManager;
-import android.view.animation.DecelerateInterpolator;
-import android.view.animation.PathInterpolator;
-import android.window.BackMotionEvent;
 import android.window.BackNavigationInfo;
-import android.window.BackProgressAnimator;
-import android.window.BackTouchTracker;
 
-import java.lang.reflect.Array;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
-import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
@@ -86,27 +38,44 @@ import io.github.libxposed.api.XposedModuleInterface;
 public abstract class HookRuntimeCore extends XposedModule {
     protected abstract void invalidateOpenTransitionSnapshot(
             OpenTransitionSnapshot snapshot, String reason);
+
     protected abstract int readTransitionDebugId(Object infoOrExpose);
+
     protected abstract boolean isMiuiHomeLauncherOpenType(String typeName);
+
     protected abstract int resolveTaskInfoActivityType(Object taskInfo);
+
     protected abstract int resolveTaskInfoWindowingMode(Object taskInfo);
+
     protected abstract void publishSystemUiInputArbiterState(
             Context context, boolean ready, String reason);
+
     protected abstract void publishStandardReturnHomeCommit(
             int taskId, int transitionDebugId, Object compositionController);
+
     protected abstract void clearLegacyBackGuard(String reason);
+
     protected abstract boolean clearSystemUiReturnHomeCommitIdentity(
             Object controller, long attemptId, String reason);
+
     protected abstract LegacyBackAttempt armLegacyBackGuard(
             Object controller, Object runningInfo);
+
     protected abstract void ensureAospBackAnimations(Object controller, String source);
+
     protected abstract void onSystemUiInputMonitorAttached(Context context);
+
     protected abstract void onSystemUiInputMonitorDetached(Context context);
+
     protected abstract int readMotionEventId(MotionEvent event) throws Exception;
+
     protected abstract int readMotionEventDisplayId(MotionEvent event) throws Exception;
+
     protected abstract boolean isCurrentHeadlessNavBarLifecycle(
             Object edgeBackGestureHandler);
+
     protected abstract boolean isHyperOsSlideAnimationEnabled();
+
     protected abstract Method requireExactDeclaredMethod(
             Class<?> owner, String methodName, String returnTypeName,
             String... parameterTypeNames) throws NoSuchMethodException;
@@ -241,6 +210,11 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.android.wm.shell.back.CrossActivityBackAnimation";
     protected static final String DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION =
             "com.android.wm.shell.back.DefaultCrossActivityBackAnimation";
+    protected static final String BACK_ANIMATION_BACKGROUND =
+            "com.android.wm.shell.back.BackAnimationBackground";
+    // The hard-coded color CrossTaskBackAnimation passes to ensureBackground (0x43433A);
+    // used to distinguish its background from cross-activity's task-colored one.
+    protected static final int CROSS_TASK_BACKGROUND_COLOR = 4408122;
     protected static final String BACK_TRANSITION_HANDLER =
             "com.android.wm.shell.back.BackAnimationController$BackTransitionHandler";
     protected static final String DEFAULT_TRANSITION_HANDLER =
@@ -548,9 +522,9 @@ public abstract class HookRuntimeCore extends XposedModule {
         public int navigationMode;
 
         public HeadlessNavBarLease(Object controller, Object navBarHelper,
-                            Object edgeBackGestureHandler, Object updaterProxy,
-                            Class<?> updaterInterface, Object backAnimation,
-                            int navigationMode, boolean ready) {
+                                   Object edgeBackGestureHandler, Object updaterProxy,
+                                   Class<?> updaterInterface, Object backAnimation,
+                                   int navigationMode, boolean ready) {
             this.controller = controller;
             this.navBarHelper = navBarHelper;
             this.edgeBackGestureHandler = edgeBackGestureHandler;
@@ -573,8 +547,8 @@ public abstract class HookRuntimeCore extends XposedModule {
         public volatile AnimatorListenerAdapter listener;
 
         public OpenTransitionSnapshot(Object token, Object transitionInfo, Animator[] animators,
-                               int originalAnimatorCount, Executor animExecutor,
-                               long generation) {
+                                      int originalAnimatorCount, Executor animExecutor,
+                                      long generation) {
             this.token = token;
             this.transitionInfo = transitionInfo;
             this.originalAnimatorCount = originalAnimatorCount;
@@ -590,7 +564,7 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final OpenTransitionSnapshot snapshot;
 
         public OpenTransitionInvalidationListener(HookRuntimeCore owner,
-                                           OpenTransitionSnapshot snapshot) {
+                                                  OpenTransitionSnapshot snapshot) {
             this.owner = new WeakReference<>(owner);
             this.snapshot = snapshot;
         }
@@ -624,7 +598,7 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final long startedUptime;
 
         public LegacyBackAttempt(long id, Object controller, Object runningTransitionInfo,
-                          long startedUptime) {
+                                 long startedUptime) {
             this.id = id;
             this.controller = controller;
             this.runningTransitionInfo = runningTransitionInfo;
@@ -640,8 +614,8 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final Object status;
 
         public MiuiHomeLocalHandoffToken(long generation, Object session,
-                                  Object windowElement, Object windowAnimContext,
-                                  Object status) {
+                                         Object windowElement, Object windowAnimContext,
+                                         Object status) {
             this.generation = generation;
             this.session = session;
             this.windowElement = windowElement;
@@ -657,7 +631,7 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final Rect bounds;
 
         public LauncherOpenMainTask(int taskId, int displayId,
-                             ComponentName component, Rect bounds) {
+                                    ComponentName component, Rect bounds) {
             this.taskId = taskId;
             this.displayId = displayId;
             this.component = component;
@@ -758,9 +732,9 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int displayId;
 
         public ReturnHomeComposition(Object appsIdentity, Object closingTarget,
-                              Object openingTarget, SurfaceControl closingLeash,
-                              SurfaceControl openingLeash, int closingTaskId,
-                              int openingTaskId, int displayId) {
+                                     Object openingTarget, SurfaceControl closingLeash,
+                                     SurfaceControl openingLeash, int closingTaskId,
+                                     int openingTaskId, int displayId) {
             this.appsIdentity = appsIdentity;
             this.closingTarget = closingTarget;
             this.openingTarget = openingTarget;
@@ -789,16 +763,16 @@ public abstract class HookRuntimeCore extends XposedModule {
                 new AtomicInteger();
 
         public ReturnHomeCommitComposition(Object handler, Object controller,
-                                    ReturnHomeComposition composition,
-                                    SurfaceControl changeLeash,
-                                    Object transitionToken,
-                                    Object transitionInfo,
-                                    Object startTransaction,
-                                    Object finishTransaction,
-                                    Object mergeTarget,
-                                    Object finishCallback,
-                                    Object previousAnimationFinishCallback,
-                                    int transitionType) {
+                                           ReturnHomeComposition composition,
+                                           SurfaceControl changeLeash,
+                                           Object transitionToken,
+                                           Object transitionInfo,
+                                           Object startTransaction,
+                                           Object finishTransaction,
+                                           Object mergeTarget,
+                                           Object finishCallback,
+                                           Object previousAnimationFinishCallback,
+                                           int transitionType) {
             this.handler = handler;
             this.controller = controller;
             this.composition = composition;
@@ -886,7 +860,7 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int rightTouchWidth;
 
         public EdgeWidthSnapshot(int leftSensitivity, int rightSensitivity,
-                          int leftInset, int rightInset) {
+                                 int leftInset, int rightInset) {
             this.leftSensitivity = leftSensitivity;
             this.rightSensitivity = rightSensitivity;
             this.leftTouchWidth = combineTouchWidth(leftSensitivity, leftInset);
@@ -899,7 +873,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
         public static int combineTouchWidth(int sensitivity, int inset) {
             long width = (long) sensitivity + (long) inset;
-            return (int) Math.max(1L, Math.min((long) Integer.MAX_VALUE, width));
+            return (int) Math.max(1L, Math.min(Integer.MAX_VALUE, width));
         }
     }
 
@@ -1017,8 +991,8 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final long receivedUptime;
 
         public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
-                                   int source, int displayId, int edge,
-                                   long generation) {
+                                          int source, int displayId, int edge,
+                                          long generation) {
             this.eventId = eventId;
             this.downTime = downTime;
             this.deviceId = deviceId;
@@ -1039,7 +1013,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected boolean readWindowFlag(String methodName, ClassLoader preferredLoader,
-                                   boolean defaultValue) {
+                                     boolean defaultValue) {
         String[] classNames = new String[]{
                 "com.android.window.flags.Flags",
                 "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
@@ -1079,7 +1053,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected Object createNativeEdgeBackPluginFromFactory(Object edgeBackGestureHandler,
-                                                         Context context) throws Exception {
+                                                           Context context) throws Exception {
         Object factory = readField(
                 edgeBackGestureHandler, "mBackPanelControllerFactory");
         Handler handler = (Handler) readField(
@@ -1109,17 +1083,12 @@ public abstract class HookRuntimeCore extends XposedModule {
             Object definitions = readField(registry, "mAnimationDefinition");
             Object defaultCrossActivity = readField(registry, "mDefaultCrossActivityAnimation");
             Object crossTask = readField(registry, "mCrossTaskAnimation");
-            // The slide style renders cross-task with the same hooked cross-activity
-            // animation so both in-app types share one full-width slide implementation.
-            boolean slideStyle = isHyperOsSlideAnimationEnabled()
-                    && defaultCrossActivity != null;
-            Object crossTaskAnimation = slideStyle ? defaultCrossActivity : crossTask;
+            // Cross-task keeps its own native animation: the cross-activity slide
+            // mishandles its differently shaped close transition.
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_ACTIVITY,
                     defaultCrossActivity, "crossActivity");
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_TASK,
-                    crossTaskAnimation, slideStyle ? "crossTask->slide" : "crossTask");
-            changed |= reconcileCrossTaskRunner(definitions, defaultCrossActivity,
-                    crossTask, slideStyle);
+                    crossTask, "crossTask");
             if (changed) {
                 invokeAnyMethod(registry, "updateSupportedAnimators", new Object[0]);
                 log(Log.INFO, TAG, "Restored AOSP registry definitions from " + source);
@@ -1130,48 +1099,8 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
-    /**
-     * Swaps an already-registered cross-task runner between the two module-managed
-     * animations when the slide-style preference changed. Only entries whose current
-     * value is the other module-known runner are replaced; anything else is foreign
-     * state and stays untouched.
-     */
-    protected boolean reconcileCrossTaskRunner(Object definitions,
-                                               Object defaultCrossActivity,
-                                               Object crossTask,
-                                               boolean slideStyle) {
-        if (!(definitions instanceof SparseArray<?>)) {
-            return false;
-        }
-        try {
-            SparseArray<?> entries = (SparseArray<?>) definitions;
-            int index = entries.indexOfKey(TYPE_CROSS_TASK);
-            if (index < 0) {
-                return false;
-            }
-            Object desiredAnimation = slideStyle ? defaultCrossActivity : crossTask;
-            Object otherAnimation = slideStyle ? crossTask : defaultCrossActivity;
-            if (desiredAnimation == null || otherAnimation == null) {
-                return false;
-            }
-            Object desired = invokeAnyMethod(desiredAnimation, "getRunner", new Object[0]);
-            Object other = invokeAnyMethod(otherAnimation, "getRunner", new Object[0]);
-            Object current = entries.valueAt(index);
-            if (desired == null || current == desired || current != other) {
-                return false;
-            }
-            invokeAnyMethod(definitions, "set",
-                    new Object[]{Integer.valueOf(TYPE_CROSS_TASK), desired});
-            log(Log.INFO, TAG, "Retargeted cross-task runner, slideStyle=" + slideStyle);
-            return true;
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to reconcile cross-task runner", throwable);
-            return false;
-        }
-    }
-
     protected boolean ensureRegistryRunner(Object definitions, int type, Object animation,
-                                         String label) {
+                                           String label) {
         if (definitions == null || animation == null
                 || definitions instanceof SparseArray<?>
                 && ((SparseArray<?>) definitions).indexOfKey(type) >= 0) {
@@ -1222,7 +1151,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected float readFloatFieldOrDefault(Object target, String fieldName,
-                                          float defaultValue) {
+                                            float defaultValue) {
         try {
             Object value = readField(target, fieldName);
             if (value instanceof Number) {
@@ -1234,7 +1163,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected int readIntFieldOrDefault(Object target, String fieldName,
-                                      int defaultValue) {
+                                        int defaultValue) {
         try {
             Object value = readField(target, fieldName);
             if (value instanceof Number) {
@@ -1263,7 +1192,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected EdgeWidthSnapshot readEdgeWidthSnapshot(Object edgeBackGestureHandler,
-                                                    float density) {
+                                                      float density) {
         int fallbackWidth = Math.max(1, Math.round(EDGE_TOUCH_WIDTH_DP * density));
         int leftSensitivity = readIntFieldOrDefault(edgeBackGestureHandler,
                 "mEdgeWidthLeft", fallbackWidth);
@@ -1364,7 +1293,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected Object invokeMethod(Object target, String methodName,
-                                Class<?>[] parameterTypes, Object[] args) throws Exception {
+                                  Class<?>[] parameterTypes, Object[] args) throws Exception {
         Class<?> owner = target.getClass();
         Pair<Class<?>, String> key = Pair.create(owner,
                 "exact:" + methodName + Arrays.toString(parameterTypes));

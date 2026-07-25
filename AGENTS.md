@@ -277,19 +277,26 @@ Remote-animation rules:
   native cross-activity animation's geometry mapping in place — a full-width closing
   slide mapping the spring-smoothed delivered progress linearly (no gesture
   interpolator: finger-following but always animated, cancel riding the same spring),
-  no scale and no vertical follow, quarter-width entering parallax at alpha 0.9 -> 1, a
-  cubic ease-out ~400ms commit settle, and the cross-task registry entry reusing the
-  same hooked animation. The per-frame driver replaces the ProgressCallback the
+  no scale and no vertical follow, quarter-width entering parallax at alpha 0.9 -> 1, and
+  a cubic ease-out ~400ms commit settle. Cross-task keeps its own native
+  `CrossTaskBackAnimation` (its differently shaped close transition drops the surface
+  under the cross-activity slide); the registry only ensures/restores that native
+  cross-task runner. The per-frame driver replaces the ProgressCallback the
   animation registers on its own framework BackProgressAnimator, because R8 inlines the
   private progress method. At commit the subclass rewrites the target rects to its 0.9
   card pose, so the post-commit hook restores the full slide-out destination; the
   committed close transition's own reparent (native handleCloseTransition) already keeps
   the container pixels on the runner leashes. The revealed lower layer follows the finger:
-  its dim scrim scales with drag progress (not only at release) and its corner radius is
-  cleared (only the sliding top card is rounded). Targets, scrim, letterboxes, corner radius, the
+  its dim scrim tracks the finger during the drag, then fades on a critically damped
+  decay seeded with the release speed (leaving the committed value at the finger's rate,
+  no step and no lurch, decoupled from the geometry's ease-out) and its corner radius is
+  cleared (only the sliding top card is rounded). Targets, letterboxes, the
   progress/commit/cancel lifecycle, and `finishAnimation()` stay native; any hook or
   reflection failure falls back to the stock AOSP animation for that gesture.
-  `TYPE_RETURN_TO_HOME` and `TYPE_CALLBACK` are never restyled.
+  `TYPE_CROSS_TASK`, `TYPE_RETURN_TO_HOME`, and `TYPE_CALLBACK` are never restyled. With
+  the slide on, cross-task's native color-layer background is repainted pure black by
+  overwriting the color in the animation's own pending transaction (its stock hard-coded
+  dark tint otherwise clashes with the black slide); the geometry stays native.
 - Keep SystemUI's native `BackPanelController` as the sole indicator state owner: it
   receives every claimed event and owns thresholds, release state, and haptics. The
   optional HyperOS-style skin (`hyperos_indicator_style` remote preference, default off)

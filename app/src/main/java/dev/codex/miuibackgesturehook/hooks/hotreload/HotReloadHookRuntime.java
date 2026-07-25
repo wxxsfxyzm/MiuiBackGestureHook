@@ -1,88 +1,19 @@
 package dev.codex.miuibackgesturehook.hooks.hotreload;
 
-import dev.codex.miuibackgesturehook.hooks.systemserver.SystemServerHookRuntime;
-
-import android.animation.Animator;
-import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
-import android.annotation.SuppressLint;
-import android.app.ActivityManager;
-import android.app.BroadcastOptions;
-import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.SharedPreferences;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Matrix;
-import android.graphics.Rect;
-import android.graphics.RectF;
-import android.graphics.Region;
-import android.hardware.input.InputManager;
-import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.IInterface;
 import android.os.Looper;
-import android.os.Parcel;
-import android.os.Parcelable;
-import android.os.Process;
 import android.os.SystemClock;
-import android.provider.Settings;
 import android.util.Log;
-import android.util.Pair;
-import android.util.SparseArray;
-import android.view.Choreographer;
-import android.view.InputChannel;
-import android.view.InputEvent;
-import android.view.InputEventReceiver;
-import android.view.InputMonitor;
-import android.view.MotionEvent;
-import android.view.SurfaceControl;
-import android.view.View;
-import android.view.WindowInsets;
-import android.view.WindowManager;
-import android.view.animation.DecelerateInterpolator;
-import android.view.animation.PathInterpolator;
-import android.window.BackMotionEvent;
-import android.window.BackNavigationInfo;
-import android.window.BackProgressAnimator;
-import android.window.BackTouchTracker;
 
-import java.lang.reflect.Array;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-import java.lang.ref.WeakReference;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.WeakHashMap;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
+import dev.codex.miuibackgesturehook.hooks.systemserver.SystemServerHookRuntime;
 import io.github.libxposed.api.XposedInterface;
-import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
@@ -369,6 +300,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         !oldHookIds.contains("systemui_back_slide_duration"),
                         !oldHookIds.contains("systemui_back_slide_finish"));
             }
+            if (!oldHookIds.contains("systemui_cross_task_background")) {
+                hookCrossTaskBackground(hotReloadClassLoader);
+            }
             if (!backCommitCompositionHookReady) {
                 hookBackCommitComposition(hotReloadClassLoader);
             }
@@ -650,6 +584,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::onCrossActivitySlideDuration;
             case "systemui_back_slide_finish":
                 return this::onCrossActivitySlideFinish;
+            case "systemui_cross_task_background":
+                return this::tintCrossTaskBackground;
             case "systemui_back_prepare_reparent":
                 return this::correctPredictiveBackPrepareReparent;
             case "systemui_back_commit_composition":

@@ -1507,6 +1507,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookBackFinishOpenAtomicTransfer(classLoader);
             hookCrossActivitySlideAnimation(classLoader,
                     true, true, true, true, true);
+            hookCrossTaskBackground(classLoader);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
@@ -1514,14 +1515,13 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     /**
-     * Restyles the native cross-activity (and, via the unified registry entry,
-     * cross-task) predictive-back animation into the miuix slide when the preference is
-     * on: the closing surface follows the finger full-width with no scale and no fade,
-     * the entering surface parallaxes in from a quarter width behind at alpha 0.9 -> 1
-     * with its dim scrim tracking the drag and its corner radius cleared, and the commit
-     * settles on a cubic ease-out. Only the geometry, scrim, and entering corner radius
-     * are replaced; targets, letterboxes, and the finish lifecycle stay native.
-     * Return-to-home is untouched.
+     * Restyles the native cross-activity predictive-back animation into the miuix slide
+     * when the preference is on: the closing surface follows the finger full-width with
+     * no scale and no fade, the entering surface parallaxes in from a quarter width
+     * behind at alpha 0.9 -> 1 with its dim scrim tracking the drag and its corner
+     * radius cleared, and the commit settles on a cubic ease-out. Only the geometry,
+     * scrim, and entering corner radius are replaced; targets, letterboxes, and the
+     * finish lifecycle stay native. Cross-task and return-to-home are untouched.
      */
     protected void hookCrossActivitySlideAnimation(ClassLoader classLoader,
                                                    boolean installStart,
@@ -1628,6 +1628,61 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
+    protected void hookCrossTaskBackground(ClassLoader classLoader) {
+        try {
+            Class<?> backgroundClass = Class.forName(
+                    BACK_ANIMATION_BACKGROUND, false, classLoader);
+            for (Method method : backgroundClass.getDeclaredMethods()) {
+                if ("ensureBackground".equals(method.getName())
+                        && method.getParameterCount() == 6) {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId("systemui_cross_task_background")
+                            .intercept(this::tintCrossTaskBackground));
+                    log(Log.INFO, TAG, "Hooked cross-task background tint");
+                    return;
+                }
+            }
+            log(Log.WARN, TAG, "BackAnimationBackground.ensureBackground not found");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG, "Failed to hook cross-task background", throwable);
+        }
+    }
+
+    /**
+     * With the slide preference on, repaints the native cross-task color-layer
+     * background pure black. ensureBackground(bounds, color, transaction, ...) creates
+     * the color layer and writes the color into the caller's pending transaction; when
+     * the color is cross-task's hard-coded tint, overwrite it on that same transaction
+     * before it is applied. Cross-activity passes its task color and is left alone.
+     */
+    protected Object tintCrossTaskBackground(XposedInterface.Chain chain)
+            throws Throwable {
+        Object colorArg = chain.getArg(1);
+        int color = colorArg instanceof Number ? ((Number) colorArg).intValue() : 0;
+        Object result = chain.proceed();
+        try {
+            if (color != CROSS_TASK_BACKGROUND_COLOR
+                    || !isHyperOsSlideAnimationEnabled()) {
+                return result;
+            }
+            Object surface = readFieldOrNull(
+                    chain.getThisObject(), "mBackgroundSurface");
+            Object transaction = chain.getArg(2);
+            if (surface instanceof SurfaceControl
+                    && ((SurfaceControl) surface).isValid()
+                    && transaction instanceof SurfaceControl.Transaction) {
+                invokeMethod(transaction, "setColor",
+                        new Class<?>[]{SurfaceControl.class, float[].class},
+                        new Object[]{surface, new float[]{0.0f, 0.0f, 0.0f}});
+                log(Log.INFO, TAG, "Repainted cross-task background black");
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to tint cross-task background black", throwable);
+        }
+        return result;
+    }
+
     // finishAnimation() is the animation's natural end; clear the session flag so a
     // later gesture re-arms cleanly. The original always runs.
     protected Object onCrossActivitySlideFinish(XposedInterface.Chain chain)
@@ -1704,7 +1759,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected final RectF miuixSlideCommitEntering = new RectF();
     protected boolean miuixSlideCommitPoseCaptured;
     protected float miuixSlideCommitEnteringAlpha = 1.0f;
-    protected float miuixSlideCommitScrimRemaining = 1.0f;
+    protected float miuixSlideCommitScrimAlpha;
+    protected float miuixSlideCommitScrimVelocity;
+    protected float miuixSlideProgressVelocity;
+    protected float miuixSlideLastProgressSample;
+    protected long miuixSlideLastProgressSampleMs;
     protected boolean miuixSlidePostCommitOnBase;
     protected volatile WeakReference<Object> miuixSlideArmedAnimation;
     protected boolean miuixSlideRegistrationReentry;
@@ -1714,6 +1773,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected static final long MIUIX_SLIDE_SETTLE_DURATION_MS = 400L;
     protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
     protected static final float MIUIX_SLIDE_PARALLAX_FRACTION = 0.25f;
+    protected static final float MIUIX_SLIDE_SCRIM_OMEGA = 12.083f;
 
     protected Object onCrossActivitySlideStart(XposedInterface.Chain chain)
             throws Throwable {
@@ -1750,6 +1810,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             targetEntering.set(backAnimRect);
             startEntering.set(backAnimRect);
             startEntering.offset(-slide * MIUIX_SLIDE_PARALLAX_FRACTION, 0f);
+            miuixSlideProgressVelocity = 0.0f;
+            miuixSlideLastProgressSample = 0.0f;
+            miuixSlideLastProgressSampleMs = 0L;
             miuixSlideArmedAnimation = new WeakReference<>(animation);
             miuixSlideAnimActive = true;
             log(Log.INFO, TAG, "Armed miuix slide back animation"
@@ -1821,10 +1884,25 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         // BackProgressAnimator's smoothing spring (cancel rides it back to zero); mapping
         // it linearly, without the native gesture interpolator, is the miuix slide.
         float progress = Math.max(0.0f, Math.min(1.0f, backEvent.getProgress()));
+        trackMiuixSlideProgressVelocity(progress);
         writeField(animation, "gestureProgress", Float.valueOf(progress));
         applyMiuixSlideFrame(animation, progress,
                 MIUIX_SLIDE_ENTERING_MIN_ALPHA
                         + (1.0f - MIUIX_SLIDE_ENTERING_MIN_ALPHA) * progress);
+    }
+
+    // Smoothed progress-per-second, so the commit can seed the scrim fade with the
+    // finger's release speed instead of starting from rest.
+    protected void trackMiuixSlideProgressVelocity(float progress) {
+        long now = SystemClock.uptimeMillis();
+        if (miuixSlideLastProgressSampleMs != 0L && now > miuixSlideLastProgressSampleMs) {
+            float instant = (progress - miuixSlideLastProgressSample)
+                    / ((now - miuixSlideLastProgressSampleMs) / 1000.0f);
+            miuixSlideProgressVelocity =
+                    0.5f * miuixSlideProgressVelocity + 0.5f * instant;
+        }
+        miuixSlideLastProgressSample = progress;
+        miuixSlideLastProgressSampleMs = now;
     }
 
     protected Object onCrossActivitySlidePostCommit(XposedInterface.Chain chain)
@@ -1844,8 +1922,12 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         animation, "gestureProgress", 0.0f);
                 miuixSlideCommitEnteringAlpha = MIUIX_SLIDE_ENTERING_MIN_ALPHA
                         + (1.0f - MIUIX_SLIDE_ENTERING_MIN_ALPHA) * commitProgress;
-                // Continue the scrim fade from wherever the drag left it, not from full.
-                miuixSlideCommitScrimRemaining = 1.0f - commitProgress;
+                // Anchor the settle's dim fade to the exact alpha the drag ended on, and
+                // seed it with the matching release speed (scrim falls as progress rises).
+                float maxScrimAlpha = miuixSlideMaxScrimAlpha(animation);
+                miuixSlideCommitScrimAlpha = maxScrimAlpha * (1.0f - commitProgress);
+                miuixSlideCommitScrimVelocity =
+                        -maxScrimAlpha * miuixSlideProgressVelocity;
                 // The subclass onGestureCommitted (not hooked) rewrites the target
                 // rects to its own 0.9 card pose, so the slide would settle short of
                 // the edge. Restore the full slide-out destination for the settle.
@@ -1909,25 +1991,16 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         lerpRectF(miuixSlideCommitEntering, targetEntering, eased, currentEntering);
         float enteringAlpha = miuixSlideCommitEnteringAlpha
                 + (1.0f - miuixSlideCommitEnteringAlpha) * eased;
-        applyMiuixSlideScrim(animation,
-                miuixSlideCommitScrimRemaining * (1.0f - linear));
+        // Analytic critically damped decay to zero from the committed alpha, seeded with
+        // the release speed: leaves the commit value at the finger's dimming rate and
+        // eases to rest. Decoupled from the geometry's ease-out on purpose.
+        float t = linear * (MIUIX_SLIDE_SETTLE_DURATION_MS / 1000.0f);
+        float decay = (float) Math.exp(-MIUIX_SLIDE_SCRIM_OMEGA * t);
+        float scrimAlpha = (miuixSlideCommitScrimAlpha
+                + (miuixSlideCommitScrimVelocity
+                + MIUIX_SLIDE_SCRIM_OMEGA * miuixSlideCommitScrimAlpha) * t) * decay;
         applyMiuixSlideTransforms(animation, currentClosing, currentEntering,
-                enteringAlpha);
-    }
-
-    // Dims the revealed layer proportionally to how much of the top page still covers
-    // it: remainingDim 1 = fully dimmed (top at rest), 0 = top gone. Follows the finger
-    // during the drag instead of snapping only at release.
-    protected void applyMiuixSlideScrim(Object animation, float remainingDim)
-            throws Exception {
-        Object scrim = readField(animation, "scrimLayer");
-        if (scrim instanceof SurfaceControl && ((SurfaceControl) scrim).isValid()) {
-            float maxScrimAlpha = readFloatFieldOrDefault(
-                    animation, "maxScrimAlpha", 0.0f);
-            ((SurfaceControl.Transaction) readField(animation, "transaction"))
-                    .setAlpha((SurfaceControl) scrim,
-                            maxScrimAlpha * Math.max(0.0f, Math.min(1.0f, remainingDim)));
-        }
+                enteringAlpha, Math.max(0.0f, scrimAlpha));
     }
 
     protected void applyMiuixSlideFrame(Object animation, float progress,
@@ -1940,13 +2013,20 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         RectF currentEntering = (RectF) readField(animation, "currentEnteringRect");
         lerpRectF(startClosing, targetClosing, progress, currentClosing);
         lerpRectF(startEntering, targetEntering, progress, currentEntering);
-        applyMiuixSlideScrim(animation, 1.0f - progress);
+        // Dim tracks the finger: fully dimmed at rest, gone once the top has pulled a
+        // full width away.
+        float scrimAlpha = miuixSlideMaxScrimAlpha(animation) * (1.0f - progress);
         applyMiuixSlideTransforms(animation, currentClosing, currentEntering,
-                enteringAlpha);
+                enteringAlpha, scrimAlpha);
+    }
+
+    protected float miuixSlideMaxScrimAlpha(Object animation) {
+        return readFloatFieldOrDefault(animation, "maxScrimAlpha", 0.0f);
     }
 
     protected void applyMiuixSlideTransforms(Object animation, RectF closingRect,
-                                             RectF enteringRect, float enteringAlpha)
+                                             RectF enteringRect, float enteringAlpha,
+                                             float scrimAlpha)
             throws Exception {
         Object closingLeash = readFieldOrNull(
                 readField(animation, "closingTarget"), "leash");
@@ -1955,6 +2035,12 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         applyCrossActivityTransform(animation, closingLeash, closingRect, 1.0f);
         applyCrossActivityTransform(animation, enteringLeash, enteringRect,
                 enteringAlpha);
+        Object scrim = readFieldOrNull(animation, "scrimLayer");
+        if (scrim instanceof SurfaceControl && ((SurfaceControl) scrim).isValid()) {
+            ((SurfaceControl.Transaction) readField(animation, "transaction"))
+                    .setAlpha((SurfaceControl) scrim,
+                            Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
+        }
         // The revealed lower stack is full-screen behind the sliding top page; only the
         // top card is rounded. Native applyTransform rounds both, so clear the corner
         // radius the native call just set on the entering leash.
