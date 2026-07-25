@@ -290,7 +290,9 @@ Remote-animation rules:
   its dim scrim tracks the finger during the drag, then fades on a critically damped
   decay seeded with the release speed (leaving the committed value at the finger's rate,
   no step and no lurch, decoupled from the geometry's ease-out) and its corner radius is
-  cleared (only the sliding top card is rounded). Targets, letterboxes, the
+  cleared (only the sliding top card is rounded). The dim peaks at a fixed 0.5 to match
+  DefaultTransitionImpl's standard activity open/close dim, not the native predictive-back
+  scrim (0.8 dark / 0.2 light) which is calibrated for the scaled card. Targets, letterboxes, the
   progress/commit/cancel lifecycle, and `finishAnimation()` stay native; any hook or
   reflection failure falls back to the stock AOSP animation for that gesture.
   `TYPE_CROSS_TASK`, `TYPE_RETURN_TO_HOME`, and `TYPE_CALLBACK` are never restyled. With

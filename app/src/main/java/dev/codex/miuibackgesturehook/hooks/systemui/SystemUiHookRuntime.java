@@ -1774,6 +1774,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
     protected static final float MIUIX_SLIDE_PARALLAX_FRACTION = 0.25f;
     protected static final float MIUIX_SLIDE_SCRIM_OMEGA = 12.083f;
+    protected static final float MIUIX_SLIDE_SCRIM_MAX_ALPHA = 0.5f;
 
     protected Object onCrossActivitySlideStart(XposedInterface.Chain chain)
             throws Throwable {
@@ -1924,10 +1925,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         + (1.0f - MIUIX_SLIDE_ENTERING_MIN_ALPHA) * commitProgress;
                 // Anchor the settle's dim fade to the exact alpha the drag ended on, and
                 // seed it with the matching release speed (scrim falls as progress rises).
-                float maxScrimAlpha = miuixSlideMaxScrimAlpha(animation);
-                miuixSlideCommitScrimAlpha = maxScrimAlpha * (1.0f - commitProgress);
+                miuixSlideCommitScrimAlpha =
+                        MIUIX_SLIDE_SCRIM_MAX_ALPHA * (1.0f - commitProgress);
                 miuixSlideCommitScrimVelocity =
-                        -maxScrimAlpha * miuixSlideProgressVelocity;
+                        -MIUIX_SLIDE_SCRIM_MAX_ALPHA * miuixSlideProgressVelocity;
                 // The subclass onGestureCommitted (not hooked) rewrites the target
                 // rects to its own 0.9 card pose, so the slide would settle short of
                 // the edge. Restore the full slide-out destination for the settle.
@@ -2015,13 +2016,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         lerpRectF(startEntering, targetEntering, progress, currentEntering);
         // Dim tracks the finger: fully dimmed at rest, gone once the top has pulled a
         // full width away.
-        float scrimAlpha = miuixSlideMaxScrimAlpha(animation) * (1.0f - progress);
+        float scrimAlpha = MIUIX_SLIDE_SCRIM_MAX_ALPHA * (1.0f - progress);
         applyMiuixSlideTransforms(animation, currentClosing, currentEntering,
                 enteringAlpha, scrimAlpha);
-    }
-
-    protected float miuixSlideMaxScrimAlpha(Object animation) {
-        return readFloatFieldOrDefault(animation, "maxScrimAlpha", 0.0f);
     }
 
     protected void applyMiuixSlideTransforms(Object animation, RectF closingRect,
