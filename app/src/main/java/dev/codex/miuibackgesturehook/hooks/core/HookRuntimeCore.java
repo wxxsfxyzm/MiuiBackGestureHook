@@ -51,7 +51,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             Context context, boolean ready, String reason);
 
     protected abstract void publishStandardReturnHomeCommit(
-            int taskId, int transitionDebugId, Object compositionController);
+            int taskId, int transitionDebugId, Object compositionController,
+            Object exactFinishCallback, boolean elementBoundaryOnly);
 
     protected abstract void clearLegacyBackGuard(String reason);
 
@@ -273,6 +274,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final String EXTRA_INPUT_EDGE = "input_edge";
     protected static final String EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE =
             "launcher_open_break_available";
+    protected static final String EXTRA_LAUNCHER_OPEN_ACTIVE =
+            "launcher_open_active";
     protected static final String EXTRA_LAUNCHER_OPEN_BREAK_GENERATION =
             "launcher_open_break_generation";
     protected static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
@@ -284,6 +287,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "return_home_commit_debug_id";
     protected static final String EXTRA_RETURN_HOME_COMMIT_ATTEMPT =
             "return_home_commit_attempt";
+    protected static final String EXTRA_RETURN_HOME_ELEMENT_BOUNDARY =
+            "return_home_element_boundary";
     protected static final String EXTRA_RETURN_HOME_FINISH_ATTEMPT =
             "return_home_finish_attempt";
     protected static final String EXTRA_RETURN_HOME_RUNNER_SESSION =
@@ -329,8 +334,6 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final long DUPLICATE_BACK_PAIR_TIMEOUT_MS = 700L;
     protected static final long DUPLICATE_BACK_UP_INTERVAL_MS = 200L;
     protected static final long INPUT_ACCEPTED_TOKEN_TIMEOUT_MS = 750L;
-    protected static final long RETURN_HOME_CANCEL_DURATION_MS = 200L;
-    protected static final long RETURN_HOME_CANCEL_FINISH_GUARD_MS = 350L;
     protected static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
     protected static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
     protected static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
@@ -429,6 +432,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile boolean miuiDrawerVisible;
     protected volatile boolean miuiLauncherEditing;
     protected volatile boolean miuiHomeEditingStatePublished;
+    protected volatile boolean miuiLauncherOpenActive;
     protected volatile boolean miuiLauncherOpenBreakAvailable;
     protected volatile long miuiLauncherOpenBreakGeneration;
     protected volatile long miuiOverviewDismissPendingUntilUptime;
@@ -437,6 +441,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile Object miuiHomeOpenBreakController;
     protected volatile boolean miuiHomeOpenBreakCommandPending;
     protected volatile long miuiHomeOpenBreakGeneration;
+    protected volatile Object miuiHomeOpenBreakStateManager;
     protected volatile Object miuiHomeOpenBreakAnimationIdentity;
     protected volatile boolean miuiHomeOpenBreakGenerationPrepared;
     protected volatile boolean miuiHomeOpenBreakAnimationActive;
@@ -801,13 +806,14 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int displayId;
         public final int edge;
         public final IBinder runnerSession;
+        public final boolean elementBoundaryOnly;
 
         public StandardReturnHomeCommitSignal(
                 long attempt, long arbiterGeneration,
                 int taskId, int transitionDebugId,
                 int eventId, long downTime,
                 int deviceId, int source, int displayId, int edge,
-                IBinder runnerSession) {
+                IBinder runnerSession, boolean elementBoundaryOnly) {
             this.attempt = attempt;
             this.arbiterGeneration = arbiterGeneration;
             this.taskId = taskId;
@@ -819,6 +825,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.displayId = displayId;
             this.edge = edge;
             this.runnerSession = runnerSession;
+            this.elementBoundaryOnly = elementBoundaryOnly;
         }
 
         public boolean matchesInput(MiuiHomeAcceptedInputToken token) {

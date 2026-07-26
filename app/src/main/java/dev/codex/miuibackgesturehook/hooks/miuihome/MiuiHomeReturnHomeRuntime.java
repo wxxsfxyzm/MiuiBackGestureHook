@@ -2,9 +2,6 @@ package dev.codex.miuibackgesturehook.hooks.miuihome;
 
 import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiHookRuntime;
 
-import android.animation.Animator;
-import android.animation.AnimatorListenerAdapter;
-import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;
 import android.app.BroadcastOptions;
@@ -36,7 +33,6 @@ import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
 import android.util.SparseArray;
-import android.view.Choreographer;
 import android.view.InputChannel;
 import android.view.InputEvent;
 import android.view.InputEventReceiver;
@@ -46,7 +42,6 @@ import android.view.SurfaceControl;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowManager;
-import android.view.animation.DecelerateInterpolator;
 import android.view.animation.PathInterpolator;
 import android.window.BackMotionEvent;
 import android.window.BackNavigationInfo;
@@ -207,8 +202,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && !session.nativeHandoffStarted
                     && !session.nativeAnimationStarted) {
                 finishSession(session,
-                        "deferredControllerReplacement:" + reason,
-                        shouldRestorePreview(session));
+                        "deferredControllerReplacement:" + reason);
             }
         }
 
@@ -258,8 +252,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
             ReturnHomeSession session = currentSession;
             if (session != null) {
-                finishSession(session, "detach:" + reason,
-                        shouldRestorePreview(session));
+                finishSession(session, "detach:" + reason);
             }
             clearPendingCallbackState();
             discardRejectedRunnerCallback = false;
@@ -303,7 +296,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 pendingStartEvent = event;
                 return;
             }
-            startPreview(session, event);
+            startPreview(session, event, true);
         }
 
         void onBackProgressed(BackMotionEvent event) {
@@ -322,10 +315,12 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 BackMotionEvent startEvent = pendingStartEvent;
                 if (startEvent != null) {
                     pendingStartEvent = null;
-                    startPreview(session, startEvent);
+                    if (!startPreview(session, startEvent, true)) {
+                        return;
+                    }
                 }
             }
-            dispatchPreviewProgress(session, event);
+            dispatchPreviewProgress(session, event, true);
         }
 
         void onBackCancelled() {
@@ -417,8 +412,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             if (previous != null) {
                 invalidatePendingDirectCancel(
                         previous, "superseded", true);
-                finishSession(previous, "superseded",
-                        shouldRestorePreview(previous));
+                finishSession(previous, "superseded");
             }
             invalidatePendingLauncherOpenBarrier("runnerStarted", true);
             // Callback and runner are separate Binder objects. Consume the pending callback
@@ -440,17 +434,22 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         + ", apps=" + (apps == null ? -1 : apps.length));
                 discardPendingStandardCommitForRunner(
                         finishedCallback, "invalidRunnerTargets");
+                discardRejectedRunnerCallback =
+                        terminalAction == RETURN_HOME_TERMINAL_NONE;
                 releaseBackMotionEventTarget(startEvent);
-                finishSession(session, "invalidTargets", false);
+                finishSession(session, "invalidTargets");
                 return;
             }
             bindPendingStandardCommitToSession(session);
             if (startEvent != null) {
-                startPreview(session, startEvent);
+                if (!startPreview(session, startEvent,
+                        terminalAction == RETURN_HOME_TERMINAL_NONE)) {
+                    return;
+                }
             }
             if (progressEvent != null) {
                 if (terminalAction == RETURN_HOME_TERMINAL_NONE) {
-                    dispatchPreviewProgress(session, progressEvent);
+                    dispatchPreviewProgress(session, progressEvent, true);
                 } else {
                     // A release can beat the runner because callback and runner use separate
                     // Binder objects. There is no animation frame left in which the spring can
@@ -498,15 +497,18 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
         }
 
-        protected void startPreview(ReturnHomeSession session, BackMotionEvent event) {
+        protected boolean startPreview(ReturnHomeSession session, BackMotionEvent event,
+                                       boolean terminalCallbackExpected) {
             if (session.finished.get() != 0 || currentSession != session) {
-                return;
+                return false;
             }
             session.initialTouchY = event.getTouchY();
             session.swipeEdge = event.getSwipeEdge();
             if (!session.previewInitialized) {
                 if (!resolvePreviewTarget(session, event)) {
-                    return;
+                    rejectUnavailableNativePreview(
+                            session, terminalCallbackExpected);
+                    return false;
                 }
                 Rect startBounds = resolveRemoteAnimationBounds(session.previewTarget);
                 if (startBounds == null || startBounds.isEmpty()) {
@@ -514,7 +516,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", generation=" + session.generation
                             + ", target=" + shortObject(session.previewTarget)
                             + ", source=" + session.previewTargetSource);
-                    return;
+                    rejectUnavailableNativePreview(
+                            session, terminalCallbackExpected);
+                    return false;
                 }
                 session.startRect.set(startBounds);
                 session.currentRect.set(startBounds);
@@ -529,18 +533,17 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         : Math.max(1.0f, currentContext.getResources()
                         .getDisplayMetrics().widthPixels);
                 session.previewInitialized = true;
-                preparePreviewLeash(session);
                 prepareNativePreviewBackdrop(session);
                 prepareNativePreviewBlur(session);
                 if (!prepareUnifiedNativePreview(session)) {
-                    applyPreviewTransform(session, session.currentRect,
-                            session.startCornerRadius, false);
+                    rejectUnavailableNativePreview(
+                            session, terminalCallbackExpected);
+                    return false;
                 }
                 log(Log.INFO, TAG, "Initialized return-to-home preview"
                         + ", generation=" + session.generation
                         + ", startRect=" + session.startRect
                         + ", startRadius=" + session.startCornerRadius
-                        + ", leashShown=" + session.previewLeashPrepared
                         + ", targetSource=" + session.previewTargetSource
                         + ", previewTarget=" + shortObject(session.previewTarget)
                         + ", previewLeash=" + String.valueOf(session.previewLeash)
@@ -550,7 +553,42 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         + describeSameSurface(session.previewLeash,
                                 session.closingLeash));
             }
-            startPreviewProgressAnimator(session, event);
+            if (!session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCancelPending) {
+                rejectUnavailableNativePreview(
+                        session, terminalCallbackExpected);
+                return false;
+            }
+            startPreviewProgressAnimator(
+                    session, event, terminalCallbackExpected);
+            return currentSession == session
+                    && session.finished.get() == 0
+                    && session.unifiedNativePreviewOwned
+                    && !session.unifiedNativeCleanupVerified
+                    && !session.unifiedNativeCancelPending
+                    && !session.progressFrozen;
+        }
+
+        protected void rejectUnavailableNativePreview(
+                ReturnHomeSession session, boolean terminalCallbackExpected) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0) {
+                return;
+            }
+            discardRejectedRunnerCallback = terminalCallbackExpected;
+            clearPendingCallbackState();
+            discardPendingStandardCommitForRunner(
+                    session.finishedCallback, "nativePreviewUnavailable");
+            log(Log.WARN, TAG,
+                    "Rejected return-home runner without unified Xiaomi preview"
+                            + ", generation=" + session.generation
+                            + ", nativeOwned="
+                            + session.unifiedNativePreviewOwned
+                            + ", cancelPending="
+                            + session.unifiedNativeCancelPending
+                            + ", terminalExpected="
+                            + terminalCallbackExpected);
+            finishSession(session, "nativePreviewUnavailable");
         }
 
         protected boolean resolvePreviewTarget(ReturnHomeSession session,
@@ -656,7 +694,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
         }
 
         protected void startPreviewProgressAnimator(
-                ReturnHomeSession session, BackMotionEvent event) {
+                ReturnHomeSession session, BackMotionEvent event,
+                boolean terminalCallbackExpected) {
             if (event == null || session.progressFrozen
                     || session.finished.get() != 0 || currentSession != session
                     || !session.previewInitialized || session.nativeHandoffStarted) {
@@ -664,12 +703,14 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
             session.lastInputProgress = clamp01(event.getProgress());
             if (session.progressAnimatorStarted) {
-                dispatchPreviewProgress(session, event);
+                dispatchPreviewProgress(
+                        session, event, terminalCallbackExpected);
                 return;
             }
             if (session.progressAnimator == null || session.progressAnimatorFailed) {
                 session.progressAnimatorFailed = true;
-                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                updatePreviewFrame(session, event.getProgress(),
+                        event.getTouchY(), terminalCallbackExpected);
                 return;
             }
             if (Looper.myLooper() != Looper.getMainLooper()) {
@@ -677,11 +718,11 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 log(Log.WARN, TAG,
                         "Refused return-home BackProgressAnimator outside main Looper"
                                 + ", generation=" + session.generation);
-                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                updatePreviewFrame(session, event.getProgress(),
+                        event.getTouchY(), terminalCallbackExpected);
                 return;
             }
             session.progressAnimatorStarted = true;
-            session.progressInitialCallbackDelivered = false;
             try {
                 session.progressAnimator.onBackStarted(event, smoothedEvent -> {
                     if (session.progressFrozen || session.progressAnimatorFailed
@@ -690,10 +731,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             || session.nativeHandoffStarted) {
                         return;
                     }
-                    boolean animationFrame = session.progressInitialCallbackDelivered;
-                    session.progressInitialCallbackDelivered = true;
                     updatePreviewFrame(session, smoothedEvent.getProgress(),
-                            smoothedEvent.getTouchY(), animationFrame);
+                            smoothedEvent.getTouchY(),
+                            terminalCallbackExpected);
                 });
                 log(Log.INFO, TAG,
                         "Started AOSP return-home progress smoothing"
@@ -709,12 +749,14 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         "Failed to start AOSP return-home progress smoothing"
                                 + ", generation=" + session.generation,
                         throwable);
-                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                updatePreviewFrame(session, event.getProgress(),
+                        event.getTouchY(), terminalCallbackExpected);
             }
         }
 
         protected void dispatchPreviewProgress(
-                ReturnHomeSession session, BackMotionEvent event) {
+                ReturnHomeSession session, BackMotionEvent event,
+                boolean terminalCallbackExpected) {
             if (event == null || session.progressFrozen
                     || session.finished.get() != 0 || currentSession != session
                     || !session.previewInitialized || session.nativeHandoffStarted) {
@@ -723,7 +765,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             session.lastInputProgress = clamp01(event.getProgress());
             if (session.progressAnimator == null || session.progressAnimatorFailed
                     || !session.progressAnimatorStarted) {
-                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                updatePreviewFrame(session, event.getProgress(),
+                        event.getTouchY(), terminalCallbackExpected);
                 return;
             }
             try {
@@ -738,13 +781,14 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         "Failed to update AOSP return-home progress smoothing"
                                 + ", generation=" + session.generation,
                         throwable);
-                updatePreviewFrame(session, event.getProgress(), event.getTouchY(), false);
+                updatePreviewFrame(session, event.getProgress(),
+                        event.getTouchY(), terminalCallbackExpected);
             }
         }
 
         protected void updatePreviewFrame(ReturnHomeSession session,
                                         float smoothedProgress, float touchY,
-                                        boolean animationFrame) {
+                                        boolean terminalCallbackExpected) {
             if (session.finished.get() != 0 || currentSession != session
                     || !session.previewInitialized || session.nativeHandoffStarted
                     || session.progressFrozen) {
@@ -777,15 +821,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             session.currentCornerRadius = lerp(session.startCornerRadius,
                     session.endCornerRadius, progress);
             updateNativePreviewBlur(session, rawProgress);
-            if (session.unifiedNativePreviewOwned) {
-                if (!driveUnifiedNativePreviewFrame(session, false)) {
-                    startUnifiedNativeCancel(
-                            session, "previewFrameFailed");
-                    return;
-                }
-            } else {
-                applyPreviewTransform(session, session.currentRect,
-                        session.currentCornerRadius, animationFrame);
+            if (!driveUnifiedNativePreviewFrame(session, false)) {
+                rejectUnavailableNativePreview(
+                        session, terminalCallbackExpected);
             }
         }
 
@@ -832,102 +870,20 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 return;
             }
             freezePreviewProgress(session, "cancel:" + reason);
-            if (session.unifiedNativePreviewOwned) {
-                if (session.nativeHandoffStarted
-                        || session.unifiedNativeCommitPending
-                        || session.nativeAnimationStarted) {
-                    log(Log.WARN, TAG,
-                            "Ignored return-home cancel after native commit"
-                                    + ", generation=" + session.generation
-                                    + ", reason=" + reason);
-                    return;
-                }
-                startUnifiedNativeCancel(session, reason);
+            if (!session.unifiedNativePreviewOwned) {
+                finishSession(session, reason);
                 return;
             }
-            if (!session.previewInitialized) {
-                finishSession(session, reason, false);
+            if (session.nativeHandoffStarted
+                    || session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted) {
+                log(Log.WARN, TAG,
+                        "Ignored return-home cancel after native commit"
+                                + ", generation=" + session.generation
+                                + ", reason=" + reason);
                 return;
             }
-            if (session.nativeHandoffStarted) {
-                finishSession(session, reason, shouldRestorePreview(session));
-                return;
-            }
-            if (session.cancelAnimator != null && session.cancelAnimator.isRunning()) {
-                return;
-            }
-            RectF from = new RectF(session.currentRect);
-            float fromRadius = session.currentCornerRadius;
-            int fromBlur = session.previewBlurPublishedRadius;
-            float fromDimming = session.previewBlurPublishedDimming;
-            ValueAnimator animator = ValueAnimator.ofFloat(0.0f, 1.0f);
-            session.cancelAnimator = animator;
-            Runnable finishGuard = () -> {
-                if (currentSession == session && session.finished.get() == 0) {
-                    log(Log.WARN, TAG,
-                            "Forced delayed return-to-home cancel completion"
-                                    + ", generation=" + session.generation
-                                    + ", reason=" + reason);
-                    finishSession(session, reason + "Guard", true);
-                }
-            };
-            session.cancelFinishGuard = finishGuard;
-            handler.postDelayed(finishGuard, RETURN_HOME_CANCEL_FINISH_GUARD_MS);
-            animator.setDuration(RETURN_HOME_CANCEL_DURATION_MS);
-            animator.setInterpolator(new DecelerateInterpolator());
-            animator.addUpdateListener(valueAnimator -> {
-                if (session.finished.get() != 0 || currentSession != session) {
-                    return;
-                }
-                float value = ((Float) valueAnimator.getAnimatedValue()).floatValue();
-                session.currentRect.set(
-                        lerp(from.left, session.startRect.left, value),
-                        lerp(from.top, session.startRect.top, value),
-                        lerp(from.right, session.startRect.right, value),
-                        lerp(from.bottom, session.startRect.bottom, value));
-                session.currentCornerRadius = lerp(fromRadius,
-                        session.startCornerRadius, value);
-                applyPreviewTransform(session, session.currentRect,
-                        session.currentCornerRadius, false);
-                if (session.previewBlurOwned) {
-                    publishNativePreviewBlur(session,
-                            Math.round(lerp(fromBlur,
-                                    session.previewBlurInitialRadius, value)),
-                            lerp(fromDimming,
-                                    session.previewBlurInitialDimming, value),
-                            "cancel");
-                }
-            });
-            animator.addListener(new AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(Animator animation) {
-                    finishSession(session, reason, true);
-                }
-            });
-            log(Log.INFO, TAG, "Started return-to-home cancel recovery"
-                    + ", generation=" + session.generation
-                    + ", reason=" + reason
-                    + ", from=" + from);
-            animator.start();
-        }
-
-        protected void preparePreviewLeash(ReturnHomeSession session) {
-            if (session.previewLeashPrepared) {
-                return;
-            }
-            try {
-                // Stock Launcher3 explicitly shows the prepared departing target before
-                // applying progress transforms. Without this, the matrices update a hidden
-                // predict_back leash while the untransformed app remains on screen.
-                invokeAnyMethod(session.transaction, "show",
-                        new Object[]{session.previewLeash});
-                invokeAnyMethod(session.transaction, "setAnimationTransaction",
-                        new Object[0]);
-                session.previewLeashPrepared = true;
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to prepare return-to-home preview leash"
-                        + ", generation=" + session.generation, throwable);
-            }
+            startUnifiedNativeCancel(session, reason);
         }
 
         protected void prepareNativePreviewBackdrop(ReturnHomeSession session) {
@@ -2046,57 +2002,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     ? ((View) workspace).getWindowToken() : null;
         }
 
-        protected void applyPreviewTransform(ReturnHomeSession session, RectF targetRect,
-                                           float cornerRadius,
-                                           boolean tagFrameTimeline) {
-            SurfaceControl leash = session.previewLeash;
-            if (leash == null || !leash.isValid()
-                    || session.startRect.isEmpty() || targetRect.isEmpty()) {
-                return;
-            }
-            try {
-                float scaleX = targetRect.width() / session.startRect.width();
-                float scaleY = targetRect.height() / session.startRect.height();
-                session.matrix.reset();
-                session.matrix.setScale(scaleX, scaleY);
-                session.matrix.postTranslate(
-                        targetRect.left - (session.startRect.left * scaleX),
-                        targetRect.top - (session.startRect.top * scaleY));
-                invokeAnyMethod(session.transaction, "setMatrix",
-                        new Object[]{leash, session.matrix, session.matrixValues});
-                invokeAnyMethod(session.transaction, "setWindowCrop",
-                        new Object[]{leash, session.startRect});
-                invokeAnyMethod(session.transaction, "setCornerRadius",
-                        new Object[]{leash, Float.valueOf(
-                                Math.max(0.0f, cornerRadius))});
-                if (tagFrameTimeline) {
-                    try {
-                        Object vsyncValue = invokeAnyMethod(
-                                Choreographer.getInstance(), "getVsyncId", new Object[0]);
-                        if (vsyncValue instanceof Number
-                                && ((Number) vsyncValue).longValue() > 0L) {
-                            invokeAnyMethod(session.transaction,
-                                    "setFrameTimelineVsync",
-                                    new Object[]{Long.valueOf(
-                                            ((Number) vsyncValue).longValue())});
-                        }
-                    } catch (Throwable throwable) {
-                        if (!session.frameTimelineTagFailed) {
-                            session.frameTimelineTagFailed = true;
-                            log(Log.WARN, TAG,
-                                    "Failed to tag return-home animation frame"
-                                            + ", generation=" + session.generation,
-                                    throwable);
-                        }
-                    }
-                }
-                session.transaction.apply();
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to apply return-to-home preview transform"
-                        + ", generation=" + session.generation, throwable);
-            }
-        }
-
         void markUnifiedCommitAnimToEntering(
                 Object windowElement, Object params) throws Throwable {
             ReturnHomeSession session = currentSession;
@@ -2742,8 +2647,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             && session.unifiedNativeCleanupVerified) {
                         finishSession(session,
                                 "unifiedNativeTerminalFailure:"
-                                        + snapshot.reason,
-                                false);
+                                        + snapshot.reason);
                     }
                 });
             }
@@ -3847,7 +3751,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", animationIdentity="
                             + shortObject(token.animationIdentity));
             finishSession(session,
-                    "unconfiguredNativeCancelFinish", false);
+                    "unconfiguredNativeCancelFinish");
         }
 
         protected long beginUnifiedAnimToEpoch(
@@ -7119,7 +7023,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 if (currentSession == session
                         && session.finished.get() == 0
                         && session.unifiedNativeCleanupVerified) {
-                    finishSession(session, reason, false);
+                    finishSession(session, reason);
                 }
             });
         }
@@ -8180,14 +8084,20 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     throw new IllegalStateException(
                             "failed first Xiaomi CLOSE_TO_DRAG frame");
                 }
-                if (invokeAnyMethod(stateManager,
-                        "getCurrentWindowElement", new Object[0])
-                        != windowElement
-                        || invokeAnyMethod(windowElement,
-                        "getAnimSymbol", new Object[0])
-                        != animationIdentity
-                        || invokeAnyMethod(windowElement,
-                        "getRemoteTargetSet", new Object[0]) != targetSet) {
+                Object currentElement = invokeAnyMethod(stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(windowElement,
+                        "getAnimSymbol", new Object[0]);
+                boolean targetSetChanged = invokeAnyMethod(windowElement,
+                        "getRemoteTargetSet", new Object[0]) != targetSet;
+                if (currentElement != windowElement
+                        || currentIdentity != animationIdentity
+                        || targetSetChanged) {
+                    if (abandonReplacedUnifiedNativePreview(
+                            session, "previewStart", currentElement,
+                            currentIdentity, targetSetChanged)) {
+                        return false;
+                    }
                     throw new IllegalStateException(
                             "Xiaomi predictive owner changed during start");
                 }
@@ -8208,7 +8118,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 if (session.unifiedNativePreviewOwned) {
                     startUnifiedNativeCancel(
                             session, "prepareFailed");
-                    return true;
                 }
                 return false;
             }
@@ -8234,6 +8143,10 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 if (currentElement != session.nativeWindowElement
                         || currentIdentity
                         != session.unifiedNativeAnimationIdentity
+                        || (!firstFrame && invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0])
+                        != session.unifiedNativeTargetSet)
                         || session.previewLeash == null
                         || !session.previewLeash.isValid()
                         || !surfacesAreSame(session.previewLeash,
@@ -8257,6 +8170,43 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         throwable);
                 return false;
             }
+        }
+
+        protected boolean abandonReplacedUnifiedNativePreview(
+                ReturnHomeSession session, String reason,
+                Object currentElement, Object currentIdentity,
+                boolean targetSetChanged) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || !session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCleanupVerified
+                    || session.nativeHandoffStarted
+                    || session.unifiedNativeCommitPending
+                    || session.nativeAnimationStarted
+                    || (currentElement == session.nativeWindowElement
+                    && currentIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && !targetSetChanged)) {
+                return false;
+            }
+            // The replacement is proven, so old-session cleanup must not touch the current
+            // Xiaomi element or its animation-end callback gate.
+            session.unifiedNativePreviewSpringEndHeld = false;
+            session.unifiedNativeOwnerAbandoned = true;
+            session.unifiedNativeCleanupVerified = true;
+            log(Log.ERROR, TAG,
+                    "Abandoned replaced Xiaomi predictive owner"
+                            + ", generation=" + session.generation
+                            + ", reason=" + reason
+                            + ", sameElement="
+                            + (currentElement == session.nativeWindowElement)
+                            + ", sameIdentity="
+                            + (currentIdentity
+                            == session.unifiedNativeAnimationIdentity)
+                            + ", targetSetChanged=" + targetSetChanged);
+            handler.post(() -> finishSession(
+                    session, "nativePreviewOwnerReplaced:" + reason));
+            return true;
         }
 
         protected boolean requestUnifiedPendingCommitTermination(
@@ -8464,21 +8414,32 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 Object currentIdentity = invokeAnyMethod(
                         session.nativeWindowElement,
                         "getAnimSymbol", new Object[0]);
-                String currentType = readNativeAnimationType(
-                        session.nativeWindowElement);
+                boolean targetSetChanged = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0])
+                        != session.unifiedNativeTargetSet;
                 if (currentElement != session.nativeWindowElement
                         || currentIdentity
-                        != session.unifiedNativeAnimationIdentity) {
+                        != session.unifiedNativeAnimationIdentity
+                        || targetSetChanged) {
+                    if (abandonReplacedUnifiedNativePreview(
+                            session, "cancel:" + reason, currentElement,
+                            currentIdentity, targetSetChanged)) {
+                        return true;
+                    }
                     throw new IllegalStateException(
                             "Xiaomi owner changed before cancel"
-                                    + ", type=" + currentType
                                     + ", sameElement="
                                     + (currentElement
                                     == session.nativeWindowElement)
                                     + ", sameIdentity="
                                     + (currentIdentity
-                                    == session.unifiedNativeAnimationIdentity));
+                                    == session.unifiedNativeAnimationIdentity)
+                                    + ", targetSetChanged="
+                                    + targetSetChanged);
                 }
+                String currentType = readNativeAnimationType(
+                        session.nativeWindowElement);
                 if (exactExternalPendingCommit) {
                     externalTransition =
                             session.unifiedNativeCommitTransition;
@@ -8859,7 +8820,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", animToEpoch=" + configured.animToEpoch
                             + ", animationIdentity="
                             + shortObject(animationIdentity));
-            finishSession(session, "cancelReusedForLauncherOpen", false);
+            finishSession(session, "cancelReusedForLauncherOpen");
         }
 
         protected boolean isStandardSingleTaskReturnHome(ReturnHomeSession session) {
@@ -9087,7 +9048,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 ReturnHomeSession session) {
             StandardReturnHomeCommitSignal signal =
                     pendingStandardCommitSignal.get();
-            if (signal == null || session == null
+            if (signal == null || signal.elementBoundaryOnly
+                    || session == null
                     || currentSession != session
                     || session.finished.get() != 0
                     || !session.unifiedNativePreviewOwned
@@ -9380,6 +9342,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 StandardReturnHomeCommitSignal pendingSignal =
                         pendingStandardCommitSignal.get();
                 if (pendingSignal != null
+                        && !pendingSignal.elementBoundaryOnly
                         && pendingSignal.taskId
                         == session.unifiedNativeTaskId
                         && pendingSignal.runnerSession
@@ -9418,7 +9381,51 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     || session.nativeHandoffStarted) {
                 return;
             }
+            if (!session.unifiedNativePreviewOwned
+                    || session.unifiedNativeCancelPending) {
+                log(Log.WARN, TAG,
+                        "Rejected return-home commit without unified Xiaomi preview"
+                                + ", generation=" + session.generation
+                                + ", nativeOwned="
+                                + session.unifiedNativePreviewOwned
+                                + ", cancelPending="
+                                + session.unifiedNativeCancelPending);
+                finishSession(session, "nativePreviewUnavailableAtCommit");
+                return;
+            }
             freezePreviewProgress(session, "commit");
+            try {
+                Object currentElement = invokeAnyMethod(
+                        session.stateManager,
+                        "getCurrentWindowElement", new Object[0]);
+                Object currentIdentity = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getAnimSymbol", new Object[0]);
+                boolean targetSetChanged = invokeAnyMethod(
+                        session.nativeWindowElement,
+                        "getRemoteTargetSet", new Object[0])
+                        != session.unifiedNativeTargetSet;
+                if (currentElement != session.nativeWindowElement
+                        || currentIdentity
+                        != session.unifiedNativeAnimationIdentity
+                        || targetSetChanged) {
+                    if (!abandonReplacedUnifiedNativePreview(
+                            session, "commit", currentElement,
+                            currentIdentity, targetSetChanged)) {
+                        log(Log.ERROR, TAG,
+                                "Retained uncertain Xiaomi owner before commit"
+                                        + ", generation="
+                                        + session.generation);
+                    }
+                    return;
+                }
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Could not verify Xiaomi owner before commit"
+                                + ", generation=" + session.generation,
+                        throwable);
+                return;
+            }
             if (session.previewBlurOwned) {
                 // Revalidate exact ownership at the commit boundary and close any rounding
                 // gap before provider code is allowed to replace params. This makes the
@@ -9428,162 +9435,31 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         session.previewBlurTargetDimming, "commit");
             }
             prepareNativePreviewBackdropForCommit(session);
-            if (session.unifiedNativePreviewOwned) {
-                session.nativeHandoffStarted = true;
-                session.unifiedNativeCommitPending = true;
-                log(Log.INFO, TAG,
-                        "Held Xiaomi CLOSE_TO_DRAG for real commit transition"
+            session.nativeHandoffStarted = true;
+            session.unifiedNativeCommitPending = true;
+            log(Log.INFO, TAG,
+                    "Held Xiaomi CLOSE_TO_DRAG for real commit transition"
+                            + ", generation=" + session.generation
+                            + ", animationIdentity="
+                            + shortObject(
+                            session.unifiedNativeAnimationIdentity)
+                            + ", rect=" + session.currentRect);
+            if (!session.unifiedNativeCommitReady.compareAndSet(
+                    false, true)) {
+                log(Log.ERROR, TAG,
+                        "Rejected duplicate Xiaomi predictive retarget boundary"
                                 + ", generation=" + session.generation
-                                + ", animationIdentity="
-                                + shortObject(
-                                session.unifiedNativeAnimationIdentity)
-                                + ", rect=" + session.currentRect);
-                if (!session.unifiedNativeCommitReady.compareAndSet(
-                        false, true)) {
-                    log(Log.ERROR, TAG,
-                            "Rejected duplicate Xiaomi predictive retarget boundary"
-                                    + ", generation=" + session.generation
-                                    + ", ready=true");
-                    return;
-                }
-                // A standard close is admitted by its authenticated Shell signal. An exact
-                // element close enters the provider at its validated transition boundary.
-                Runnable timeout = () ->
-                        classifyUnifiedCommitTransitionTimeout(session);
-                session.nativeTimeout = timeout;
-                handler.postDelayed(timeout,
-                        RETURN_HOME_NATIVE_TIMEOUT_MS);
-                continueUnifiedStandardCommit(session);
+                                + ", ready=true");
                 return;
             }
-            session.nativeHandoffStarted = true;
-            try {
-                Class<?> stateManagerClass = Class.forName(
-                        MIUI_HOME_STATE_MANAGER, false, classLoader);
-                Object companion = readStaticField(stateManagerClass, "Companion");
-                Object stateManager = invokeAnyMethod(companion,
-                        "getInstance", new Object[0]);
-                if (Boolean.TRUE.equals(invokeAnyMethod(stateManager,
-                        "isWindowElementRunning", new Object[0]))) {
-                    throw new IllegalStateException(
-                            "Xiaomi WindowElement already has a running animation");
-                }
-                invokeAnyMethod(stateManager, "initWindowElement", new Object[0]);
-                Object windowElement = invokeAnyMethod(stateManager,
-                        "getCurrentWindowElement", new Object[0]);
-                if (windowElement == null) {
-                    throw new IllegalStateException("Xiaomi WindowElement is null");
-                }
-                session.stateManager = stateManager;
-                session.nativeWindowElement = windowElement;
-                Object windowAnimContext = invokeAnyMethod(windowElement,
-                        "getWindowAnimContext", new Object[0]);
-                session.nativeWindowAnimContext = windowAnimContext;
-                Class<?> animStatusClass = Class.forName(
-                        MIUI_HOME_ANIM_STATUS_PARAM, false, classLoader);
-                Object animStatusCompanion = readStaticField(
-                        animStatusClass, "Companion");
-                RectF handoffRect = session.previewInitialized
-                        ? new RectF(session.currentRect)
-                        : new RectF(session.startRect);
-                if (handoffRect.isEmpty()) {
-                    throw new IllegalStateException("predictive handoff rect is empty");
-                }
-                Object localAnimStatus = invokeAnyMethod(animStatusCompanion,
-                        "getAnimParamFromRect",
-                        new Object[]{handoffRect,
-                                Float.valueOf(session.currentCornerRadius),
-                                Float.valueOf(1.0f)});
-                invokeAnyMethod(windowAnimContext, "setLocalAnimLastStatus",
-                        new Object[]{localAnimStatus});
-                session.nativePublishedStatus = localAnimStatus;
-                session.nativeStatusPublished = true;
-                MiuiHomeLocalHandoffToken handoffToken =
-                        new MiuiHomeLocalHandoffToken(
-                                session.generation, session, windowElement,
-                                windowAnimContext, localAnimStatus);
-                session.localHandoffToken = handoffToken;
-                MiuiHomeLocalHandoffToken replacedToken =
-                        miuiHomeLocalHandoffToken.getAndSet(handoffToken);
-                if (replacedToken != null) {
-                    log(Log.WARN, TAG, "Replaced stale Xiaomi local handoff token"
-                            + ", oldGeneration=" + replacedToken.generation
-                            + ", newGeneration=" + session.generation);
-                }
-                Object compatApps = wrapNativeAnimationTargets(session.apps);
-                Object compatNonApps = wrapNativeAnimationTargets(session.nonApps);
-                invokeAnyMethod(windowElement,
-                        "onClosingWindowTransitionExecute",
-                        new Object[]{compatApps, compatNonApps, null, Boolean.FALSE});
-                session.previewBlurProviderReturned = true;
-                session.previewBackdropProviderReturned = true;
-                // StateManager starts WindowElement before its final RecentBlur animTo(Home).
-                // The whole provider has returned now, so spring/value state can distinguish a
-                // real native takeover from a static repeated setTo(AppState).
-                completeNativePreviewBackdropHandoff(session);
-                completeNativePreviewBlurHandoff(session);
-                Object remainingStatus = invokeAnyMethod(windowAnimContext,
-                        "getLocalAnimLastStatus", new Object[0]);
-                if (remainingStatus != localAnimStatus) {
-                    miuiHomeLocalHandoffToken.compareAndSet(handoffToken, null);
-                } else {
-                    log(Log.WARN, TAG, "Xiaomi animator did not consume predictive handoff"
-                            + ", generation=" + session.generation
-                            + ", windowElement=" + shortObject(windowElement));
-                }
-                if (session.nativeAnimationIdentity == null) {
-                    // Xiaomi's MainThreadExecutor and StateManager both execute inline when
-                    // entered from this owner Looper. A missing listener identity here means
-                    // the native provider rejected the CLOSE instead of starting later.
-                    throw new IllegalStateException(
-                            "Xiaomi CLOSE returned without an animation identity");
-                }
-                Runnable timeout = () -> {
-                    if (currentSession == session && session.finished.get() == 0) {
-                        log(Log.WARN, TAG, "Xiaomi return-to-home animation timed out"
-                                + ", generation=" + session.generation
-                                + ", statusPublished="
-                                + session.nativeStatusPublished
-                                + ", animationStarted="
-                                + session.nativeAnimationStarted);
-                        if (session.nativeAnimationStarted
-                                && isReturnHomeNativeCloseType(
-                                session.nativeAnimationType)) {
-                            log(Log.ERROR, TAG,
-                                    "Retained timed-out Xiaomi CLOSE owner until exact native end"
-                                            + ", generation="
-                                            + session.generation
-                                            + ", type="
-                                            + session.nativeAnimationType);
-                        } else {
-                            finishSession(session, "nativeTimeout",
-                                    shouldRestorePreview(session));
-                        }
-                    }
-                };
-                session.nativeTimeout = timeout;
-                handler.postDelayed(timeout, RETURN_HOME_NATIVE_TIMEOUT_MS);
-                log(Log.INFO, TAG, "Handed predictive-back post-commit to Xiaomi"
-                        + ", generation=" + session.generation
-                        + ", windowElement=" + shortObject(windowElement)
-                        + ", previewRect=" + session.currentRect
-                        + ", previewRadius=" + session.currentCornerRadius
-                        + ", statusConsumed="
-                        + (miuiHomeLocalHandoffToken.get() != handoffToken));
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Xiaomi native return-to-home handoff rejected"
-                        + ", generation=" + session.generation, throwable);
-                finishSession(session, "nativeHandoffRejected",
-                        shouldRestorePreview(session));
-            }
-        }
-
-        protected boolean shouldRestorePreview(ReturnHomeSession session) {
-            // The synchronous listener capture proves Xiaomi has begun using this exact
-            // WindowElement even before the next-loop state verification marks it running.
-            // Never fight that native animation by restoring our preview transform.
-            return !session.nativeAnimationStarted
-                    && session.nativeAnimationIdentity == null;
+            // A standard close is admitted by its authenticated Shell signal. An exact
+            // element close enters the provider at its validated transition boundary.
+            Runnable timeout = () ->
+                    classifyUnifiedCommitTransitionTimeout(session);
+            session.nativeTimeout = timeout;
+            handler.postDelayed(timeout,
+                    RETURN_HOME_NATIVE_TIMEOUT_MS);
+            continueUnifiedStandardCommit(session);
         }
 
         boolean onNativeAnimationStart(
@@ -9613,87 +9489,11 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                                     + shortObject(animationIdentity));
                     return true;
                 }
-                if (session.finished.get() != 0
-                        || !session.nativeHandoffStarted
-                        || !session.nativeStatusPublished
-                        || session.nativeAnimationIdentity != null) {
-                    return false;
-                }
-                if (windowElement != session.nativeWindowElement) {
-                    return false;
-                }
-                session.nativeAnimationIdentity = animationIdentity;
-                verifyNativeContinuationStart(session, animationIdentity);
-                handler.post(() -> verifyNativeAnimationStarted(session,
-                        stateManager, windowElement, animationIdentity));
-                return true;
+                return false;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to capture Xiaomi CLOSE animation identity"
                         + ", generation=" + session.generation, throwable);
                 return false;
-            }
-        }
-
-        protected void verifyNativeContinuationStart(
-                ReturnHomeSession session, Object animationIdentity) {
-            try {
-                Object nativeStartObject = invokeAnyMethod(
-                        animationIdentity, "getStartRect", new Object[0]);
-                Object nativeTargetObject = readField(animationIdentity, "mTargetRect");
-                Object progressTypeObject = readField(
-                        animationIdentity, "mProgressCalculateType");
-                Object currentWidthObject = readField(animationIdentity, "mCurrentWidth");
-                Object currentHeightObject = readField(animationIdentity, "mCurrentHeight");
-                if (!(nativeStartObject instanceof RectF)
-                        || !(nativeTargetObject instanceof RectF)
-                        || !(progressTypeObject instanceof Number)
-                        || ((Number) progressTypeObject).intValue() != 1001
-                        || !(currentWidthObject instanceof Number)
-                        || !(currentHeightObject instanceof Number)) {
-                    throw new IllegalStateException(
-                            "unexpected RectFSpringAnim continuation state");
-                }
-                RectF nativeStart = (RectF) nativeStartObject;
-                RectF nativeTarget = (RectF) nativeTargetObject;
-                RectF handoff = new RectF(session.currentRect);
-                RectF fullStart = new RectF(session.startRect);
-                float tolerance = Math.max(2.0f, dp(2.0f));
-                float currentWidth = ((Number) currentWidthObject).floatValue();
-                float currentHeight = ((Number) currentHeightObject).floatValue();
-                if (handoff.isEmpty() || fullStart.isEmpty() || nativeTarget.isEmpty()
-                        || Math.abs(nativeStart.width() - handoff.width()) > tolerance
-                        || Math.abs(nativeStart.height() - handoff.height()) > tolerance
-                        || Math.abs(currentWidth - handoff.width()) > tolerance
-                        || Math.abs(currentHeight - handoff.height()) > tolerance
-                        || nativeTarget.width() >= handoff.width()
-                        || handoff.width() > fullStart.width() + tolerance) {
-                    throw new IllegalStateException(
-                            "native continuation does not match predictive handoff"
-                                    + ", nativeStart=" + nativeStart
-                                    + ", current=" + currentWidth + "x" + currentHeight
-                                    + ", handoff=" + handoff
-                                    + ", fullStart=" + fullStart
-                                    + ", target=" + nativeTarget);
-                }
-                // AOSP LauncherBackAnimationController deliberately creates the post-commit
-                // RectFSpringAnim from the handed-off current Rect. Its normalized phase starts
-                // at zero; continuity comes from identical geometry, not from carrying the
-                // gesture percentage into the new spring. Xiaomi has already copied this exact
-                // Rect into the live values and SpringBundles, so verify it and leave its start,
-                // current state, velocity, target, and progress origin untouched.
-                session.nativeContinuationVerified = true;
-                log(Log.INFO, TAG,
-                        "Verified Xiaomi predictive return continuation start"
-                                + ", generation=" + session.generation
-                                + ", handoff=" + handoff
-                                + ", fullStart=" + fullStart
-                                + ", target=" + nativeTarget
-                                + ", postCommitProgress=0.0");
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG,
-                        "Failed to verify Xiaomi predictive return continuation start"
-                                + ", generation=" + session.generation,
-                        throwable);
             }
         }
 
@@ -9736,31 +9536,13 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             stateManager, args, true);
                 }
             }
-            UnifiedNativeAdoptedStandardCommitIdentity standard =
-                    session == null ? null
-                            : session.unifiedNativeAdoptedStandardCommit;
-            StandardReturnHomeCommitSignal signal = standard == null
-                    ? null : standard.signal;
             if (!attached || session == null
                     || session.finished.get() != 0
                     || session.cleaned.get() != 0
                     || !session.nativeHandoffStarted
                     || session.stateManager != stateManager
                     || session.nativeWindowElement == null
-                    || session.nativeAnimationIdentity == null
-                    || standard == null
-                    || standard.session != session
-                    || standard.generation != session.generation
-                    || standard.windowElement != session.nativeWindowElement
-                    || standard.animationIdentity
-                    != session.unifiedNativeAnimationIdentity
-                    || standard.animationIdentity
-                    != session.nativeAnimationIdentity
-                    || signal == null
-                    || signal.attempt <= 0L
-                    || signal.taskId != session.unifiedNativeTaskId
-                    || signal.transitionDebugId < 0
-                    || !standardSignalMatchesSession(signal, session)) {
+                    || session.nativeAnimationIdentity == null) {
                 return null;
             }
             Object windowElement = session.nativeWindowElement;
@@ -9768,11 +9550,44 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     stateManager, "getCurrentWindowElement", new Object[0]);
             Object currentIdentity = invokeAnyMethod(
                     windowElement, "getAnimSymbol", new Object[0]);
+            String currentType = readNativeAnimationType(windowElement);
+            UnifiedNativeAdoptedStandardCommitIdentity standard =
+                    session.unifiedNativeAdoptedStandardCommit;
+            StandardReturnHomeCommitSignal pendingSignal =
+                    pendingStandardCommitSignal.get();
+            ReturnHomeElementLeashReuseToken elementBoundary =
+                    pendingElementLeashReuse.get();
+            boolean elementCandidate = pendingSignal != null
+                    && pendingSignal.elementBoundaryOnly;
+            StandardReturnHomeCommitSignal signal = elementCandidate
+                    ? pendingSignal : standard == null
+                    ? null : standard.signal;
+            boolean standardOwned = signal != null
+                    && !signal.elementBoundaryOnly
+                    && standard != null
+                    && standard.signal == signal
+                    && standard.session == session
+                    && standard.generation == session.generation
+                    && standard.windowElement
+                    == session.nativeWindowElement
+                    && standard.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && standard.animationIdentity
+                    == session.nativeAnimationIdentity
+                    && standardSignalMatchesSession(signal, session);
+            boolean elementOwned = isExactElementBoundarySignal(
+                    session, signal, elementBoundary,
+                    currentElement, currentIdentity, currentType);
+            if (signal == null || signal.attempt <= 0L
+                    || signal.taskId != session.unifiedNativeTaskId
+                    || signal.transitionDebugId < 0
+                    || (!standardOwned && !elementOwned)) {
+                return null;
+            }
             Object pendingReference = invokeAnyMethod(
                     stateManager, "getPendingIconViewWeakRef", new Object[0]);
             Object pendingIcon = pendingReference instanceof WeakReference<?>
                     ? ((WeakReference<?>) pendingReference).get() : null;
-            String currentType = readNativeAnimationType(windowElement);
             boolean verifiedClose = session.nativeAnimationStarted
                     && session.nativeContinuationVerified
                     && session.nativeAnimationIdentity == currentIdentity
@@ -9812,6 +9627,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             session, stateManager, windowElement,
                             session.nativeAnimationIdentity,
                             (View) pendingIcon, originalCallback, signal,
+                            elementOwned ? elementBoundary : null,
                             pendingCommit ? pendingCommitInterruption : null,
                             nativeParallelRoute);
             token.wrappedCallback = Proxy.newProxyInstance(
@@ -9830,6 +9646,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", taskId=" + signal.taskId
                             + ", transitionDebugId="
                             + signal.transitionDebugId
+                            + ", elementBoundary="
+                            + signal.elementBoundaryOnly
                             + ", pendingCommit=" + pendingCommit
                             + ", nativeParallelRoute="
                             + nativeParallelRoute
@@ -9838,6 +9656,46 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", clickedView="
                             + shortObject(token.clickedView));
             return token;
+        }
+
+        protected boolean isExactElementBoundarySignal(
+                ReturnHomeSession session,
+                StandardReturnHomeCommitSignal signal,
+                ReturnHomeElementLeashReuseToken token,
+                Object currentElement, Object currentIdentity,
+                String currentType) {
+            return session != null && signal != null
+                    && signal.elementBoundaryOnly
+                    && token != null
+                    && pendingElementLeashReuse.get() == token
+                    && currentSession == session
+                    && token.session == session
+                    && token.generation == session.generation
+                    && token.windowElement == session.nativeWindowElement
+                    && token.animationIdentity
+                    == session.unifiedNativeAnimationIdentity
+                    && token.animationIdentity
+                    == session.nativeAnimationIdentity
+                    && currentElement == token.windowElement
+                    && currentIdentity == token.animationIdentity
+                    && token.taskId == session.unifiedNativeTaskId
+                    && token.taskId == signal.taskId
+                    && token.transitionDebugId == signal.transitionDebugId
+                    && readTransitionDebugId(token.transitionInfo)
+                    == token.transitionDebugId
+                    && token.phase.get()
+                    == ReturnHomeElementLeashReuseToken.PHASE_ADOPTED
+                    && token.startGeometrySeed.get()
+                    == ReturnHomeElementLeashReuseToken.SEED_COMMITTED
+                    && token.closingLeash == session.closingLeash
+                    && token.closingLeash.isValid()
+                    && session.unifiedNativeProviderCommitAdopted
+                    && session.nativeAnimationStarted
+                    && session.nativeContinuationVerified
+                    && "CLOSE_TO_ELEMENT".equals(
+                    session.nativeAnimationType)
+                    && "CLOSE_TO_ELEMENT".equals(currentType)
+                    && standardSignalMatchesSession(signal, session);
         }
 
         boolean armLauncherOpenParallelRoute(
@@ -9972,6 +9830,13 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             Object currentIdentity = invokeAnyMethod(
                     token.windowElement, "getAnimSymbol", new Object[0]);
             String currentType = readNativeAnimationType(token.windowElement);
+            boolean elementBoundaryCurrent = token.expectedSignal != null
+                    && (token.expectedSignal.elementBoundaryOnly
+                    ? isExactElementBoundarySignal(
+                    session, token.expectedSignal,
+                    token.elementBoundary,
+                    currentElement, currentIdentity, currentType)
+                    : token.elementBoundary == null);
             boolean surfaceCanceled = Boolean.TRUE.equals(
                     readField(token.windowElement, "mSurfaceCanceled"));
             boolean surfaceCancelExecuted = Boolean.TRUE.equals(
@@ -10021,6 +9886,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     == token.animationIdentity
                     && currentElement == token.windowElement
                     && currentIdentity == token.animationIdentity
+                    && elementBoundaryCurrent
                     && (verifiedClose || pendingCommit)
                     && oldElementRecorded && surfaceCanceled
                     && surfaceCancelExecuted && canceled
@@ -10033,6 +9899,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                                 + (currentElement == token.windowElement)
                                 + ", sameIdentity="
                                 + (currentIdentity == token.animationIdentity)
+                                + ", elementBoundaryCurrent="
+                                + elementBoundaryCurrent
                                 + ", oldElementRecorded="
                                 + oldElementRecorded
                                 + ", surfaceCanceled=" + surfaceCanceled
@@ -10071,7 +9939,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                             + ", animationIdentity="
                             + shortObject(token.animationIdentity));
             finishSession(session,
-                    "nativeCloseInterruptedForLauncherOpen", false);
+                    "nativeCloseInterruptedForLauncherOpen");
             completeLauncherOpenBarrier(token);
             return true;
         }
@@ -10134,6 +10002,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && actual.taskId == expected.taskId
                     && actual.transitionDebugId
                     == expected.transitionDebugId
+                    && actual.elementBoundaryOnly
+                    == expected.elementBoundaryOnly
                     && actual.eventId == expected.eventId
                     && actual.downTime == expected.downTime
                     && actual.deviceId == expected.deviceId
@@ -11032,10 +10902,10 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 handler.removeCallbacks(guard);
             }
             if (Looper.myLooper() == Looper.getMainLooper()) {
-                cleanupFinishedSession(token.session, reason, false);
+                cleanupFinishedSession(token.session, reason);
             } else {
                 handler.post(() -> cleanupFinishedSession(
-                        token.session, reason, false));
+                        token.session, reason));
             }
         }
 
@@ -11108,48 +10978,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             return "CLOSE_TO_HOME".equals(typeName)
                     || "CLOSE_TO_HOME_CENTER".equals(typeName)
                     || "CLOSE_TO_ELEMENT".equals(typeName);
-        }
-
-        protected void verifyNativeAnimationStarted(ReturnHomeSession session,
-                                                  Object stateManager,
-                                                  Object windowElement,
-                                                  Object animationIdentity) {
-            if (currentSession != session || session.finished.get() != 0
-                    || session.nativeAnimationIdentity != animationIdentity) {
-                return;
-            }
-            try {
-                Object currentElement = invokeAnyMethod(stateManager,
-                        "getCurrentWindowElement", new Object[0]);
-                Object currentIdentity = invokeAnyMethod(windowElement,
-                        "getAnimSymbol", new Object[0]);
-                String typeName = readNativeAnimationType(windowElement);
-                boolean closeToHome = isReturnHomeNativeCloseType(typeName);
-                boolean running = Boolean.TRUE.equals(invokeAnyMethod(windowElement,
-                        "isAnimRunning", new Object[0]));
-                if (currentElement == windowElement
-                        && currentIdentity == animationIdentity
-                        && closeToHome && running) {
-                    session.nativeAnimationStarted = true;
-                    session.nativeAnimationType = typeName;
-                    log(Log.INFO, TAG, "Verified Xiaomi predictive return post-commit"
-                            + ", generation=" + session.generation
-                            + ", type=" + typeName
-                            + ", animationIdentity="
-                            + shortObject(animationIdentity));
-                } else {
-                    log(Log.WARN, TAG, "Xiaomi CLOSE start did not settle as expected"
-                            + ", generation=" + session.generation
-                            + ", sameElement=" + (currentElement == windowElement)
-                            + ", sameIdentity="
-                            + (currentIdentity == animationIdentity)
-                            + ", type=" + typeName
-                            + ", running=" + running);
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Failed to verify Xiaomi CLOSE animation start"
-                        + ", generation=" + session.generation, throwable);
-            }
         }
 
         void captureNativeAnimationEndBeforeListener(
@@ -11293,52 +11121,15 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                                     "unifiedNativeAnimationEnd"));
                     return true;
                 }
-                if (session.finished.get() != 0
-                        || !session.nativeAnimationStarted
-                        || session.nativeAnimationIdentity
-                        != animationIdentity) {
-                    return false;
-                }
-                Object currentIdentity = invokeAnyMethod(
-                        session.nativeWindowElement, "getAnimSymbol", new Object[0]);
-                String typeName = session.nativeAnimationType;
-                boolean closeToHome = isReturnHomeNativeCloseType(typeName);
-                if (callbackStateManager != session.stateManager
-                        || currentIdentity != animationIdentity
-                        || !closeToHome) {
-                    log(Log.WARN, TAG, "Rejected mismatched Xiaomi CLOSE end"
-                            + ", generation=" + session.generation
-                            + ", sameStateManager="
-                            + (callbackStateManager == session.stateManager)
-                            + ", sameIdentity="
-                            + (currentIdentity == animationIdentity)
-                            + ", type=" + typeName);
-                    return false;
-                }
-                log(Log.INFO, TAG, "Accepted Xiaomi predictive return end"
-                        + ", generation=" + session.generation
-                        + ", type=" + typeName
-                        + ", animationIdentity=" + shortObject(animationIdentity));
+                return false;
             } catch (Throwable throwable) {
                 log(Log.WARN, TAG, "Failed to verify Xiaomi CLOSE animation end"
                         + ", generation=" + session.generation, throwable);
                 return false;
             }
-            // The hooked listener's original body may already replace StateManager's current
-            // element before this after-hook runs. The stored WindowElement and exact animation
-            // symbol still identify the completed CLOSE; queue once behind the remaining
-            // listener cleanup before releasing Shell's prepared animation.
-            handler.post(() -> {
-                if (currentSession == session && session.finished.get() == 0
-                        && session.nativeAnimationIdentity == animationIdentity) {
-                    finishSession(session, "nativeAnimationEnd", false);
-                }
-            });
-            return true;
         }
 
-        protected void finishSession(ReturnHomeSession session, String reason,
-                                   boolean restoreSurface) {
+        protected void finishSession(ReturnHomeSession session, String reason) {
             if (session == null) {
                 return;
             }
@@ -11369,56 +11160,37 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             invalidatePendingDirectCancel(
                     session, "finish:" + reason, false);
             invalidateElementTransitionContinuity(
-                    session, "finish:" + reason, true);
+                    session, "finish:" + reason,
+                    !session.unifiedNativeOwnerAbandoned);
             if (Looper.myLooper() != Looper.getMainLooper()) {
                 notifyRemoteAnimationFinished(session.finishedCallback, reason);
                 handler.post(() -> cleanupFinishedSession(
-                        session, reason, restoreSurface));
+                        session, reason));
                 return;
             }
-            if (restoreSurface && session.previewInitialized
-                    && !session.unifiedNativePreviewOwned) {
-                session.currentRect.set(session.startRect);
-                session.currentCornerRadius = session.startCornerRadius;
-                applyPreviewTransform(session, session.currentRect,
-                        session.currentCornerRadius, false);
-            }
             notifyRemoteAnimationFinished(session.finishedCallback, reason);
-            cleanupFinishedSession(session, reason, false);
+            cleanupFinishedSession(session, reason);
         }
 
-        protected void cleanupFinishedSession(ReturnHomeSession session, String reason,
-                                            boolean restoreSurface) {
+        protected void cleanupFinishedSession(ReturnHomeSession session, String reason) {
             if (session == null || !session.cleaned.compareAndSet(0, 1)) {
                 return;
             }
             freezePreviewProgress(session, "cleanup:" + reason);
-            if (restoreSurface && session.previewInitialized
-                    && !session.unifiedNativePreviewOwned) {
-                session.currentRect.set(session.startRect);
-                session.currentCornerRadius = session.startCornerRadius;
-                applyPreviewTransform(session, session.currentRect,
-                        session.currentCornerRadius, false);
-            }
             Runnable timeout = session.nativeTimeout;
             if (timeout != null) {
                 handler.removeCallbacks(timeout);
             }
-            Runnable cancelFinishGuard = session.cancelFinishGuard;
-            if (cancelFinishGuard != null) {
-                handler.removeCallbacks(cancelFinishGuard);
+            if (!session.unifiedNativeOwnerAbandoned) {
+                restoreNativePreviewBlur(session, "cleanup:" + reason);
+                restoreNativePreviewBackdrop(session, "cleanup:" + reason);
             }
-            ValueAnimator animator = session.cancelAnimator;
-            if (animator != null && animator.isRunning()) {
-                animator.cancel();
-            }
-            restoreNativePreviewBlur(session, "cleanup:" + reason);
-            restoreNativePreviewBackdrop(session, "cleanup:" + reason);
             MiuiHomeLocalHandoffToken handoffToken = session.localHandoffToken;
             if (handoffToken != null) {
                 miuiHomeLocalHandoffToken.compareAndSet(handoffToken, null);
             }
-            if (session.nativeStatusPublished
+            if (!session.unifiedNativeOwnerAbandoned
+                    && session.nativeStatusPublished
                     && session.nativeWindowAnimContext != null) {
                 try {
                     Object currentStatus = invokeAnyMethod(
@@ -11513,7 +11285,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 finishSnapshot.phase.set(
                         UnifiedNativeFinishSnapshot.PHASE_INVALID);
             }
-            if (session.unifiedNativePreviewSpringEndHeld) {
+            if (!session.unifiedNativeOwnerAbandoned
+                    && session.unifiedNativePreviewSpringEndHeld) {
                 try {
                     setUnifiedNativePreviewSpringEndEnabled(
                             session, true, "cleanup:" + reason);
@@ -11528,11 +11301,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             session.unifiedNativeCleanupVerified = true;
             session.unifiedNativeTargetSet = null;
             session.unifiedNativeClipHelper = null;
-            try {
-                session.transaction.close();
-            } catch (Throwable ignored) {
-            }
-            if (session.previewLeash != null
+            if (!session.unifiedNativeOwnerAbandoned
+                    && session.previewLeash != null
                     && session.previewLeash != session.closingLeash) {
                 try {
                     session.previewLeash.release();
@@ -11541,9 +11311,11 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             }
             session.previewTarget = null;
             session.previewLeash = null;
-            releaseTargets(session.apps);
-            releaseTargets(session.wallpapers);
-            releaseTargets(session.nonApps);
+            if (!session.unifiedNativeOwnerAbandoned) {
+                releaseTargets(session.apps);
+                releaseTargets(session.wallpapers);
+                releaseTargets(session.nonApps);
+            }
             if (currentSession == session) {
                 currentSession = null;
             }
@@ -11553,7 +11325,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     + ", nativeHandoff=" + session.nativeHandoffStarted
                     + ", nativeStarted=" + session.nativeAnimationStarted
                     + ", unifiedOwner="
-                    + session.unifiedNativePreviewOwned);
+                    + session.unifiedNativePreviewOwned
+                    + ", ownerAbandoned="
+                    + session.unifiedNativeOwnerAbandoned);
             finishDeferredMiuiHomeReturnHomeController(
                     MiuiHomeReturnHomeController.this, reason);
         }
@@ -11854,6 +11628,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             final View clickedView;
             final Object originalCallback;
             final StandardReturnHomeCommitSignal expectedSignal;
+            final ReturnHomeElementLeashReuseToken elementBoundary;
             final UnifiedNativePendingInterruptionSnapshot
                     pendingCommitInterruption;
             final boolean nativeParallelRoute;
@@ -11875,6 +11650,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     Object windowElement, Object animationIdentity,
                     View clickedView, Object originalCallback,
                     StandardReturnHomeCommitSignal expectedSignal,
+                    ReturnHomeElementLeashReuseToken elementBoundary,
                     UnifiedNativePendingInterruptionSnapshot
                             pendingCommitInterruption,
                     boolean nativeParallelRoute) {
@@ -11886,6 +11662,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 this.clickedView = clickedView;
                 this.originalCallback = originalCallback;
                 this.expectedSignal = expectedSignal;
+                this.elementBoundary = elementBoundary;
                 this.pendingCommitInterruption =
                         pendingCommitInterruption;
                 this.nativeParallelRoute = nativeParallelRoute;
@@ -12353,10 +12130,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             final AtomicInteger cleaned = new AtomicInteger();
             final Rect startRect = new Rect();
             final RectF currentRect = new RectF();
-            final Matrix matrix = new Matrix();
-            final float[] matrixValues = new float[9];
-            final SurfaceControl.Transaction transaction =
-                    new SurfaceControl.Transaction();
             final BackProgressAnimator progressAnimator;
             final AtomicInteger progressReset = new AtomicInteger();
             final AtomicReference<ReturnHomeNativeGeometrySnapshot>
@@ -12388,7 +12161,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             SurfaceControl previewLeash;
             String previewTargetSource;
             boolean previewInitialized;
-            boolean previewLeashPrepared;
             float initialTouchY;
             int swipeEdge;
             float startCornerRadius;
@@ -12400,14 +12172,13 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             volatile boolean progressFrozen;
             boolean progressAnimatorStarted;
             boolean progressAnimatorFailed;
-            boolean progressInitialCallbackDelivered;
-            boolean frameTimelineTagFailed;
             boolean nativeHandoffStarted;
             boolean nativeStatusPublished;
             boolean nativeAnimationStarted;
             boolean nativeContinuationVerified;
             boolean nativeGeometryFailureLogged;
             boolean unifiedNativePreviewOwned;
+            boolean unifiedNativeOwnerAbandoned;
             boolean unifiedNativePreviewSpringEndHeld;
             boolean unifiedNativeCancelPending;
             boolean unifiedNativeCancelRetargeted;
@@ -12447,8 +12218,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             MiuiHomeLocalHandoffToken localHandoffToken;
             Runnable nativeTimeout;
             Runnable unifiedNativeCancelTimeout;
-            Runnable cancelFinishGuard;
-            ValueAnimator cancelAnimator;
             Object previewBackdropStateManager;
             boolean previewBackdropProviderReturned;
             boolean previewShortcutOwned;

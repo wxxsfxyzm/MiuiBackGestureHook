@@ -80,6 +80,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         openSnapshotGeneration.incrementAndGet();
         invalidateAllOpenTransitionSnapshots("hotReload");
         clearLegacyBackGuard("hotReload");
+        miuiLauncherOpenActive = false;
         miuiLauncherOpenBreakAvailable = false;
         miuiLauncherOpenBreakGeneration = 0L;
         acceptedInputToken.set(null);

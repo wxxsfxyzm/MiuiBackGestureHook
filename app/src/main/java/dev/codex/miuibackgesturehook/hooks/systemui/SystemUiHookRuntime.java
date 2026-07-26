@@ -2331,6 +2331,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 returnHomeFinishTransferCandidate.remove();
             }
         }
+        if (finishTransferArmed
+                && finishTransfer.transferAttempted.get() == 2) {
+            publishStandardReturnHomeCommit(
+                    finishTransfer.composition.closingTaskId,
+                    finishTransfer.transitionDebugId,
+                    finishTransfer.controller,
+                    finishTransfer.preparedFinishCallback, true);
+        }
         if (candidate == null) {
             return result;
         }
@@ -2398,7 +2406,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 publishStandardReturnHomeCommit(
                         composition.closingTaskId,
                         readTransitionDebugId(candidate.transitionInfo),
-                        candidate.controller);
+                        candidate.controller, null, false);
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG,
@@ -3230,6 +3238,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             return chain.proceed();
         }
         boolean exact = false;
+        boolean transferred = false;
         try {
             Object handler = chain.getThisObject();
             Object navigationInfo = readField(
@@ -3314,6 +3323,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             // gap without changing either native animation's surfaces or geometry.
             candidate.startTransaction.merge(
                     candidate.preparedFinishTransaction);
+            transferred = true;
             log(Log.INFO, TAG,
                     "Transferred prepared finish into Xiaomi native start transaction"
                             + ", transitionDebugId="
@@ -3335,7 +3345,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + candidate.preparedDebugId,
                     throwable);
         }
-        return chain.proceed();
+        Object result = chain.proceed();
+        if (transferred) {
+            candidate.transferAttempted.compareAndSet(1, 2);
+        }
+        return result;
     }
 
     protected void hookBackFinishOpenAtomicTransfer(ClassLoader classLoader) {
@@ -3635,36 +3649,46 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + ", uid=" + senderUid
                             + ", package=" + senderPackage);
                 }
-                if (intent.hasExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)) {
+                if (intent.hasExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)
+                        && intent.hasExtra(EXTRA_LAUNCHER_OPEN_ACTIVE)) {
                     long generation = intent.getLongExtra(
                             EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, 0L);
+                    boolean active = intent.getBooleanExtra(
+                            EXTRA_LAUNCHER_OPEN_ACTIVE, false);
                     boolean available = intent.getBooleanExtra(
                             EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE, false);
                     if (generation == 0L
                             || generation < miuiLauncherOpenBreakGeneration) {
                         log(Log.WARN, TAG, "Ignored stale MiuiHome launcher OPEN break state"
+                                + ", active=" + active
                                 + ", available=" + available
                                 + ", generation=" + generation
                                 + ", currentGeneration="
                                 + miuiLauncherOpenBreakGeneration);
                     } else {
                         long previousGeneration = miuiLauncherOpenBreakGeneration;
-                        boolean previousAvailable = miuiLauncherOpenBreakAvailable;
+                        boolean previousActive = miuiLauncherOpenActive;
                         miuiLauncherOpenBreakGeneration = generation;
+                        miuiLauncherOpenActive = active;
                         miuiLauncherOpenBreakAvailable = available;
                         log(Log.INFO, TAG, "MiuiHome launcher OPEN break state changed"
+                                + ", active=" + active
                                 + ", available=" + available
                                 + ", generation=" + generation
                                 + ", uid=" + senderUid
                                 + ", package=" + senderPackage);
-                        if (!available && previousAvailable
+                        if (!active && previousActive
                                 && previousGeneration == generation) {
                             for (NativeBackInputMonitor monitor
                                     : new ArrayList<>(nativeInputMonitors.values())) {
-                                monitor.driver.onLauncherOpenBreakUnavailable(generation);
+                                monitor.driver.onLauncherOpenEnded(generation);
                             }
                         }
                     }
+                } else if (intent.hasExtra(
+                        EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)) {
+                    log(Log.WARN, TAG,
+                            "Ignored launcher OPEN state without active lifecycle");
                 }
                 String state = intent == null ? null : intent.getStringExtra("state");
                 boolean overviewVisible;
