@@ -567,51 +567,47 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
   reuse a number; later work on the same experiment updates its existing report.
 - Keep `reports/` local and ignored; never stage or commit files under it.
 - Keep behavior, diagnostics, and documentation changes in atomic commits.
+- Build every test APK as release. Store each test revision in a separate stash and commit
+  it with a signature only after real-device confirmation.
 - Preserve the shared signing configuration: when complete local or environment credentials are
   available, debug and release must use the same configured key. Keep keystores and credentials
   ignored and never hard-code them in Gradle or source.
 
 ## Useful Commands
 
-Build debug only unless the user explicitly requests a release artifact:
+Build test APKs as release:
 
 ```powershell
-.\gradlew.bat assembleDebug
+.\gradlew.bat assembleRelease
 ```
 
 Before handing an APK to the user, use a clean build for the requested variant so
 incremental packaging cannot leave stale ZIP slack in the artifact:
 
 ```powershell
-.\gradlew.bat clean assembleDebug
+.\gradlew.bat clean assembleRelease
 ```
 
 `versionCode` is derived from the Git commit count. After committing the final source, rebuild the
 artifact before handoff; do not reuse an APK produced from the same source before that commit.
 
-When the user explicitly requests release, use:
+Check release APK metadata:
 
 ```powershell
-.\gradlew.bat clean assembleRelease
+jar tf app\build\outputs\apk\release\app-release.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
 ```
 
-Check debug APK metadata:
+Check that the release APK is from the current build:
 
 ```powershell
-jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
-```
-
-Check that the debug APK is from the current build:
-
-```powershell
-Get-Item app\build\outputs\apk\debug\app-debug.apk | Select-Object FullName,Length,LastWriteTime
+Get-Item app\build\outputs\apk\release\app-release.apk | Select-Object FullName,Length,LastWriteTime
 ```
 
 If `jar` is not on `PATH`, resolve it from the active Java runtime:
 
 ```powershell
 $jar = Join-Path (Split-Path (Get-Command java).Source -Parent) 'jar.exe'
-& $jar tf app\build\outputs\apk\debug\app-debug.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
+& $jar tf app\build\outputs\apk\release\app-release.apk | Select-String -Pattern 'META-INF/xposed|classes\d*\.dex|AndroidManifest.xml'
 ```
 
 Git status:
