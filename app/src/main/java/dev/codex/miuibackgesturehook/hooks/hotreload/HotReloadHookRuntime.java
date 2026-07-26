@@ -126,18 +126,32 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         Set<String> oldHookIds = new java.util.HashSet<>();
         boolean hadServerHook = false;
         ClassLoader hotReloadClassLoader = null;
+        ClassLoader oldSystemServerClassLoader = null;
         for (XposedInterface.HookHandle oldHandle : param.getOldHookHandles()) {
             try {
                 String oldHookId = oldHandle.getId();
-                if (oldHookId != null) {
-                    hadServerHook |= oldHookId.startsWith("server_")
-                            || "predictive_opt_in_system_server".equals(oldHookId);
-                }
-                if (hotReloadClassLoader == null
-                        && oldHandle.getExecutable() != null
+                boolean oldServerHook = oldHookId != null
+                        && (oldHookId.startsWith("server_")
+                        || "predictive_opt_in_system_server".equals(oldHookId));
+                hadServerHook |= oldServerHook;
+                ClassLoader oldExecutableClassLoader = null;
+                if (oldHandle.getExecutable() != null
                         && oldHandle.getExecutable().getDeclaringClass() != null) {
-                    hotReloadClassLoader =
-                            oldHandle.getExecutable().getDeclaringClass().getClassLoader();
+                    oldExecutableClassLoader = oldHandle.getExecutable()
+                            .getDeclaringClass().getClassLoader();
+                }
+                if (hotReloadClassLoader == null && oldExecutableClassLoader != null) {
+                    hotReloadClassLoader = oldExecutableClassLoader;
+                }
+                if (oldSystemServerClassLoader == null && oldServerHook
+                        && oldExecutableClassLoader != null) {
+                    try {
+                        Class.forName(BACK_NAVIGATION_CONTROLLER, false,
+                                oldExecutableClassLoader);
+                        oldSystemServerClassLoader = oldExecutableClassLoader;
+                    } catch (Throwable ignored) {
+                        // Try the next old system-server hook executable.
+                    }
                 }
                 XposedInterface.Hooker replacement = createHotReloadHooker(oldHandle.getId());
                 if (replacement != null) {
@@ -165,17 +179,13 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         boolean shouldInstallServerHooks = param.isSystemServer()
                 || "system".equals(processName)
                 || hadServerHook;
+        ClassLoader preferredServerClassLoader = oldSystemServerClassLoader != null
+                ? oldSystemServerClassLoader : hotReloadClassLoader;
         if (shouldInstallServerHooks && replaced == 0) {
-            installSystemServerHooks(null);
-        } else if (shouldInstallServerHooks
-                && (!oldHookIds.contains("server_back_promote_to_tf_if_needed")
-                || !oldHookIds.contains("server_back_window_start_animation")
-                || !oldHookIds.contains("server_schedule_animation_prepare_transition")
-                || !oldHookIds.contains("server_back_navigation_done_cleanup")
-                || !oldHookIds.contains("server_return_home_touch_occlusion")
-                || (!oldHookIds.contains("server_predictive_opt_in_metadata")
-                && !oldHookIds.contains("predictive_opt_in_system_server")))) {
-            ClassLoader serverClassLoader = findSystemServerClassLoader(hotReloadClassLoader);
+            installSystemServerHooks(preferredServerClassLoader);
+        } else if (shouldInstallServerHooks) {
+            ClassLoader serverClassLoader = findSystemServerClassLoader(
+                    preferredServerClassLoader);
             if (serverClassLoader != null) {
                 if (!oldHookIds.contains(
                         "server_back_promote_to_tf_if_needed")) {
@@ -198,6 +208,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         && !oldHookIds.contains("predictive_opt_in_system_server")) {
                     hookPredictiveBackOptInMetadata(serverClassLoader);
                 }
+                hookSecuritySidebarTransientBars(serverClassLoader, oldHookIds);
             }
         }
         if (SYSTEM_UI.equals(processName) && hotReloadClassLoader != null) {
@@ -253,6 +264,21 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                             "Failed to backfill Shell navigation-info hook",
                             throwable);
                 }
+            }
+            if (!oldHookIds.contains(
+                    "systemui_block_miui_gesture_line_progress")) {
+                hookMiuiOverviewProxy(hotReloadClassLoader);
+            }
+            boolean missingEdgeUpdate = !oldHookIds.contains(
+                    "systemui_edge_back_updateIsEnabled");
+            boolean missingEdgeMode = !oldHookIds.contains(
+                    "systemui_edge_back_onNavigationModeChanged");
+            boolean missingEdgeAnimation = !oldHookIds.contains(
+                    "systemui_edge_back_setBackAnimation");
+            if (missingEdgeUpdate || missingEdgeMode || missingEdgeAnimation) {
+                hookEdgeBackGestureHandler(hotReloadClassLoader,
+                        missingEdgeUpdate, missingEdgeMode,
+                        missingEdgeAnimation);
             }
             if (!oldHookIds.contains("systemui_navigation_bar_show_transient")) {
                 hookNavigationBarTransientAutoHide(hotReloadClassLoader);

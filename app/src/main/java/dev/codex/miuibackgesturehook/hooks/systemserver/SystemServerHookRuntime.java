@@ -245,23 +245,41 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected void hookSecuritySidebarTransientBars(ClassLoader classLoader) {
+        hookSecuritySidebarTransientBars(classLoader, Collections.emptySet());
+    }
+
+    protected void hookSecuritySidebarTransientBars(ClassLoader classLoader,
+            Set<String> existingHookIds) {
         try {
             Class<?> policyClass = Class.forName(DISPLAY_POLICY, false, classLoader);
             int hooked = 0;
+            int installed = 0;
             for (Method method : policyClass.getDeclaredMethods()) {
                 if (!"requestTransientBars".equals(method.getName())) {
                     continue;
                 }
-                method.setAccessible(true);
                 int overload = hooked++;
-                recordHookHandle(hook(method)
-                        .setId("server_security_sidebar_transient_bars_" + overload)
-                        .intercept(this::interceptSecuritySidebarTransientBars));
+                String hookId = "server_security_sidebar_transient_bars_" + overload;
+                if (existingHookIds.contains(hookId)) {
+                    continue;
+                }
+                try {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId(hookId)
+                            .intercept(this::interceptSecuritySidebarTransientBars));
+                    installed++;
+                } catch (Throwable throwable) {
+                    log(Log.ERROR, TAG,
+                            "Failed to hook security-sidebar transient bars " + hookId,
+                            throwable);
+                }
             }
             if (hooked == 0) {
                 log(Log.WARN, TAG, "DisplayPolicy.requestTransientBars not found");
             } else {
-                log(Log.INFO, TAG, "Hooked DisplayPolicy transient-bars overloads=" + hooked);
+                log(Log.INFO, TAG, "Hooked DisplayPolicy transient-bars overloads="
+                        + hooked + ", installed=" + installed);
             }
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Failed to hook security-sidebar transient bars", throwable);

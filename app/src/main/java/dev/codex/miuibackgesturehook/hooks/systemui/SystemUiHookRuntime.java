@@ -55,7 +55,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookNavigationBarTransientAppearance(classLoader);
             hookStatusBarTransientAppearance(classLoader);
             hookNavigationBarGestureInsets(classLoader);
-            hookEdgeBackGestureHandler(classLoader);
+            hookEdgeBackGestureHandler(classLoader, true, true, true);
             hookNavigationBarControllerCreate(classLoader);
             hookNavigationBarControllerRemove(classLoader);
             hookNavigationBarControllerMode(classLoader);
@@ -1447,31 +1447,61 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
-    protected void hookEdgeBackGestureHandler(ClassLoader classLoader) {
+    protected void hookEdgeBackGestureHandler(ClassLoader classLoader,
+            boolean hookUpdateIsEnabled, boolean hookNavigationModeChanged,
+            boolean hookSetBackAnimation) {
+        Class<?> handlerClass;
         try {
-            Class<?> handlerClass = Class.forName(EDGE_BACK_GESTURE_HANDLER, false, classLoader);
-            Method updateIsEnabled = handlerClass.getDeclaredMethod("updateIsEnabled");
-            updateIsEnabled.setAccessible(true);
-            recordHookHandle(hook(updateIsEnabled)
-                    .setId("systemui_edge_back_updateIsEnabled")
-                    .intercept(this::onEdgeBackUpdateIsEnabled));
-            Method navigationModeChanged = handlerClass.getDeclaredMethod(
-                    "onNavigationModeChanged", int.class);
-            navigationModeChanged.setAccessible(true);
-            recordHookHandle(hook(navigationModeChanged)
-                    .setId("systemui_edge_back_onNavigationModeChanged")
-                    .intercept(this::onEdgeBackNavigationModeChanged));
-            Method setBackAnimation = handlerClass.getDeclaredMethod("setBackAnimation",
-                    Class.forName(BACK_ANIMATION_CONTROLLER + "$BackAnimationImpl",
-                            false, classLoader));
-            setBackAnimation.setAccessible(true);
-            recordHookHandle(hook(setBackAnimation)
-                    .setId("systemui_edge_back_setBackAnimation")
-                    .intercept(this::onEdgeBackSetBackAnimation));
-            log(Log.INFO, TAG, "Hooked EdgeBackGestureHandler AOSP path");
+            handlerClass = Class.forName(EDGE_BACK_GESTURE_HANDLER, false, classLoader);
         } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler", throwable);
+            log(Log.ERROR, TAG, "Failed to resolve EdgeBackGestureHandler", throwable);
+            return;
         }
+        int installed = 0;
+        if (hookUpdateIsEnabled) {
+            try {
+                Method updateIsEnabled = handlerClass.getDeclaredMethod("updateIsEnabled");
+                updateIsEnabled.setAccessible(true);
+                recordHookHandle(hook(updateIsEnabled)
+                        .setId("systemui_edge_back_updateIsEnabled")
+                        .intercept(this::onEdgeBackUpdateIsEnabled));
+                installed++;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler.updateIsEnabled",
+                        throwable);
+            }
+        }
+        if (hookNavigationModeChanged) {
+            try {
+                Method navigationModeChanged = handlerClass.getDeclaredMethod(
+                        "onNavigationModeChanged", int.class);
+                navigationModeChanged.setAccessible(true);
+                recordHookHandle(hook(navigationModeChanged)
+                        .setId("systemui_edge_back_onNavigationModeChanged")
+                        .intercept(this::onEdgeBackNavigationModeChanged));
+                installed++;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed to hook EdgeBackGestureHandler.onNavigationModeChanged",
+                        throwable);
+            }
+        }
+        if (hookSetBackAnimation) {
+            try {
+                Method setBackAnimation = handlerClass.getDeclaredMethod("setBackAnimation",
+                        Class.forName(BACK_ANIMATION_CONTROLLER + "$BackAnimationImpl",
+                                false, classLoader));
+                setBackAnimation.setAccessible(true);
+                recordHookHandle(hook(setBackAnimation)
+                        .setId("systemui_edge_back_setBackAnimation")
+                        .intercept(this::onEdgeBackSetBackAnimation));
+                installed++;
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler.setBackAnimation",
+                        throwable);
+            }
+        }
+        log(Log.INFO, TAG, "Hooked EdgeBackGestureHandler AOSP path, installed=" + installed);
     }
 
     protected Object onEdgeBackUpdateIsEnabled(XposedInterface.Chain chain) throws Throwable {
