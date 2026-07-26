@@ -486,22 +486,35 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         }
         Object controller = chain.getThisObject();
         try {
-            Object handler = readField(controller, "mAnimationHandler");
-            if (!Boolean.TRUE.equals(readField(handler, "mComposed"))) {
-                return result;
+            Object windowManagerService = readField(
+                    controller, "mWindowManagerService");
+            Object globalLock = readField(windowManagerService, "mGlobalLock");
+            invokeAnyMethod(windowManagerService,
+                    "boostPriorityForLockedSection", new Object[0]);
+            try {
+                synchronized (globalLock) {
+                    Object handler = readField(controller, "mAnimationHandler");
+                    if (!Boolean.TRUE.equals(readField(handler, "mComposed"))) {
+                        return result;
+                    }
+                    Object prepareClose = readField(handler, "mPrepareCloseTransition");
+                    Object openAdaptor = readField(handler, "mOpenAnimAdaptor");
+                    Object prepareOpen = openAdaptor == null ? null
+                            : readField(openAdaptor, "mPreparedOpenTransition");
+                    if (prepareClose != null || prepareOpen != null) {
+                        log(Log.INFO, TAG,
+                                "Kept composed predictive-back animation for transition cleanup"
+                                        + ", prepareOpen=" + shortObject(prepareOpen)
+                                        + ", prepareClose=" + shortObject(prepareClose));
+                        return result;
+                    }
+                    invokeAnyMethod(controller, "clearBackAnimations",
+                            new Object[]{Boolean.FALSE});
+                }
+            } finally {
+                invokeAnyMethod(windowManagerService,
+                        "resetPriorityAfterLockedSection", new Object[0]);
             }
-            Object prepareClose = readField(handler, "mPrepareCloseTransition");
-            Object openAdaptor = readField(handler, "mOpenAnimAdaptor");
-            Object prepareOpen = openAdaptor == null ? null
-                    : readField(openAdaptor, "mPreparedOpenTransition");
-            if (prepareClose != null || prepareOpen != null) {
-                log(Log.INFO, TAG, "Kept composed predictive-back animation for transition cleanup"
-                        + ", prepareOpen=" + shortObject(prepareOpen)
-                        + ", prepareClose=" + shortObject(prepareClose));
-                return result;
-            }
-            invokeAnyMethod(controller, "clearBackAnimations",
-                    new Object[]{Boolean.FALSE});
             log(Log.INFO, TAG, "Cleared committed remote-only predictive-back animation"
                     + " after skipped prepare transition");
         } catch (Throwable throwable) {
