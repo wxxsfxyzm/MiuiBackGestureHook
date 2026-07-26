@@ -1214,7 +1214,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected volatile ShellGestureSession activeShellSession;
         protected volatile boolean shellStartInFlight;
         protected volatile boolean shellOwnerUncertain;
-        protected volatile String lastShellStateDescription = "unqueried";
         protected boolean gestureActive;
         protected boolean thresholdCrossed;
         protected boolean triggerBack;
@@ -1453,12 +1452,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                 + ", generation=" + endedGeneration
                                 + ", edge=" + activeEdge);
             }
-            if (!isShellReadyForGesture()) {
-                gestureSuppressed = true;
-                log(Log.WARN, TAG, "Suppressed SystemUI back while Shell is busy"
-                        + ", state=" + describeShellState());
-                return true;
-            }
             if (launcherOpenBreakGesture) {
                 dispatchToEdgePlugin(event, activeEdge);
                 log(Log.INFO, TAG, "SystemUI-owned launcher OPEN break candidate"
@@ -1537,12 +1530,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     ? lastX - downX
                     : downX - lastX;
             if (shellGestureStartDeferred && distance > dp(PILFER_THRESHOLD_DP)) {
-                if (!isShellReadyForGesture()) {
-                    cancelLocalGesture(event,
-                            "Shell became busy before deferred start, state="
-                                    + describeShellState());
-                    return false;
-                }
                 shellGestureStartDeferred = false;
                 if (!startShellGesture()) {
                     cancelLocalGesture(event,
@@ -1635,14 +1622,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             }
             if (openHandoffEpoch != 0L
                     && !isOpenEndHandoffCurrent(openHandoffEpoch)) {
-                return;
-            }
-            if (!isShellReadyForGesture()) {
-                log(Log.WARN, TAG,
-                        "Suppressed ended " + openDescription
-                                + " handoff while Shell was busy"
-                                + identityDescription
-                                + ", state=" + describeShellState());
                 return;
             }
             if (openHandoffEpoch != 0L
@@ -2143,7 +2122,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                 + ", inputEpoch=" + owner.inputEpoch);
                 return false;
             }
-            lastShellStateDescription = start.stateDescription;
             if (start.failure != null) {
                 if (start.startInvoked) {
                     handleAbandonedShellStart(owner, start,
@@ -2343,50 +2321,27 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         protected OpenTransitionSnapshot findReversibleRunningOpenTransition() {
+            OpenTransitionSnapshot active = null;
             for (OpenTransitionSnapshot snapshot : runningOpenTransitions.values()) {
                 if (snapshot.state.get() == OPEN_SNAPSHOT_ACTIVE) {
-                    log(Log.INFO, TAG, "Detected reversible running OPEN transition"
-                            + ", animatorCount=" + snapshot.animators.length
-                            + ", info=" + shortObject(snapshot.transitionInfo));
-                    return snapshot;
+                    if (active != null) {
+                        log(Log.WARN, TAG,
+                                "Rejected ambiguous reversible OPEN transitions"
+                                        + ", firstInfo="
+                                        + shortObject(active.transitionInfo)
+                                        + ", secondInfo="
+                                        + shortObject(snapshot.transitionInfo));
+                        return null;
+                    }
+                    active = snapshot;
                 }
             }
-            return null;
-        }
-
-        protected boolean isShellReadyForGesture() {
-            ShellGestureSession session = activeShellSession;
-            if (shellOwnerUncertain || session != null) {
-                lastShellStateDescription = describeActiveShellSession();
-                return false;
+            if (active != null) {
+                log(Log.INFO, TAG, "Detected reversible running OPEN transition"
+                        + ", animatorCount=" + active.animators.length
+                        + ", info=" + shortObject(active.transitionInfo));
             }
-            ShellOwner owner = captureShellOwner();
-            if (owner == null) {
-                lastShellStateDescription = "owner-unavailable";
-                return false;
-            }
-            AtomicReference<Boolean> ready = new AtomicReference<>();
-            AtomicReference<String> state = new AtomicReference<>();
-            AtomicReference<Throwable> failure = new AtomicReference<>();
-            executeShellBlocking(owner.executor, () -> {
-                try {
-                    state.set(describeShellStateOnOwner(owner.controller));
-                    ready.set(Boolean.valueOf(
-                            isShellReadyOnOwner(owner.controller)));
-                } catch (Throwable throwable) {
-                    failure.set(throwable);
-                }
-            }, "readiness");
-            lastShellStateDescription = state.get() == null
-                    ? "readiness-timeout" : state.get();
-            if (failure.get() != null) {
-                log(Log.WARN, TAG,
-                        "Failed to inspect Shell readiness; rejecting gesture",
-                        failure.get());
-            }
-            return failure.get() == null
-                    && Boolean.TRUE.equals(ready.get())
-                    && isShellOwnerCurrent(owner);
+            return active;
         }
 
         protected boolean isShellReadyOnOwner(Object stateController)
@@ -2410,10 +2365,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected boolean isTrackerInitial(Object tracker) throws Exception {
             return tracker == null || ((BackTouchTracker) tracker).isInInitialState();
-        }
-
-        protected String describeShellState() {
-            return lastShellStateDescription;
         }
 
         protected String describeShellStateOnOwner(Object stateController) {
