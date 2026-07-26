@@ -874,10 +874,6 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.rightTouchWidth = combineTouchWidth(rightSensitivity, rightInset);
         }
 
-        public int touchWidth(int edge) {
-            return edge == EDGE_LEFT ? leftTouchWidth : rightTouchWidth;
-        }
-
         public static int combineTouchWidth(int sensitivity, int inset) {
             long width = (long) sensitivity + (long) inset;
             return (int) Math.max(1L, Math.min(Integer.MAX_VALUE, width));
