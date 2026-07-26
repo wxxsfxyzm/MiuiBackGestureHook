@@ -2444,21 +2444,12 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 boolean composedInStartTransaction =
                         candidate.acceptedBoundaryComposition.get() == 2;
                 if (!composedInStartTransaction) {
-                    // Preserve the established correction if the exact accepted callback
-                    // boundary cannot be wrapped on a future Shell build. This fallback is
-                    // intentionally diagnostic: two applies can be presented in different
-                    // frames, so the supported path above must report atomic composition.
-                    try (SurfaceControl.Transaction transaction =
-                                 new SurfaceControl.Transaction()) {
-                        transaction.reparent(candidate.changeLeash,
-                                composition.closingLeash);
-                        transaction.apply();
-                    }
-                    log(Log.WARN, TAG,
-                            "Fell back to post-apply return-home commit composition"
+                    log(Log.ERROR, TAG,
+                            "Rejected non-atomic return-home commit composition"
                                     + ", taskId=" + composition.closingTaskId
                                     + ", boundaryPhase="
                                     + candidate.acceptedBoundaryComposition.get());
+                    return result;
                 }
                 log(Log.INFO, TAG,
                         "Corrected accepted predictive return-home commit composition"
@@ -2469,8 +2460,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                 + ", changeLeash=" + candidate.changeLeash
                                 + ", closingLeash="
                                 + composition.closingLeash
-                                + ", atomicStartTransaction="
-                                + composedInStartTransaction);
+                                + ", atomicStartTransaction=true");
                 publishStandardReturnHomeCommit(
                         composition.closingTaskId,
                         readTransitionDebugId(candidate.transitionInfo),
