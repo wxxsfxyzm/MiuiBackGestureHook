@@ -83,7 +83,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected static final String TAG = "MiuiBackGestureHook";
     protected static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.2-r58-launcher-surfaces";
+            "systemui-aosp-back-0.7.2-r63-freeform-prepare-role";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -319,6 +319,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final int TOUCH_OCCLUSION_MODE_USE_OPACITY = 1;
     protected static final int TOUCH_OCCLUSION_MODE_ALLOW = 2;
     protected static final int WINDOWING_MODE_FULLSCREEN = 1;
+    protected static final int WINDOWING_MODE_FREEFORM = 5;
     protected static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
     protected static final float PILFER_THRESHOLD_DP = 8.0f;
     protected static final float TRIGGER_THRESHOLD_DP = 48.0f;

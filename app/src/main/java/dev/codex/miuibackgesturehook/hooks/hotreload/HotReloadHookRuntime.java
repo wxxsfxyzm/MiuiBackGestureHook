@@ -46,6 +46,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         log(Log.INFO, TAG, "Hot reloading, build=" + BUILD_MARK
                 + ", process=" + processName
                 + ", hooks=" + hookHandles.size());
+        serverFreeformPrepareRoleHookReady = false;
         boolean savedMiuiOverviewVisible = miuiOverviewVisible;
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
@@ -154,6 +155,11 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         // Try the next old system-server hook executable.
                     }
                 }
+                boolean freeformRoleNormalizer =
+                        "server_freeform_prepare_role_normalization".equals(oldHookId);
+                boolean freeformRoleReflectionReady = !freeformRoleNormalizer
+                        || initializeFreeformPrepareRoleReflection(
+                        oldExecutableClassLoader);
                 XposedInterface.Hooker replacement = createHotReloadHooker(oldHandle.getId());
                 if (replacement != null) {
                     XposedInterface.HookHandle replacementHandle =
@@ -167,6 +173,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     } else if ("systemui_back_finish_open_atomic".equals(
                             oldHookId)) {
                         backFinishOpenAtomicHookReady = true;
+                    } else if (freeformRoleNormalizer) {
+                        serverFreeformPrepareRoleHookReady =
+                                freeformRoleReflectionReady;
                     }
                     replaced++;
                 } else {
@@ -195,6 +204,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 }
                 if (!oldHookIds.contains("server_back_window_start_animation")) {
                     hookBackWindowStartAnimation(serverClassLoader);
+                }
+                if (!oldHookIds.contains(
+                        "server_freeform_prepare_role_normalization")) {
+                    hookFreeformCrossActivityPrepareRole(serverClassLoader);
                 }
                 if (!oldHookIds.contains("server_schedule_animation_prepare_transition")) {
                     hookScheduleAnimationPrepareTransition(serverClassLoader);
@@ -591,6 +604,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::interceptPromoteToTaskFragmentIfNeeded;
             case "server_back_window_start_animation":
                 return this::prepareOpeningTaskFragment;
+            case "server_freeform_prepare_role_normalization":
+                return this::normalizeFreeformCrossActivityTransitionInfo;
             case "server_schedule_animation_prepare_transition":
                 return this::interceptScheduleAnimationPrepareTransition;
             case "server_back_navigation_done_cleanup":

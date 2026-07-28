@@ -429,6 +429,16 @@ System-server compatibility rules:
   original `setLaunchBehind()` path; do not blanket-skip transition preparation. Never skip
   the unified `TYPE_RETURN_TO_HOME` prepare path; if `mIsLaunchBehind` or the relevant flag
   cannot be proven, preserve the original platform method.
+- In unified mode, preserve the native prepared transition for the exact single-Task freeform
+  cross-Activity shape only when both endpoints are distinct ActivityRecords in the same standard
+  Task and the opening Activity is still hidden. Xiaomi reports both prepared changes as
+  `TO_FRONT`; after WMS builds that exact prepared `TransitionInfo` and before it is dispatched to
+  Shell, set only the already-visible departing Activity's final mode to AOSP `CHANGE`. Preserve
+  both changes' flags, including the platform and Xiaomi predictive-back flags, and let the stock
+  Shell handler perform the resulting closing/opening leash reparent in its original transaction.
+  Keep the occluded opening Activity, runner targets, and all other state and shapes untouched; do
+  not allow the native prepare unless the same-process normalizer hook is ready, and clear that
+  readiness before hot reload.
 - Navigation-done cleanup may call `clearBackAnimations(false)` only after a committed
   navigation when the handler is still composed and both prepared-open and prepared-close
   transition fields are null. Leave normal transition-owned cleanup untouched.

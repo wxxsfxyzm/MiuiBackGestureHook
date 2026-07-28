@@ -15,8 +15,10 @@ import android.util.Log;
 import android.util.Pair;
 import android.view.SurfaceControl;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
@@ -27,6 +29,16 @@ import io.github.libxposed.api.XposedInterface;
 
 public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
 
+    protected static final int SERVER_CHANGE_INFO_BACK_TOP = 128;
+    protected static final int SERVER_CHANGE_INFO_BACK_BELOW = 256;
+    protected static final int SERVER_TRANSITION_INFO_BACK_TOP = 0x08000000;
+    protected static final int SERVER_FREEFORM_PREPARED_CLOSING_FLAGS =
+            SERVER_TRANSITION_INFO_BACK_TOP | FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK;
+    protected static final int SERVER_FREEFORM_PREPARED_OPENING_FLAGS =
+            FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK | FLAG_IS_OCCLUDED;
+    protected volatile boolean serverFreeformPrepareRoleHookReady;
+    protected volatile Field serverTransitionChangeInfoFlagsField;
+    protected volatile Method serverTransitionInfoChangeSetModeMethod;
 
     protected void installSystemServerHooks(ClassLoader classLoader) {
         try {
@@ -41,6 +53,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             hookPredictiveBackOptInMetadata(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
             hookBackWindowStartAnimation(serverClassLoader);
+            hookFreeformCrossActivityPrepareRole(serverClassLoader);
             hookScheduleAnimationPrepareTransition(serverClassLoader);
             hookReturnHomeTouchOcclusion(serverClassLoader);
             log(Log.INFO, TAG, "Installed system_server back navigation hooks, build="
@@ -485,6 +498,250 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         }
     }
 
+    protected void hookFreeformCrossActivityPrepareRole(ClassLoader classLoader) {
+        serverFreeformPrepareRoleHookReady = false;
+        serverTransitionChangeInfoFlagsField = null;
+        serverTransitionInfoChangeSetModeMethod = null;
+        try {
+            Class<?> transitionClass = Class.forName(
+                    "com.android.server.wm.Transition", false, classLoader);
+            if (!initializeFreeformPrepareRoleReflection(classLoader)) {
+                return;
+            }
+            for (Method method : transitionClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if ("calculateTransitionInfo".equals(method.getName())
+                        && parameters.length == 5
+                        && parameters[0] == int.class
+                        && parameters[1] == int.class
+                        && "java.util.ArrayList".equals(parameters[2].getName())
+                        && parameters[3] == SurfaceControl.Transaction.class
+                        && parameters[4] == int.class) {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId("server_freeform_prepare_role_normalization")
+                            .intercept(this::normalizeFreeformCrossActivityTransitionInfo));
+                    serverFreeformPrepareRoleHookReady = true;
+                    log(Log.INFO, TAG,
+                            "Hooked server freeform predictive-back prepare role"
+                                    + " normalization");
+                    return;
+                }
+            }
+            log(Log.WARN, TAG,
+                    "Transition.calculateTransitionInfo five-argument overload not found");
+        } catch (Throwable throwable) {
+            serverFreeformPrepareRoleHookReady = false;
+            serverTransitionChangeInfoFlagsField = null;
+            serverTransitionInfoChangeSetModeMethod = null;
+            log(Log.ERROR, TAG,
+                    "Failed to hook server freeform predictive-back prepare role",
+                    throwable);
+        }
+    }
+
+    protected boolean initializeFreeformPrepareRoleReflection(ClassLoader classLoader) {
+        try {
+            Class<?> changeInfoClass = Class.forName(
+                    "com.android.server.wm.Transition$ChangeInfo", false, classLoader);
+            Field flags = changeInfoClass.getDeclaredField("mFlags");
+            flags.setAccessible(true);
+            Class<?> transitionInfoChangeClass = Class.forName(
+                    "android.window.TransitionInfo$Change", false, classLoader);
+            Method setMode = null;
+            for (Method method : transitionInfoChangeClass.getDeclaredMethods()) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if ("setMode".equals(method.getName())
+                        && parameters.length == 1
+                        && parameters[0] == int.class) {
+                    setMode = method;
+                    break;
+                }
+            }
+            if (setMode == null) {
+                throw new NoSuchMethodException("TransitionInfo.Change.setMode(int)");
+            }
+            setMode.setAccessible(true);
+            serverTransitionChangeInfoFlagsField = flags;
+            serverTransitionInfoChangeSetModeMethod = setMode;
+            return true;
+        } catch (Throwable throwable) {
+            serverTransitionChangeInfoFlagsField = null;
+            serverTransitionInfoChangeSetModeMethod = null;
+            log(Log.ERROR, TAG,
+                    "Server freeform prepare-role reflection unavailable", throwable);
+            return false;
+        }
+    }
+
+    protected Object normalizeFreeformCrossActivityTransitionInfo(
+            XposedInterface.Chain chain) throws Throwable {
+        Field flagsField = serverTransitionChangeInfoFlagsField;
+        Method setModeMethod = serverTransitionInfoChangeSetModeMethod;
+        Object closingChangeInfo = null;
+        int closingIndex = -1;
+        try {
+            Object type = chain.getArg(0);
+            if (flagsField != null
+                    && setModeMethod != null
+                    && type instanceof Number
+                    && ((Number) type).intValue() == TRANSIT_PREDICTIVE_BACK) {
+                Object targetsObject = chain.getArg(2);
+                closingChangeInfo = resolveExactFreeformCrossActivityChangeInfo(
+                        targetsObject, flagsField);
+                if (closingChangeInfo != null) {
+                    closingIndex = ((List<?>) targetsObject).indexOf(closingChangeInfo);
+                }
+            }
+        } catch (Throwable throwable) {
+            serverFreeformPrepareRoleHookReady = false;
+            log(Log.WARN, TAG,
+                    "Failed to inspect server freeform prepared targets;"
+                            + " disabling native freeform prepare",
+                    throwable);
+        }
+        Object result = chain.proceed();
+        if (closingChangeInfo == null || closingIndex < 0 || setModeMethod == null) {
+            return result;
+        }
+
+        try {
+            Object changesObject = invokeAnyMethod(
+                    result, "getChanges", new Object[0]);
+            if (!(changesObject instanceof List<?>)) {
+                throw new IllegalStateException("TransitionInfo changes unavailable");
+            }
+            List<?> changes = (List<?>) changesObject;
+            if (changes.size() != 2 || closingIndex >= changes.size()) {
+                throw new IllegalStateException("unexpected TransitionInfo change count="
+                        + changes.size() + ", closingIndex=" + closingIndex);
+            }
+            Object closingChange = changes.get(closingIndex);
+            Object openingChange = changes.get(1 - closingIndex);
+            int closingMode = ((Number) invokeAnyMethod(
+                    closingChange, "getMode", new Object[0])).intValue();
+            int openingMode = ((Number) invokeAnyMethod(
+                    openingChange, "getMode", new Object[0])).intValue();
+            int closingFlags = ((Number) invokeAnyMethod(
+                    closingChange, "getFlags", new Object[0])).intValue();
+            int openingFlags = ((Number) invokeAnyMethod(
+                    openingChange, "getFlags", new Object[0])).intValue();
+            if ((closingMode != TRANSIT_TO_FRONT && closingMode != TRANSIT_CHANGE)
+                    || openingMode != TRANSIT_TO_FRONT
+                    || closingFlags != SERVER_FREEFORM_PREPARED_CLOSING_FLAGS
+                    || openingFlags != SERVER_FREEFORM_PREPARED_OPENING_FLAGS) {
+                throw new IllegalStateException("unexpected prepared roles, closingMode="
+                        + closingMode + ", openingMode=" + openingMode
+                        + ", closingFlags=0x" + Integer.toHexString(closingFlags)
+                        + ", openingFlags=0x" + Integer.toHexString(openingFlags));
+            }
+            if (closingMode == TRANSIT_TO_FRONT) {
+                setModeMethod.invoke(closingChange, TRANSIT_CHANGE);
+            }
+            int normalizedMode = ((Number) invokeAnyMethod(
+                    closingChange, "getMode", new Object[0])).intValue();
+            int normalizedFlags = ((Number) invokeAnyMethod(
+                    closingChange, "getFlags", new Object[0])).intValue();
+            int preservedOpeningMode = ((Number) invokeAnyMethod(
+                    openingChange, "getMode", new Object[0])).intValue();
+            int preservedOpeningFlags = ((Number) invokeAnyMethod(
+                    openingChange, "getFlags", new Object[0])).intValue();
+            if (normalizedMode != TRANSIT_CHANGE
+                    || normalizedFlags != closingFlags
+                    || preservedOpeningMode != openingMode
+                    || preservedOpeningFlags != openingFlags) {
+                throw new IllegalStateException("prepared role normalization changed state, mode="
+                        + normalizedMode + ", openingMode=" + preservedOpeningMode
+                        + ", flags=0x"
+                        + Integer.toHexString(closingFlags) + "->0x"
+                        + Integer.toHexString(normalizedFlags) + ", openingFlags=0x"
+                        + Integer.toHexString(openingFlags) + "->0x"
+                        + Integer.toHexString(preservedOpeningFlags));
+            }
+            log(Log.INFO, TAG,
+                    "Normalized server freeform cross-activity prepare role"
+                            + ", transitionId=" + chain.getArg(4)
+                            + ", changeIndex=" + closingIndex
+                            + ", mode=" + closingMode + "->" + TRANSIT_CHANGE
+                            + ", changed=" + (closingMode == TRANSIT_TO_FRONT)
+                            + ", flags=0x" + Integer.toHexString(normalizedFlags));
+        } catch (Throwable throwable) {
+            serverFreeformPrepareRoleHookReady = false;
+            log(Log.ERROR, TAG,
+                    "Server freeform prepare-role normalization failed;"
+                            + " disabling native freeform prepare",
+                    throwable);
+        }
+        return result;
+    }
+
+    protected Object resolveExactFreeformCrossActivityChangeInfo(
+            Object targetsObject, Field flagsField) throws Exception {
+        if (!(targetsObject instanceof List<?>)
+                || ((List<?>) targetsObject).size() != 2) {
+            return null;
+        }
+        Object closingInfo = null;
+        Object openingInfo = null;
+        Object closingActivity = null;
+        Object openingActivity = null;
+        for (Object changeInfo : (List<?>) targetsObject) {
+            Object container = readField(changeInfo, "mContainer");
+            Object activity = container == null ? null : invokeAnyMethod(
+                    container, "asActivityRecord", new Object[0]);
+            int flags = flagsField.getInt(changeInfo);
+            if (activity == null) {
+                return null;
+            }
+            if (flags == SERVER_CHANGE_INFO_BACK_TOP && closingInfo == null) {
+                closingInfo = changeInfo;
+                closingActivity = activity;
+            } else if (flags == SERVER_CHANGE_INFO_BACK_BELOW
+                    && openingInfo == null) {
+                openingInfo = changeInfo;
+                openingActivity = activity;
+            } else {
+                return null;
+            }
+        }
+        if (closingActivity == null || openingActivity == null
+                || closingActivity == openingActivity
+                || !Boolean.TRUE.equals(readField(closingInfo, "mVisible"))
+                || !Boolean.FALSE.equals(readField(openingInfo, "mVisible"))
+                || !Boolean.TRUE.equals(invokeAnyMethod(
+                closingActivity, "isVisibleRequested", new Object[0]))
+                || !Boolean.TRUE.equals(invokeAnyMethod(
+                openingActivity, "isVisibleRequested", new Object[0]))) {
+            return null;
+        }
+        Object closingTask = invokeAnyMethod(
+                closingActivity, "getTask", new Object[0]);
+        Object openingTask = invokeAnyMethod(
+                openingActivity, "getTask", new Object[0]);
+        Object activityType = closingTask == null ? null : invokeAnyMethod(
+                closingTask, "getActivityType", new Object[0]);
+        Object closingMode = invokeAnyMethod(
+                closingActivity, "getWindowingMode", new Object[0]);
+        Object openingMode = invokeAnyMethod(
+                openingActivity, "getWindowingMode", new Object[0]);
+        Object closingBounds = invokeAnyMethod(
+                closingActivity, "getBounds", new Object[0]);
+        Object openingBounds = invokeAnyMethod(
+                openingActivity, "getBounds", new Object[0]);
+        return closingTask != null
+                && closingTask == openingTask
+                && activityType instanceof Number
+                && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
+                && closingMode instanceof Number
+                && ((Number) closingMode).intValue() == WINDOWING_MODE_FREEFORM
+                && openingMode instanceof Number
+                && ((Number) openingMode).intValue() == WINDOWING_MODE_FREEFORM
+                && closingBounds instanceof Rect
+                && !((Rect) closingBounds).isEmpty()
+                && closingBounds.equals(openingBounds)
+                ? closingInfo : null;
+    }
+
     protected void hookScheduleAnimationPrepareTransition(ClassLoader classLoader) {
         try {
             Class<?> builderClass = Class.forName(SCHEDULE_ANIMATION_BUILDER, false,
@@ -666,11 +923,25 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         boolean returnToHome = Boolean.TRUE.equals(launchBehind);
         boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, false);
         if (unify && launchBehindKnown && !returnToHome) {
+            if (serverFreeformPrepareRoleHookReady
+                    && isExactFreeformCrossActivityPrepare(chain, builder)) {
+                Object close = chain.getArg(1);
+                Object[] open = (Object[]) chain.getArg(2);
+                log(Log.INFO, TAG, "Allowing native unified prepare for exact freeform"
+                        + " cross-activity, close=" + shortObject(close)
+                        + ", open=" + shortObject(open[0]));
+                Object transition = chain.proceed();
+                log(Log.INFO, TAG, "Native freeform cross-activity prepare completed"
+                        + ", transition=" + shortObject(transition));
+                return transition;
+            }
             log(Log.INFO, TAG, "Skipped ScheduleAnimationBuilder.prepareTransitionIfNeeded"
                     + " to avoid Xiaomi unified-transition leash reparenting"
                     + ", unifyBackNavigationTransition=true"
                     + ", returnToHome=false"
                     + ", launchBehind=" + launchBehind
+                    + ", freeformRoleNormalizerReady="
+                    + serverFreeformPrepareRoleHookReady
                     + ", builder=" + shortObject(builder));
             return null;
         }
@@ -690,6 +961,62 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     ? "unified-prepared-transition"
                     : "Xiaomi/AOSP-setLaunchBehind"));
         return chain.proceed();
+    }
+
+    protected boolean isExactFreeformCrossActivityPrepare(
+            XposedInterface.Chain chain, Object builder) {
+        try {
+            Object visibleArg = chain.getArg(0);
+            Object close = chain.getArg(1);
+            Object openArg = chain.getArg(2);
+            if (!(visibleArg instanceof Object[]) || !(openArg instanceof Object[])) {
+                return false;
+            }
+            Object[] visibleOpen = (Object[]) visibleArg;
+            Object[] promotedOpen = (Object[]) openArg;
+            if (visibleOpen.length != 1 || promotedOpen.length != 1
+                    || close == null || promotedOpen[0] == null) {
+                return false;
+            }
+            Object closeActivity = invokeAnyMethod(
+                    close, "asActivityRecord", new Object[0]);
+            Object openActivity = invokeAnyMethod(
+                    promotedOpen[0], "asActivityRecord", new Object[0]);
+            if (closeActivity == null || openActivity == null
+                    || close != closeActivity
+                    || promotedOpen[0] != openActivity
+                    || closeActivity == openActivity
+                    || visibleOpen[0] != openActivity
+                    || readField(builder, "mCloseTarget") != close) {
+                return false;
+            }
+            Object closeTask = invokeAnyMethod(
+                    closeActivity, "getTask", new Object[0]);
+            Object openTask = invokeAnyMethod(
+                    openActivity, "getTask", new Object[0]);
+            Object activityType = closeTask == null ? null : invokeAnyMethod(
+                    closeTask, "getActivityType", new Object[0]);
+            Object closeMode = invokeAnyMethod(
+                    closeActivity, "getWindowingMode", new Object[0]);
+            Object openMode = invokeAnyMethod(
+                    openActivity, "getWindowingMode", new Object[0]);
+            return closeTask != null
+                    && closeTask == openTask
+                    && activityType instanceof Number
+                    && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
+                    && closeMode instanceof Number
+                    && ((Number) closeMode).intValue() == WINDOWING_MODE_FREEFORM
+                    && openMode instanceof Number
+                    && ((Number) openMode).intValue() == WINDOWING_MODE_FREEFORM
+                    && Boolean.FALSE.equals(invokeAnyMethod(
+                    openActivity, "isVisibleRequested", new Object[0]))
+                    && Boolean.FALSE.equals(readField(
+                    openActivity, "mLaunchTaskBehind"));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to inspect freeform cross-activity prepare;"
+                    + " preserving compatibility skip", throwable);
+            return false;
+        }
     }
 
     protected Object interceptPromoteToTaskFragmentIfNeeded(XposedInterface.Chain chain)
