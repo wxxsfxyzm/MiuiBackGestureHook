@@ -54,6 +54,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected abstract void publishSystemUiReturnHomeFinish(
             Object controller, long shellSessionId,
             Object finishCallback, String reason);
+
+    protected static boolean hasXiaomiBackIntent(
+            float outwardDistance, float verticalDelta, float outwardThreshold) {
+        return outwardDistance > outwardThreshold
+                && outwardDistance >= Math.abs(verticalDelta) / 2.0f;
+    }
+
     protected final Map<Object, NativeBackInputMonitor> nativeInputMonitors =
             Collections.synchronizedMap(new WeakHashMap<>());
 
@@ -322,16 +329,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             float distance = activeEdge == EDGE_LEFT
                     ? event.getRawX() - downX
                     : downX - event.getRawX();
-            float verticalDistance = Math.abs(event.getRawY() - downY);
-            if (!pilfered && distance <= 0.0f && verticalDistance > dp(PILFER_THRESHOLD_DP)) {
-                cancelNativeCandidate(event, "moved toward edge or vertical before pilfer");
-                return false;
-            }
-            if (!pilfered && verticalDistance > Math.max(dp(PILFER_THRESHOLD_DP),
-                    Math.max(0.0f, distance) * 1.5f)) {
-                cancelNativeCandidate(event, "vertical gesture before pilfer");
-                return false;
-            }
             if (!pilfered && driver.isRecentsVisualOnlyGesture()) {
                 // MiuiHome can report Overview before WMS exposes Launcher as the back target.
                 // Keep the native panel responsive, but leave the real input stream untouched
@@ -352,7 +349,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         launcherEditingCandidate);
                 return false;
             }
-            if (!pilfered && distance > dp(PILFER_THRESHOLD_DP)) {
+            if (!pilfered && hasXiaomiBackIntent(
+                    distance, event.getRawY() - downY, dp(PILFER_THRESHOLD_DP))) {
                 pilferPointers(distance);
                 if (!pilfered) {
                     cancelNativeCandidate(event, "failed to pilfer outward gesture");
@@ -1478,8 +1476,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 }
             } else {
                 // MiuiHome GestureStub accepted the original DOWN and its legacy processor
-                // was neutralized. Pilfering and Shell setup now share the intentional 8dp
-                // boundary, with the authenticated token as the ownership proof.
+                // was neutralized. Pilfering and Shell setup share the fixed 8dp outward
+                // boundary and Xiaomi's non-terminal direction gate, with the authenticated
+                // token as the ownership proof.
                 shellGestureStartDeferred = true;
             }
             dispatchToEdgePlugin(event, activeEdge);
@@ -1510,7 +1509,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             float distance = activeEdge == EDGE_LEFT
                     ? lastX - downX
                     : downX - lastX;
-            if (shellGestureStartDeferred && distance > dp(PILFER_THRESHOLD_DP)) {
+            boolean intentQualified = hasXiaomiBackIntent(
+                    distance, lastY - downY, dp(PILFER_THRESHOLD_DP));
+            if (shellGestureStartDeferred && intentQualified) {
                 shellGestureStartDeferred = false;
                 if (!startShellGesture()) {
                     cancelLocalGesture(event,
@@ -1526,10 +1527,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         + ", y=" + event.getRawY());
             }
             boolean crossedNow = false;
-            if (!thresholdCrossed && distance > dp(PILFER_THRESHOLD_DP)) {
+            if (!thresholdCrossed && intentQualified) {
                 crossedNow = crossIntentThreshold(distance);
             }
-            boolean shouldTrigger = distance > dp(TRIGGER_THRESHOLD_DP);
+            boolean shouldTrigger = thresholdCrossed
+                    && distance > dp(TRIGGER_THRESHOLD_DP);
             boolean triggerChanged = updateTriggerBack(shouldTrigger);
             if (!shellGestureStartDeferred
                     && !legacyInterruptGesture && !launcherOpenBreakGesture) {
@@ -1700,7 +1702,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return false;
             }
             if (!shellGestureStarted) {
-                cancelLocalGesture(event, "released before first MOVE");
+                cancelLocalGesture(event, "released before back intent qualified");
                 return true;
             }
             dispatchToEdgePlugin(event, activeEdge);

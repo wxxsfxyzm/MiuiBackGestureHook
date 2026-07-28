@@ -169,9 +169,11 @@ Same-activity and input rules:
   WMS applies that minimum to overridden frames, while `InputMethodService` turns the Insets it
   receives into an exclusion region; either missing guard would redirect the DOWN before the
   accepted-DOWN boundary. Keep MiuiHome's `GestureStubView` as the physical edge owner.
-- Use a single `8dp` outward threshold to pilfer the accepted MiuiHome stream and start a
-  deferred Shell navigation. Retain the fixed `48dp` trigger threshold, native
-  `BackPanelController` dispatch, and release-time invoke/cancel.
+- Use the fixed `8dp` outward threshold together with Xiaomi's non-terminal intent gate
+  (`outward >= abs(vertical) / 2`) to pilfer the accepted MiuiHome stream and start a deferred
+  Shell navigation. A vertical-leading sample remains pending so later horizontal motion can
+  qualify; never terminal-cancel it on direction alone. Retain the fixed `48dp` trigger threshold,
+  native `BackPanelController` dispatch, and release-time invoke/cancel.
 - Apply AOSP's bar-visibility eligibility at `ACTION_DOWN`, before BackPanel, Shell, or pilfering.
   Snapshot the matching display's existing `SysUiState`: when `SYSUI_STATE_NAV_BAR_HIDDEN` is set
   and `SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY` (bit 17) is clear, leave the stream
