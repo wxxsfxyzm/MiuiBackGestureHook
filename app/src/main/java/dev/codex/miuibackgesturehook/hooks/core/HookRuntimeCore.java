@@ -83,7 +83,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected static final String TAG = "MiuiBackGestureHook";
     protected static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.2-r57-xiaomi-intent-gate";
+            "systemui-aosp-back-0.7.2-r58-launcher-surfaces";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -135,6 +135,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.miui.home.launcher.LauncherState";
     protected static final String MIUI_HOME_BASE_LAUNCHER =
             "com.miui.home.launcher.BaseLauncher";
+    protected static final String MIUI_HOME_SMALL_WINDOW_STATE_HELPER =
+            "com.miui.home.smallwindow.SmallWindowStateHelper";
     protected static final String MIUI_HOME_APPLICATION =
             "com.miui.home.launcher.Application";
     protected static final String MIUI_HOME_OVERVIEW_PROXY_IMPL =

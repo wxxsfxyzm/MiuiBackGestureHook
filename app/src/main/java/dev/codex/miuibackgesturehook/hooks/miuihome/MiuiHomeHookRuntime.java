@@ -3,6 +3,7 @@ package dev.codex.miuibackgesturehook.hooks.miuihome;
 import android.animation.Animator;
 import android.annotation.SuppressLint;
 import android.app.BroadcastOptions;
+import android.app.KeyguardManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -523,6 +524,22 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         recordHookHandle(hook(method)
                 .setId("miui_home_drawer_state")
                 .intercept(this::mirrorMiuiHomeDrawerState));
+    }
+
+    protected void hookMiuiHomeFreeformBackTouchability(ClassLoader classLoader) {
+        try {
+            Class<?> launcherClass = Class.forName(
+                    MIUI_HOME_BASE_LAUNCHER, false, classLoader);
+            Method method = launcherClass.getDeclaredMethod(
+                    "notifyFsGestureHomeStatus", boolean.class, String.class);
+            method.setAccessible(true);
+            recordHookHandle(hook(method)
+                    .setId("miui_home_freeform_back_touchability")
+                    .intercept(this::restoreMiuiHomeFreeformBackTouchability));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "MiuiHome small-window back lifecycle unavailable",
+                    throwable);
+        }
     }
 
     protected void hookMiuiHomeEditingState(ClassLoader classLoader) {
@@ -2331,7 +2348,10 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     : targetState.getClass().getClassLoader();
             Class<?> stateClass = Class.forName(MIUI_HOME_LAUNCHER_STATE, false, classLoader);
             Object allAppsState = readStaticField(stateClass, "ALL_APPS");
-            boolean drawerVisible = targetState == allAppsState;
+            boolean drawerVisible = targetState == allAppsState
+                    || targetState == readStaticField(stateClass, "SEARCH_OVERLAY_STATE")
+                    || targetState == readStaticField(
+                    stateClass, "INTERNATIONAL_SEARCH_OVERLAY_STATE");
             Object launcher = readField(manager, "mLauncher");
             if (launcher instanceof Context) {
                 miuiDrawerVisible = drawerVisible;
@@ -2347,6 +2367,41 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             }
         } catch (Throwable throwable) {
             log(Log.WARN, TAG, "Failed to mirror MiuiHome drawer state", throwable);
+        }
+        return chain.proceed();
+    }
+
+    protected Object restoreMiuiHomeFreeformBackTouchability(
+            XposedInterface.Chain chain) throws Throwable {
+        Object enabled = chain.getArg(0);
+        Object source = chain.getArg(1);
+        Object launcher = chain.getThisObject();
+        if (!Boolean.FALSE.equals(enabled)
+                || !"typefrom_home".equals(source)
+                || !(launcher instanceof Context)) {
+            return chain.proceed();
+        }
+        try {
+            KeyguardManager keyguardManager = ((Context) launcher)
+                    .getSystemService(KeyguardManager.class);
+            if (keyguardManager == null || keyguardManager.isKeyguardLocked()) {
+                return chain.proceed();
+            }
+            Class<?> helperClass = Class.forName(
+                    MIUI_HOME_SMALL_WINDOW_STATE_HELPER, false,
+                    launcher.getClass().getClassLoader());
+            Method getInstance = helperClass.getDeclaredMethod("getInstance");
+            getInstance.setAccessible(true);
+            Object helper = getInstance.invoke(null);
+            if (helper != null && Boolean.TRUE.equals(invokeAnyMethod(
+                    helper, "isInSmallWindowMode", new Object[0]))) {
+                log(Log.INFO, TAG, "Kept native MiuiHome back stubs enabled"
+                        + ", reason=activeSmallWindowOverHome");
+                return chain.proceed(new Object[]{Boolean.TRUE, source});
+            }
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG, "Failed to inspect native MiuiHome small-window state; "
+                    + "preserving launcher decision", throwable);
         }
         return chain.proceed();
     }

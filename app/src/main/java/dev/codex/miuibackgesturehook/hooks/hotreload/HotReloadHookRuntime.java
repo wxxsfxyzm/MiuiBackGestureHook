@@ -470,6 +470,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (!oldHookIds.contains("miui_home_drawer_state")) {
                     hookMiuiHomeDrawerState(hotReloadClassLoader);
                 }
+                if (!oldHookIds.contains("miui_home_freeform_back_touchability")) {
+                    hookMiuiHomeFreeformBackTouchability(hotReloadClassLoader);
+                }
                 if (!oldHookIds.contains("miui_home_editing_state")) {
                     hookMiuiHomeEditingState(hotReloadClassLoader);
                 }
@@ -572,6 +575,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::wrapMiuiHomeReturnHomeDirectCancel;
             case "miui_home_drawer_state":
                 return this::mirrorMiuiHomeDrawerState;
+            case "miui_home_freeform_back_touchability":
+                return this::restoreMiuiHomeFreeformBackTouchability;
             case "miui_home_editing_state":
                 return this::mirrorMiuiHomeEditingState;
             case "miui_home_return_home_initialize":
@@ -845,6 +850,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             hookMiuiHomeReturnHomeFreshOpen(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
             hookMiuiHomeDrawerState(classLoader);
+            hookMiuiHomeFreeformBackTouchability(classLoader);
             hookMiuiHomeEditingState(classLoader);
             hookMiuiHomeReturnHomeInitialize(classLoader);
             hookMiuiHomeReturnHomeLocalHandoff(classLoader);
@@ -859,6 +865,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     + ", mirrorsTaskLaunchExit=true"
                     + ", mirrorsAuthenticatedFullscreenState=true"
                     + ", mirrorsDrawerState=true"
+                    + ", preservesSmallWindowBackTouchability=true"
                     + ", mirrorsLauncherEditingState=true"
                     + ", mirrorsLauncherOpenBreakState=true"
                     + ", repairsNonReusableSameIconOpen=true"
