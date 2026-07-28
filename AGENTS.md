@@ -301,6 +301,14 @@ Remote-animation rules:
   the slide on, cross-task's native color-layer background is repainted pure black by
   overwriting the color in the animation's own pending transaction (its stock hard-coded
   dark tint otherwise clashes with the black slide); the geometry stays native.
+- Independently of that slide switch, suppress the stock cross-activity scrim and
+  `back-animation-background` only for distinct targets in the same non-negative Task when both
+  are freeform and have identical non-empty local bounds. Xiaomi's freeform parent transforms the
+  Activity leashes but not those display-area color layers, so they protrude behind the window.
+  After the native start creates them, set the scrim maximum and both valid Surface alphas to zero
+  in the animation's existing transaction. Do not remove, reparent, transform, or take ownership
+  of either layer; native finish cleanup and per-gesture recreation remain intact. Preserve both
+  layers for fullscreen and every other target shape; the fullscreen slide retains its 0.5 dim.
 - Keep SystemUI's native `BackPanelController` as the sole indicator state owner: it
   receives every claimed event and owns thresholds, release state, and haptics. The
   optional HyperOS-style skin (`hyperos_indicator_style` remote preference, default off)

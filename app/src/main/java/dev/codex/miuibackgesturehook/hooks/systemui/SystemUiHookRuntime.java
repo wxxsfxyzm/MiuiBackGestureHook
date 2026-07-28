@@ -1812,7 +1812,13 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Object animation = chain.getThisObject();
             miuixSlideCommitPoseCaptured = false;
-            if (!isHyperOsSlideAnimationEnabled()) {
+            boolean slideEnabled = isHyperOsSlideAnimationEnabled();
+            try {
+                suppressExactFreeformCrossActivityLayers(animation);
+            } catch (Throwable ignored) {
+                // Color-layer diagnostics must not disable the optional slide animation.
+            }
+            if (!slideEnabled) {
                 miuixSlideAnimActive = false;
                 return result;
             }
@@ -1853,6 +1859,59 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             log(Log.WARN, TAG, "Failed to arm miuix slide geometry", throwable);
         }
         return result;
+    }
+
+    protected void suppressExactFreeformCrossActivityLayers(Object animation) {
+        try {
+            Object closingTarget = readField(animation, "closingTarget");
+            Object enteringTarget = readField(animation, "enteringTarget");
+            int closingTaskId = readIntFieldOrDefault(closingTarget, "taskId", -1);
+            Object closingBounds = readFieldOrNull(closingTarget, "localBounds");
+            Object enteringBounds = readFieldOrNull(enteringTarget, "localBounds");
+            if (closingTarget == null || enteringTarget == null
+                    || closingTarget == enteringTarget
+                    || closingTaskId < 0
+                    || closingTaskId != readIntFieldOrDefault(
+                    enteringTarget, "taskId", -1)
+                    || resolveRemoteTargetWindowingMode(closingTarget)
+                    != WINDOWING_MODE_FREEFORM
+                    || resolveRemoteTargetWindowingMode(enteringTarget)
+                    != WINDOWING_MODE_FREEFORM
+                    || !(closingBounds instanceof Rect)
+                    || ((Rect) closingBounds).isEmpty()
+                    || !closingBounds.equals(enteringBounds)) {
+                return;
+            }
+            Object scrim = readField(animation, "scrimLayer");
+            Object transaction = readField(animation, "transaction");
+            if (!(scrim instanceof SurfaceControl)
+                    || !((SurfaceControl) scrim).isValid()
+                    || !(transaction instanceof SurfaceControl.Transaction)) {
+                return;
+            }
+            float previousAlpha = readFloatFieldOrDefault(
+                    animation, "maxScrimAlpha", -1.0f);
+            Object backgroundSurface = readFieldOrNull(
+                    readFieldOrNull(animation, "background"), "mBackgroundSurface");
+            writeField(animation, "maxScrimAlpha", Float.valueOf(0.0f));
+            SurfaceControl.Transaction surfaceTransaction =
+                    (SurfaceControl.Transaction) transaction;
+            surfaceTransaction.setAlpha((SurfaceControl) scrim, 0.0f);
+            boolean backgroundSuppressed = backgroundSurface instanceof SurfaceControl
+                    && ((SurfaceControl) backgroundSurface).isValid();
+            if (backgroundSuppressed) {
+                surfaceTransaction.setAlpha((SurfaceControl) backgroundSurface, 0.0f);
+            }
+            surfaceTransaction.apply();
+            log(Log.INFO, TAG, "Suppressed exact freeform cross-activity color layers"
+                    + ", taskId=" + closingTaskId
+                    + ", maxScrimAlpha=" + previousAlpha + "->0.0"
+                    + ", backgroundSuppressed=" + backgroundSuppressed);
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to suppress exact freeform cross-activity color layers",
+                    throwable);
+        }
     }
 
     /**
@@ -2066,7 +2125,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         if (scrim instanceof SurfaceControl && ((SurfaceControl) scrim).isValid()) {
             ((SurfaceControl.Transaction) readField(animation, "transaction"))
                     .setAlpha((SurfaceControl) scrim,
-                            Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
+                            readFloatFieldOrDefault(
+                                    animation, "maxScrimAlpha", 1.0f) == 0.0f ? 0.0f
+                                    : Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
         }
         // The revealed lower stack is full-screen behind the sliding top page; only the
         // top card is rounded. Native applyTransform rounds both, so clear the corner
