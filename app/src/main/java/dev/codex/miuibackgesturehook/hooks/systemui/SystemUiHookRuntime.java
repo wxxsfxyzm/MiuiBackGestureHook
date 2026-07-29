@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Insets;
+import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
@@ -42,6 +43,7 @@ import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -1535,8 +1537,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookBackPrepareTransitionReparent(classLoader);
             hookBackCommitComposition(classLoader);
             hookBackFinishOpenAtomicTransfer(classLoader);
+            hookFreeformCrossActivityScrimCreation();
             hookCrossActivitySlideAnimation(classLoader,
-                    true, true, true, true, true);
+                    true, true, true, true, true, true);
             hookCrossTaskBackground(classLoader);
             log(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
@@ -1549,20 +1552,39 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
      * when the preference is on: the closing surface follows the finger full-width with
      * no scale and no fade, the entering surface parallaxes in from a quarter width
      * behind at alpha 0.9 -> 1 with its dim scrim tracking the drag and its corner
-     * radius cleared, and the commit settles on a cubic ease-out. Only the geometry,
-     * scrim, and entering corner radius are replaced; targets, letterboxes, and the
-     * finish lifecycle stay native. Cross-task and return-to-home are untouched.
+     * radius cleared, and the commit settles on a cubic ease-out. Exact freeform also
+     * puts Xiaomi's fixed task radius on the prepared root and clears the moving page
+     * radius. Targets, letterboxes, and the finish lifecycle stay native. Cross-task
+     * and return-to-home are untouched. The independent apply hook adopts exact
+     * freeform ColorLayers and that fixed clip into their prepared root whether or not
+     * the slide preference is enabled.
      */
+    protected void hookFreeformCrossActivityScrimCreation() {
+        try {
+            Method setHidden = requireExactDeclaredMethod(SurfaceControl.Builder.class,
+                    "setHidden", SurfaceControl.Builder.class.getName(), "boolean");
+            recordHookHandle(hook(setHidden)
+                    .setId("systemui_back_color_root_scrim_creation")
+                    .intercept(this::keepFreeformScrimHiddenUntilFirstApply));
+            log(Log.INFO, TAG,
+                    "Hooked freeform cross-activity scrim creation visibility");
+        } catch (Throwable throwable) {
+            log(Log.ERROR, TAG,
+                    "Failed to hook freeform cross-activity scrim creation",
+                    throwable);
+        }
+    }
+
     protected void hookCrossActivitySlideAnimation(ClassLoader classLoader,
                                                    boolean installStart,
                                                    boolean installProgress,
                                                    boolean installPostCommit,
                                                    boolean installDuration,
-                                                   boolean installFinish) {
+                                                   boolean installFinish,
+                                                   boolean installColorRootApply) {
         Class<?> baseClass;
         Class<?> defaultClass;
         Class<?> backMotionEventClass;
-        Class<?> backEventClass;
         try {
             baseClass = Class.forName(
                     CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
@@ -1570,8 +1592,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION, false, classLoader);
             backMotionEventClass = Class.forName(
                     "android.window.BackMotionEvent", false, classLoader);
-            backEventClass = Class.forName(
-                    "android.window.BackEvent", false, classLoader);
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG, "Cross-activity animation classes unavailable",
                     throwable);
@@ -1579,6 +1599,19 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         // Each hook installs independently: R8 may rename individual members in
         // Xiaomi's build, and a missing one must only degrade its own stage.
+        if (installColorRootApply) {
+            try {
+                Method apply = resolveSlideMethod(defaultClass, baseClass,
+                        "applyTransaction", void.class);
+                recordHookHandle(hook(apply)
+                        .setId("systemui_back_color_root_apply")
+                        .intercept(this::onCrossActivityColorRootApply));
+                log(Log.INFO, TAG, "Hooked freeform color-layer root adoption");
+            } catch (Throwable throwable) {
+                log(Log.ERROR, TAG,
+                        "Failed to hook freeform color-layer root adoption", throwable);
+            }
+        }
         if (installStart) {
             try {
                 Method start = resolveSlideMethod(defaultClass, baseClass,
@@ -1718,6 +1751,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected Object onCrossActivitySlideFinish(XposedInterface.Chain chain)
             throws Throwable {
         miuixSlideAnimActive = false;
+        freeformColorRootCandidate.set(null);
+        if (freeformColorRootAnimation == chain.getThisObject()) {
+            freeformColorRootAnimation = null;
+        }
         return chain.proceed();
     }
 
@@ -1799,12 +1836,271 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected boolean miuixSlideRegistrationReentry;
     protected volatile Method crossActivityApplyTransform;
     protected volatile Object crossActivityNoFling;
+    protected volatile Method multiTaskingControllerGetInstance;
+    protected final AtomicReference<FreeformColorRootCandidate>
+            freeformColorRootCandidate = new AtomicReference<>();
+    protected volatile Object freeformColorRootAnimation;
 
     protected static final long MIUIX_SLIDE_SETTLE_DURATION_MS = 400L;
     protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
     protected static final float MIUIX_SLIDE_PARALLAX_FRACTION = 0.25f;
     protected static final float MIUIX_SLIDE_SCRIM_OMEGA = 12.083f;
     protected static final float MIUIX_SLIDE_SCRIM_MAX_ALPHA = 0.5f;
+
+    protected static final class FreeformColorRootCandidate {
+        final Object handler;
+        final Object transitionToken;
+        final Object transitionInfo;
+        final Object appsIdentity;
+        final Object closingTarget;
+        final Object enteringTarget;
+        final SurfaceControl rootLeash;
+        final SurfaceControl closingLeash;
+        final SurfaceControl enteringLeash;
+        final float rootCornerRadius;
+
+        FreeformColorRootCandidate(Object handler, Object transitionToken,
+                                   Object transitionInfo,
+                                   Object appsIdentity, Object closingTarget,
+                                   Object enteringTarget, SurfaceControl rootLeash,
+                                   SurfaceControl closingLeash,
+                                   SurfaceControl enteringLeash,
+                                   float rootCornerRadius) {
+            this.handler = handler;
+            this.transitionToken = transitionToken;
+            this.transitionInfo = transitionInfo;
+            this.appsIdentity = appsIdentity;
+            this.closingTarget = closingTarget;
+            this.enteringTarget = enteringTarget;
+            this.rootLeash = rootLeash;
+            this.closingLeash = closingLeash;
+            this.enteringLeash = enteringLeash;
+            this.rootCornerRadius = rootCornerRadius;
+        }
+    }
+
+    protected Object keepFreeformScrimHiddenUntilFirstApply(
+            XposedInterface.Chain chain) throws Throwable {
+        FreeformColorRootCandidate candidate = freeformColorRootCandidate.get();
+        Object builder = chain.getThisObject();
+        if (candidate == null
+                || !Boolean.FALSE.equals(chain.getArg(0))
+                || !"Cross-Activity back animation scrim".equals(
+                readFieldOrNull(builder, "mName"))
+                || !"CrossActivityBackAnimation".equals(
+                readFieldOrNull(builder, "mCallsite"))) {
+            return chain.proceed();
+        }
+        log(Log.INFO, TAG,
+                "Kept freeform cross-activity scrim hidden until atomic first apply"
+                        + ", taskId=" + readIntFieldOrDefault(
+                        candidate.closingTarget, "taskId", -1));
+        return chain.proceed(new Object[]{Boolean.TRUE});
+    }
+
+    protected boolean isExactFreeformCrossActivityPair(Object closingTarget,
+                                                        Object enteringTarget)
+            throws Exception {
+        int taskId = readIntFieldOrDefault(closingTarget, "taskId", -1);
+        Object closingBounds = readFieldOrNull(closingTarget, "localBounds");
+        Object enteringBounds = readFieldOrNull(enteringTarget, "localBounds");
+        return closingTarget != null && enteringTarget != null
+                && closingTarget != enteringTarget && taskId >= 0
+                && taskId == readIntFieldOrDefault(enteringTarget, "taskId", -1)
+                && resolveRemoteTargetWindowingMode(closingTarget)
+                == WINDOWING_MODE_FREEFORM
+                && resolveRemoteTargetWindowingMode(enteringTarget)
+                == WINDOWING_MODE_FREEFORM
+                && closingBounds instanceof Rect
+                && !((Rect) closingBounds).isEmpty()
+                && closingBounds.equals(enteringBounds);
+    }
+
+    protected SurfaceControl resolveSingleTransitionRoot(Object info) throws Exception {
+        Object rootCount = invokeAnyMethod(info, "getRootCount", new Object[0]);
+        if (!(rootCount instanceof Number)
+                || ((Number) rootCount).intValue() != 1) {
+            return null;
+        }
+        Object root = invokeAnyMethod(info, "getRoot",
+                new Object[]{Integer.valueOf(0)});
+        Object leash = root == null ? null
+                : invokeAnyMethod(root, "getLeash", new Object[0]);
+        return leash instanceof SurfaceControl ? (SurfaceControl) leash : null;
+    }
+
+    protected float resolveFreeformRootCornerRadius(Object handler, int taskId)
+            throws Exception {
+        ClassLoader classLoader = handler.getClass().getClassLoader();
+        Class<?> controllerClass = Class.forName(
+                "com.android.wm.shell.dagger.MultiTaskingControllerImpl",
+                false, classLoader);
+        Method getInstance = multiTaskingControllerGetInstance;
+        if (getInstance == null
+                || getInstance.getDeclaringClass() != controllerClass) {
+            getInstance = controllerClass.getDeclaredMethod("getInstance");
+            getInstance.setAccessible(true);
+            multiTaskingControllerGetInstance = getInstance;
+        }
+        Object controller = getInstance.invoke(null);
+        Object repository = invokeAnyMethod(controller,
+                "getMultiTaskingTaskRepository", new Object[0]);
+        Object taskInfo = invokeAnyMethod(repository,
+                "getMiuiFreeformTaskInfo", new Object[]{Integer.valueOf(taskId)});
+        Object radiusValue = invokeAnyMethod(taskInfo,
+                "getCornerRadius", new Object[0]);
+        Object scaleValue = invokeAnyMethod(taskInfo,
+                "getFreeformScale", new Object[0]);
+        if (!(radiusValue instanceof Number) || !(scaleValue instanceof Number)) {
+            throw new IllegalStateException("freeform radius or scale unavailable");
+        }
+        float radius = ((Number) radiusValue).floatValue();
+        float scale = ((Number) scaleValue).floatValue();
+        float rootRadius = radius / scale;
+        if (!(radius > 0.0f) || !(scale > 0.0f) || !Float.isFinite(rootRadius)) {
+            throw new IllegalStateException("invalid freeform radius geometry"
+                    + ", radius=" + radius + ", scale=" + scale);
+        }
+        return rootRadius;
+    }
+
+    protected Object onCrossActivityColorRootApply(XposedInterface.Chain chain)
+            throws Throwable {
+        FreeformColorRootCandidate candidate = freeformColorRootCandidate.get();
+        if (candidate == null) {
+            return chain.proceed();
+        }
+        Object adoptedAnimation = null;
+        try {
+            Object animation = chain.getThisObject();
+            if (!matchesFreeformColorRootCandidate(candidate, animation)) {
+                freeformColorRootCandidate.compareAndSet(candidate, null);
+                log(Log.WARN, TAG,
+                        "Rejected stale freeform color-layer root candidate");
+            } else {
+                Object scrim = readFieldOrNull(animation, "scrimLayer");
+                Object backgroundOwner = readFieldOrNull(animation, "background");
+                Object background = readFieldOrNull(
+                        backgroundOwner, "mBackgroundSurface");
+                Object transaction = readFieldOrNull(animation, "transaction");
+                if (!(scrim instanceof SurfaceControl)
+                        || !((SurfaceControl) scrim).isValid()
+                        || !(background instanceof SurfaceControl)
+                        || !((SurfaceControl) background).isValid()
+                        || !(transaction instanceof SurfaceControl.Transaction)) {
+                    throw new IllegalStateException(
+                            "freeform color layers unavailable at first apply");
+                }
+                Object root = invokeAnyMethod(candidate.transitionInfo, "getRoot",
+                        new Object[]{Integer.valueOf(0)});
+                Object rootOffset = invokeAnyMethod(
+                        root, "getOffset", new Object[0]);
+                Object colorBounds = readFieldOrNull(
+                        candidate.closingTarget, "localBounds");
+                Object targetCrop = readFieldOrNull(animation, "cropRect");
+                if (!(rootOffset instanceof Point)
+                        || !(colorBounds instanceof Rect)
+                        || !(targetCrop instanceof Rect)
+                        || !Boolean.FALSE.equals(
+                        readFieldOrNull(animation, "isLetterboxed"))) {
+                    throw new IllegalStateException(
+                            "freeform color-layer crop geometry unavailable");
+                }
+                Rect rootLocalColorCrop = new Rect((Rect) colorBounds);
+                Point offset = (Point) rootOffset;
+                rootLocalColorCrop.offset(-offset.x, -offset.y);
+                if (!rootLocalColorCrop.equals(targetCrop)) {
+                    throw new IllegalStateException(
+                            "freeform color-layer crop does not match prepared root");
+                }
+                if (freeformColorRootCandidate.compareAndSet(candidate, null)) {
+                    SurfaceControl.Transaction surfaceTransaction =
+                            (SurfaceControl.Transaction) transaction;
+                    try (SurfaceControl.Transaction donor =
+                                 new SurfaceControl.Transaction()) {
+                        donor.setCrop(candidate.rootLeash, rootLocalColorCrop);
+                        invokeMethod(donor, "setCornerRadius",
+                                new Class<?>[]{SurfaceControl.class, float.class},
+                                new Object[]{candidate.rootLeash,
+                                        Float.valueOf(candidate.rootCornerRadius)});
+                        donor.reparent((SurfaceControl) background,
+                                candidate.rootLeash)
+                                .setCrop((SurfaceControl) background,
+                                        rootLocalColorCrop)
+                                .setAlpha((SurfaceControl) background, 0.0f)
+                                .setLayer((SurfaceControl) background, -1)
+                                .reparent((SurfaceControl) scrim,
+                                        candidate.rootLeash)
+                                .setCrop((SurfaceControl) scrim,
+                                        rootLocalColorCrop);
+                        invokeMethod(donor, "setRelativeLayer",
+                                new Class<?>[]{SurfaceControl.class,
+                                        SurfaceControl.class, int.class},
+                                new Object[]{scrim, candidate.closingLeash,
+                                        Integer.valueOf(-1)});
+                        surfaceTransaction.merge(donor);
+                    }
+                    adoptedAnimation = animation;
+                }
+            }
+        } catch (Throwable throwable) {
+            freeformColorRootCandidate.compareAndSet(candidate, null);
+            log(Log.WARN, TAG,
+                    "Failed freeform color-layer root adoption; using alpha fallback",
+                    throwable);
+        }
+        Object result = chain.proceed();
+        if (adoptedAnimation != null) {
+            freeformColorRootAnimation = adoptedAnimation;
+            log(Log.INFO, TAG,
+                    "Adopted freeform cross-activity color layers into prepared root"
+                            + ", backgroundAlpha=0.0"
+                            + ", rootCornerRadius=" + candidate.rootCornerRadius
+                            + ", taskId=" + readIntFieldOrDefault(
+                            candidate.closingTarget, "taskId", -1));
+        }
+        return result;
+    }
+
+    protected boolean matchesFreeformColorRootCandidate(
+            FreeformColorRootCandidate candidate, Object animation) throws Exception {
+        Object controller = readField(candidate.handler, "this$0");
+        Object navigationInfo = readField(controller, "mBackNavigationInfo");
+        Object navigationType = navigationInfo == null ? null
+                : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+        Object transitionType = invokeAnyMethod(
+                candidate.transitionInfo, "getType", new Object[0]);
+        if (readField(candidate.handler, "mPrepareOpenTransition")
+                != candidate.transitionToken
+                || readField(candidate.handler, "mOpenTransitionInfo")
+                != candidate.transitionInfo
+                || readField(controller, "mApps")
+                != candidate.appsIdentity
+                || !(navigationType instanceof Number)
+                || ((Number) navigationType).intValue() != TYPE_CROSS_ACTIVITY
+                || !(transitionType instanceof Number)
+                || ((Number) transitionType).intValue() != TRANSIT_PREDICTIVE_BACK) {
+            return false;
+        }
+        SurfaceControl rootLeash = resolveSingleTransitionRoot(
+                candidate.transitionInfo);
+        Object closingTarget = readFieldOrNull(animation, "closingTarget");
+        Object enteringTarget = readFieldOrNull(animation, "enteringTarget");
+        Object closingLeash = readFieldOrNull(closingTarget, "leash");
+        Object enteringLeash = readFieldOrNull(enteringTarget, "leash");
+        if (rootLeash != candidate.rootLeash
+                || closingTarget != candidate.closingTarget
+                || enteringTarget != candidate.enteringTarget
+                || closingLeash != candidate.closingLeash
+                || enteringLeash != candidate.enteringLeash
+                || !isExactFreeformCrossActivityPair(
+                closingTarget, enteringTarget)) {
+            return false;
+        }
+        return candidate.rootLeash.isValid()
+                && candidate.closingLeash.isValid()
+                && candidate.enteringLeash.isValid();
+    }
 
     protected Object onCrossActivitySlideStart(XposedInterface.Chain chain)
             throws Throwable {
@@ -1813,10 +2109,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Object animation = chain.getThisObject();
             miuixSlideCommitPoseCaptured = false;
             boolean slideEnabled = isHyperOsSlideAnimationEnabled();
-            try {
+            if (freeformColorRootAnimation != animation) {
                 suppressExactFreeformCrossActivityLayers(animation);
-            } catch (Throwable ignored) {
-                // Color-layer diagnostics must not disable the optional slide animation.
             }
             if (!slideEnabled) {
                 miuixSlideAnimActive = false;
@@ -1866,20 +2160,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Object closingTarget = readField(animation, "closingTarget");
             Object enteringTarget = readField(animation, "enteringTarget");
             int closingTaskId = readIntFieldOrDefault(closingTarget, "taskId", -1);
-            Object closingBounds = readFieldOrNull(closingTarget, "localBounds");
-            Object enteringBounds = readFieldOrNull(enteringTarget, "localBounds");
-            if (closingTarget == null || enteringTarget == null
-                    || closingTarget == enteringTarget
-                    || closingTaskId < 0
-                    || closingTaskId != readIntFieldOrDefault(
-                    enteringTarget, "taskId", -1)
-                    || resolveRemoteTargetWindowingMode(closingTarget)
-                    != WINDOWING_MODE_FREEFORM
-                    || resolveRemoteTargetWindowingMode(enteringTarget)
-                    != WINDOWING_MODE_FREEFORM
-                    || !(closingBounds instanceof Rect)
-                    || ((Rect) closingBounds).isEmpty()
-                    || !closingBounds.equals(enteringBounds)) {
+            if (!isExactFreeformCrossActivityPair(
+                    closingTarget, enteringTarget)) {
                 return;
             }
             Object scrim = readField(animation, "scrimLayer");
@@ -2129,12 +2411,18 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                     animation, "maxScrimAlpha", 1.0f) == 0.0f ? 0.0f
                                     : Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
         }
-        // The revealed lower stack is full-screen behind the sliding top page; only the
-        // top card is rounded. Native applyTransform rounds both, so clear the corner
-        // radius the native call just set on the entering leash.
+        Object transaction = readField(animation, "transaction");
+        // Fullscreen keeps the moving top card rounded. In freeform the prepared root is
+        // the fixed rounded frame, so both Activity surfaces are square internal pages.
+        if (freeformColorRootAnimation == animation
+                && closingLeash instanceof SurfaceControl
+                && ((SurfaceControl) closingLeash).isValid()) {
+            invokeMethod(transaction, "setCornerRadius",
+                    new Class<?>[]{SurfaceControl.class, float.class},
+                    new Object[]{closingLeash, Float.valueOf(0.0f)});
+        }
         if (enteringLeash instanceof SurfaceControl
                 && ((SurfaceControl) enteringLeash).isValid()) {
-            Object transaction = readField(animation, "transaction");
             invokeMethod(transaction, "setCornerRadius",
                     new Class<?>[]{SurfaceControl.class, float.class},
                     new Object[]{enteringLeash, Float.valueOf(0.0f)});
@@ -2204,7 +2492,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             .setId("systemui_back_prepare_reparent")
                             .intercept(this::correctPredictiveBackPrepareReparent));
                     log(Log.INFO, TAG,
-                            "Hooked Shell predictive return-home prepare role correction");
+                            "Hooked Shell predictive prepare ownership correction");
                     return;
                 }
             }
@@ -2244,11 +2532,87 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
     }
 
+    protected void captureFreeformColorRootCandidate(Object handler,
+                                                     Object transitionToken,
+                                                     Object info) throws Exception {
+        Object type = invokeAnyMethod(info, "getType", new Object[0]);
+        if (!(type instanceof Number)
+                || ((Number) type).intValue() != TRANSIT_PREDICTIVE_BACK
+                || readField(handler, "mPrepareOpenTransition") != transitionToken
+                || readField(handler, "mOpenTransitionInfo") != info) {
+            return;
+        }
+        Object controller = readField(handler, "this$0");
+        Object navigationInfo = readField(controller, "mBackNavigationInfo");
+        Object navigationType = navigationInfo == null ? null
+                : invokeAnyMethod(navigationInfo, "getType", new Object[0]);
+        Object apps = readField(controller, "mApps");
+        if (!(navigationType instanceof Number)
+                || ((Number) navigationType).intValue() != TYPE_CROSS_ACTIVITY
+                || apps == null || !apps.getClass().isArray()
+                || Array.getLength(apps) != 2) {
+            return;
+        }
+        Object closingTarget = null;
+        Object enteringTarget = null;
+        for (int index = 0; index < 2; index++) {
+            Object target = Array.get(apps, index);
+            int mode = readIntFieldOrDefault(target, "mode", -1);
+            if (mode == 0 && enteringTarget == null) {
+                enteringTarget = target;
+            } else if (mode == 1 && closingTarget == null) {
+                closingTarget = target;
+            } else {
+                return;
+            }
+        }
+        int taskId = readIntFieldOrDefault(closingTarget, "taskId", -1);
+        if (!isExactFreeformCrossActivityPair(
+                closingTarget, enteringTarget)) {
+            return;
+        }
+        Object closingLeash = readFieldOrNull(closingTarget, "leash");
+        Object enteringLeash = readFieldOrNull(enteringTarget, "leash");
+        if (!(closingLeash instanceof SurfaceControl)
+                || !(enteringLeash instanceof SurfaceControl)
+                || closingLeash == enteringLeash
+                || !((SurfaceControl) closingLeash).isValid()
+                || !((SurfaceControl) enteringLeash).isValid()) {
+            return;
+        }
+        SurfaceControl rootLeash = resolveSingleTransitionRoot(info);
+        if (rootLeash == null
+                || rootLeash == closingLeash || rootLeash == enteringLeash
+                || !rootLeash.isValid()) {
+            return;
+        }
+        float rootCornerRadius = resolveFreeformRootCornerRadius(handler, taskId);
+        freeformColorRootCandidate.set(new FreeformColorRootCandidate(
+                handler, transitionToken, info, apps,
+                closingTarget, enteringTarget, rootLeash,
+                (SurfaceControl) closingLeash, (SurfaceControl) enteringLeash,
+                rootCornerRadius));
+        log(Log.INFO, TAG,
+                "Armed freeform cross-activity color-layer root adoption"
+                        + ", taskId=" + taskId
+                        + ", rootCornerRadius=" + rootCornerRadius);
+    }
+
     protected Object correctPredictiveBackPrepareReparent(
             XposedInterface.Chain chain) throws Throwable {
+        freeformColorRootCandidate.set(null);
+        freeformColorRootAnimation = null;
         Object result = chain.proceed();
         if (!Boolean.TRUE.equals(result)) {
             return result;
+        }
+        try {
+            captureFreeformColorRootCandidate(
+                    chain.getThisObject(), chain.getArg(0), chain.getArg(1));
+        } catch (Throwable throwable) {
+            log(Log.WARN, TAG,
+                    "Failed to capture freeform color-layer root candidate",
+                    throwable);
         }
         try {
             Object handler = chain.getThisObject();

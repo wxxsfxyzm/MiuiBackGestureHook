@@ -68,6 +68,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 detachMiuiHomeReturnHome("hotReload", true);
         miuiHomePendingNativeGeometry.remove();
         returnHomeFinishTransferCandidate.remove();
+        freeformColorRootCandidate.set(null);
+        freeformColorRootAnimation = null;
         backCommitCompositionHookReady = false;
         backFinishOpenAtomicHookReady = false;
         backFinishOpenCallerDeoptimized = false;
@@ -328,17 +330,23 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             if (!oldHookIds.contains("systemui_back_prepare_reparent")) {
                 hookBackPrepareTransitionReparent(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains(
+                    "systemui_back_color_root_scrim_creation")) {
+                hookFreeformCrossActivityScrimCreation();
+            }
             if (!oldHookIds.contains("systemui_back_slide_start")
                     || !oldHookIds.contains("systemui_back_slide_progress")
                     || !oldHookIds.contains("systemui_back_slide_post_commit")
                     || !oldHookIds.contains("systemui_back_slide_duration")
-                    || !oldHookIds.contains("systemui_back_slide_finish")) {
+                    || !oldHookIds.contains("systemui_back_slide_finish")
+                    || !oldHookIds.contains("systemui_back_color_root_apply")) {
                 hookCrossActivitySlideAnimation(hotReloadClassLoader,
                         !oldHookIds.contains("systemui_back_slide_start"),
                         !oldHookIds.contains("systemui_back_slide_progress"),
                         !oldHookIds.contains("systemui_back_slide_post_commit"),
                         !oldHookIds.contains("systemui_back_slide_duration"),
-                        !oldHookIds.contains("systemui_back_slide_finish"));
+                        !oldHookIds.contains("systemui_back_slide_finish"),
+                        !oldHookIds.contains("systemui_back_color_root_apply"));
             }
             if (!oldHookIds.contains("systemui_cross_task_background")) {
                 hookCrossTaskBackground(hotReloadClassLoader);
@@ -631,6 +639,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::onCrossActivitySlideDuration;
             case "systemui_back_slide_finish":
                 return this::onCrossActivitySlideFinish;
+            case "systemui_back_color_root_apply":
+                return this::onCrossActivityColorRootApply;
+            case "systemui_back_color_root_scrim_creation":
+                return this::keepFreeformScrimHiddenUntilFirstApply;
             case "systemui_cross_task_background":
                 return this::tintCrossTaskBackground;
             case "systemui_back_prepare_reparent":
