@@ -57,7 +57,6 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         log(Log.INFO, TAG, "Hot reloading, build=" + BUILD_MARK
                 + ", process=" + processName
                 + ", hooks=" + hookHandles.size());
-        serverFreeformPrepareRoleHookReady = false;
         boolean savedMiuiOverviewVisible = miuiOverviewVisible;
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
@@ -174,9 +173,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 }
                 boolean freeformRoleNormalizer =
                         "server_freeform_prepare_role_normalization".equals(oldHookId);
-                boolean freeformRoleReflectionReady = !freeformRoleNormalizer
-                        || initializeFreeformPrepareRoleReflection(
-                        oldExecutableClassLoader);
+                if (freeformRoleNormalizer) {
+                    initializeFreeformPrepareRoleReflection(oldExecutableClassLoader);
+                }
                 XposedInterface.Hooker replacement = createHotReloadHooker(oldHandle.getId());
                 if (replacement != null) {
                     XposedInterface.HookHandle replacementHandle =
@@ -201,9 +200,6 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                             && oldHandle.getExecutable() instanceof java.lang.reflect.Method) {
                         preparePreparedBackStartAnimationInvoker(
                                 (java.lang.reflect.Method) oldHandle.getExecutable());
-                    } else if (freeformRoleNormalizer) {
-                        serverFreeformPrepareRoleHookReady =
-                                freeformRoleReflectionReady;
                     }
                     replaced++;
                 } else {

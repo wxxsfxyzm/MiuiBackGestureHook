@@ -37,7 +37,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             SERVER_TRANSITION_INFO_BACK_TOP | FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK;
     protected static final int SERVER_FREEFORM_PREPARED_OPENING_FLAGS =
             FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK | FLAG_IS_OCCLUDED;
-    protected volatile boolean serverFreeformPrepareRoleHookReady;
     protected volatile Field serverTransitionChangeInfoFlagsField;
     protected volatile Method serverTransitionInfoChangeSetModeMethod;
 
@@ -500,7 +499,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected void hookFreeformCrossActivityPrepareRole(ClassLoader classLoader) {
-        serverFreeformPrepareRoleHookReady = false;
         serverTransitionChangeInfoFlagsField = null;
         serverTransitionInfoChangeSetModeMethod = null;
         try {
@@ -522,7 +520,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     recordHookHandle(hook(method)
                             .setId("server_freeform_prepare_role_normalization")
                             .intercept(this::normalizeFreeformCrossActivityTransitionInfo));
-                    serverFreeformPrepareRoleHookReady = true;
                     log(Log.INFO, TAG,
                             "Hooked server cross-activity predictive-back prepare role"
                                     + " normalization");
@@ -532,7 +529,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             log(Log.WARN, TAG,
                     "Transition.calculateTransitionInfo five-argument overload not found");
         } catch (Throwable throwable) {
-            serverFreeformPrepareRoleHookReady = false;
             serverTransitionChangeInfoFlagsField = null;
             serverTransitionInfoChangeSetModeMethod = null;
             log(Log.ERROR, TAG,
@@ -595,10 +591,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 }
             }
         } catch (Throwable throwable) {
-            serverFreeformPrepareRoleHookReady = false;
             log(Log.WARN, TAG,
                     "Failed to inspect server cross-activity prepared targets;"
-                            + " disabling native cross-activity prepare",
+                            + " preserving the platform transition",
                     throwable);
         }
         Object result = chain.proceed();
@@ -698,10 +693,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                             + ", closingLeashLayer=" + closingLayer
                             + ", flags=0x" + Integer.toHexString(normalizedFlags));
         } catch (Throwable throwable) {
-            serverFreeformPrepareRoleHookReady = false;
             log(Log.ERROR, TAG,
                     "Server cross-activity prepare-role normalization failed;"
-                            + " disabling native cross-activity prepare",
+                            + " preserving the platform transition",
                     throwable);
         }
         return result;
@@ -957,8 +951,15 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         boolean returnToHome = Boolean.TRUE.equals(launchBehind);
         boolean unify = readWindowFlag("unifyBackNavigationTransition", loader, false);
         if (unify && launchBehindKnown && !returnToHome) {
-            if (serverFreeformPrepareRoleHookReady
-                    && isExactFreeformCrossActivityPrepare(chain, builder)) {
+            boolean exactCrossActivity;
+            try {
+                exactCrossActivity = isExactFreeformCrossActivityPrepare(chain, builder);
+            } catch (Throwable throwable) {
+                log(Log.WARN, TAG, "Failed to inspect cross-activity prepare;"
+                        + " preserving the platform transition", throwable);
+                return chain.proceed();
+            }
+            if (exactCrossActivity) {
                 Object close = chain.getArg(1);
                 Object[] open = (Object[]) chain.getArg(2);
                 log(Log.INFO, TAG, "Allowing native unified prepare for exact"
@@ -974,8 +975,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     + ", unifyBackNavigationTransition=true"
                     + ", returnToHome=false"
                     + ", launchBehind=" + launchBehind
-                    + ", crossActivityRoleNormalizerReady="
-                    + serverFreeformPrepareRoleHookReady
                     + ", builder=" + shortObject(builder));
             return null;
         }
@@ -998,70 +997,64 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected boolean isExactFreeformCrossActivityPrepare(
-            XposedInterface.Chain chain, Object builder) {
-        try {
-            Object visibleArg = chain.getArg(0);
-            Object close = chain.getArg(1);
-            Object openArg = chain.getArg(2);
-            if (!(visibleArg instanceof Object[]) || !(openArg instanceof Object[])) {
-                return false;
-            }
-            Object[] visibleOpen = (Object[]) visibleArg;
-            Object[] promotedOpen = (Object[]) openArg;
-            if (visibleOpen.length != 1 || promotedOpen.length != 1
-                    || close == null || promotedOpen[0] == null) {
-                return false;
-            }
-            Object closeActivity = invokeAnyMethod(
-                    close, "asActivityRecord", new Object[0]);
-            Object openActivity = invokeAnyMethod(
-                    promotedOpen[0], "asActivityRecord", new Object[0]);
-            if (closeActivity == null || openActivity == null
-                    || close != closeActivity
-                    || promotedOpen[0] != openActivity
-                    || closeActivity == openActivity
-                    || visibleOpen[0] != openActivity
-                    || readField(builder, "mCloseTarget") != close) {
-                return false;
-            }
-            Object closeTask = invokeAnyMethod(
-                    closeActivity, "getTask", new Object[0]);
-            Object openTask = invokeAnyMethod(
-                    openActivity, "getTask", new Object[0]);
-            Object activityType = closeTask == null ? null : invokeAnyMethod(
-                    closeTask, "getActivityType", new Object[0]);
-            Object closeMode = invokeAnyMethod(
-                    closeActivity, "getWindowingMode", new Object[0]);
-            Object openMode = invokeAnyMethod(
-                    openActivity, "getWindowingMode", new Object[0]);
-            Object closeBounds = invokeAnyMethod(
-                    closeActivity, "getBounds", new Object[0]);
-            Object openBounds = invokeAnyMethod(
-                    openActivity, "getBounds", new Object[0]);
-            return closeTask != null
-                    && closeTask == openTask
-                    && activityType instanceof Number
-                    && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
-                    && closeMode instanceof Number
-                    && openMode instanceof Number
-                    && ((Number) closeMode).intValue()
-                    == ((Number) openMode).intValue()
-                    && (((Number) closeMode).intValue() == WINDOWING_MODE_FREEFORM
-                    || ((Number) closeMode).intValue() == WINDOWING_MODE_FULLSCREEN)
-                    && closeBounds instanceof Rect
-                    && !((Rect) closeBounds).isEmpty()
-                    && closeBounds.equals(openBounds)
-                    && Boolean.TRUE.equals(invokeAnyMethod(
-                    closeActivity, "isVisibleRequested", new Object[0]))
-                    && Boolean.FALSE.equals(invokeAnyMethod(
-                    openActivity, "isVisibleRequested", new Object[0]))
-                    && Boolean.FALSE.equals(readField(
-                    openActivity, "mLaunchTaskBehind"));
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to inspect cross-activity prepare;"
-                    + " preserving compatibility skip", throwable);
+            XposedInterface.Chain chain, Object builder) throws Exception {
+        Object visibleArg = chain.getArg(0);
+        Object close = chain.getArg(1);
+        Object openArg = chain.getArg(2);
+        if (!(visibleArg instanceof Object[]) || !(openArg instanceof Object[])) {
             return false;
         }
+        Object[] visibleOpen = (Object[]) visibleArg;
+        Object[] promotedOpen = (Object[]) openArg;
+        if (visibleOpen.length != 1 || promotedOpen.length != 1
+                || close == null || promotedOpen[0] == null) {
+            return false;
+        }
+        Object closeActivity = invokeAnyMethod(
+                close, "asActivityRecord", new Object[0]);
+        Object openActivity = invokeAnyMethod(
+                promotedOpen[0], "asActivityRecord", new Object[0]);
+        if (closeActivity == null || openActivity == null
+                || close != closeActivity
+                || promotedOpen[0] != openActivity
+                || closeActivity == openActivity
+                || visibleOpen[0] != openActivity
+                || readField(builder, "mCloseTarget") != close) {
+            return false;
+        }
+        Object closeTask = invokeAnyMethod(
+                closeActivity, "getTask", new Object[0]);
+        Object openTask = invokeAnyMethod(
+                openActivity, "getTask", new Object[0]);
+        Object activityType = closeTask == null ? null : invokeAnyMethod(
+                closeTask, "getActivityType", new Object[0]);
+        Object closeMode = invokeAnyMethod(
+                closeActivity, "getWindowingMode", new Object[0]);
+        Object openMode = invokeAnyMethod(
+                openActivity, "getWindowingMode", new Object[0]);
+        Object closeBounds = invokeAnyMethod(
+                closeActivity, "getBounds", new Object[0]);
+        Object openBounds = invokeAnyMethod(
+                openActivity, "getBounds", new Object[0]);
+        return closeTask != null
+                && closeTask == openTask
+                && activityType instanceof Number
+                && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
+                && closeMode instanceof Number
+                && openMode instanceof Number
+                && ((Number) closeMode).intValue()
+                == ((Number) openMode).intValue()
+                && (((Number) closeMode).intValue() == WINDOWING_MODE_FREEFORM
+                || ((Number) closeMode).intValue() == WINDOWING_MODE_FULLSCREEN)
+                && closeBounds instanceof Rect
+                && !((Rect) closeBounds).isEmpty()
+                && closeBounds.equals(openBounds)
+                && Boolean.TRUE.equals(invokeAnyMethod(
+                closeActivity, "isVisibleRequested", new Object[0]))
+                && Boolean.FALSE.equals(invokeAnyMethod(
+                openActivity, "isVisibleRequested", new Object[0]))
+                && Boolean.FALSE.equals(readField(
+                openActivity, "mLaunchTaskBehind"));
     }
 
     protected Object interceptPromoteToTaskFragmentIfNeeded(XposedInterface.Chain chain)

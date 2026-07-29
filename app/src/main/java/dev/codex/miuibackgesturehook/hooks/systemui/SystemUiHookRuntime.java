@@ -1579,7 +1579,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         final SurfaceControl.Transaction finishTransaction;
         final Object finishCallback;
         final int transitionDebugId;
-        final long heldNanos;
         final AtomicBoolean stockResumeAttempted = new AtomicBoolean();
 
         PreparedBackTransitionHold(
@@ -1604,7 +1603,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             this.finishTransaction = finishTransaction;
             this.finishCallback = finishCallback;
             this.transitionDebugId = readTransitionDebugId(transitionInfo);
-            this.heldNanos = SystemClock.elapsedRealtimeNanos();
         }
     }
 
@@ -1904,8 +1902,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     || ((Number) type).intValue() != TRANSIT_PREDICTIVE_BACK) {
                 return chain.proceed();
             }
-            if (!(chain.getExecutable() instanceof Method)
-                    || !(chain.getArg(2) instanceof SurfaceControl.Transaction)
+            if (!(chain.getArg(2) instanceof SurfaceControl.Transaction)
                     || !(chain.getArg(3) instanceof SurfaceControl.Transaction)
                     || chain.getArg(0) == null || chain.getArg(4) == null) {
                 return chain.proceed();
@@ -2090,9 +2087,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + ", transitionId=" + hold.transitionDebugId
                             + ", shellSessionId=" + hold.session.id
                             + ", event=" + event
-                            + ", waitUs="
-                            + (SystemClock.elapsedRealtimeNanos()
-                            - hold.heldNanos) / 1_000L
                             + ", apps=" + shortObject(controllerApps));
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
@@ -2655,7 +2649,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         } catch (Throwable throwable) {
             freeformColorRootCandidate.compareAndSet(candidate, null);
             log(Log.WARN, TAG,
-                    "Failed freeform color-layer root adoption; using alpha fallback",
+                    "Failed freeform color-layer root adoption; leaving native layers",
                     throwable);
         }
         Object result = chain.proceed();
@@ -2718,9 +2712,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Object animation = chain.getThisObject();
             miuixSlideCommitPoseCaptured = false;
             boolean slideEnabled = isHyperOsSlideAnimationEnabled();
-            if (freeformColorRootAnimation != animation) {
-                suppressExactFreeformCrossActivityLayers(animation);
-            }
             if (!slideEnabled) {
                 miuixSlideAnimActive = false;
                 return result;
@@ -2762,47 +2753,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             log(Log.WARN, TAG, "Failed to arm miuix slide geometry", throwable);
         }
         return result;
-    }
-
-    protected void suppressExactFreeformCrossActivityLayers(Object animation) {
-        try {
-            Object closingTarget = readField(animation, "closingTarget");
-            Object enteringTarget = readField(animation, "enteringTarget");
-            int closingTaskId = readIntFieldOrDefault(closingTarget, "taskId", -1);
-            if (!isExactFreeformCrossActivityPair(
-                    closingTarget, enteringTarget)) {
-                return;
-            }
-            Object scrim = readField(animation, "scrimLayer");
-            Object transaction = readField(animation, "transaction");
-            if (!(scrim instanceof SurfaceControl)
-                    || !((SurfaceControl) scrim).isValid()
-                    || !(transaction instanceof SurfaceControl.Transaction)) {
-                return;
-            }
-            float previousAlpha = readFloatFieldOrDefault(
-                    animation, "maxScrimAlpha", -1.0f);
-            Object backgroundSurface = readFieldOrNull(
-                    readFieldOrNull(animation, "background"), "mBackgroundSurface");
-            writeField(animation, "maxScrimAlpha", Float.valueOf(0.0f));
-            SurfaceControl.Transaction surfaceTransaction =
-                    (SurfaceControl.Transaction) transaction;
-            surfaceTransaction.setAlpha((SurfaceControl) scrim, 0.0f);
-            boolean backgroundSuppressed = backgroundSurface instanceof SurfaceControl
-                    && ((SurfaceControl) backgroundSurface).isValid();
-            if (backgroundSuppressed) {
-                surfaceTransaction.setAlpha((SurfaceControl) backgroundSurface, 0.0f);
-            }
-            surfaceTransaction.apply();
-            log(Log.INFO, TAG, "Suppressed exact freeform cross-activity color layers"
-                    + ", taskId=" + closingTaskId
-                    + ", maxScrimAlpha=" + previousAlpha + "->0.0"
-                    + ", backgroundSuppressed=" + backgroundSuppressed);
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG,
-                    "Failed to suppress exact freeform cross-activity color layers",
-                    throwable);
-        }
     }
 
     /**
@@ -3016,9 +2966,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         if (scrim instanceof SurfaceControl && ((SurfaceControl) scrim).isValid()) {
             ((SurfaceControl.Transaction) readField(animation, "transaction"))
                     .setAlpha((SurfaceControl) scrim,
-                            readFloatFieldOrDefault(
-                                    animation, "maxScrimAlpha", 1.0f) == 0.0f ? 0.0f
-                                    : Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
+                            Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
         }
         Object transaction = readField(animation, "transaction");
         // Fullscreen keeps the moving top card rounded. In freeform the prepared root is

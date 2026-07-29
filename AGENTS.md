@@ -316,9 +316,9 @@ Remote-animation rules:
   matching the animation crop. Keep the scrim hidden until the first apply, then merge the root
   crop/radius and both layer reparents into the animation's pending transaction. Keep the scrim
   immediately below the closing leash, preserve its native dim, and set only the redundant
-  background alpha to zero. If exact adoption is unavailable at animation start, the legacy alpha
-  fallback may suppress both layers. Native finish still owns cleanup; preserve fullscreen and
-  every other target shape.
+  background alpha to zero. If exact capture, adoption, or reflection fails, discard the candidate
+  and leave the native layers unchanged; never fall back to suppressing their alpha. Native finish
+  still owns cleanup; preserve fullscreen and every other target shape.
 - Keep SystemUI's native `BackPanelController` as the sole indicator state owner: it
   receives every claimed event and owns thresholds, release state, and haptics. The
   optional HyperOS-style skin (`hyperos_indicator_style` remote preference, default off)
@@ -447,16 +447,19 @@ System-server compatibility rules:
   original `setLaunchBehind()` path; do not blanket-skip transition preparation. Never skip
   the unified `TYPE_RETURN_TO_HOME` prepare path; if `mIsLaunchBehind` or the relevant flag
   cannot be proven, preserve the original platform method.
-- In unified mode, preserve the native prepared transition for the exact single-Task freeform
-  cross-Activity shape only when both endpoints are distinct ActivityRecords in the same standard
-  Task and the opening Activity is still hidden. Xiaomi reports both prepared changes as
+- In unified mode, preserve the native prepared transition for the exact single-Task freeform or
+  fullscreen cross-Activity shape only when both endpoints are distinct ActivityRecords in the same
+  standard Task and the opening Activity is still hidden. Xiaomi reports both prepared changes as
   `TO_FRONT`; after WMS builds that exact prepared `TransitionInfo` and before it is dispatched to
   Shell, set only the already-visible departing Activity's final mode to AOSP `CHANGE`. Preserve
   both changes' flags, including the platform and Xiaomi predictive-back flags, and let the stock
   Shell handler perform the resulting closing/opening leash reparent in its original transaction.
-  Keep the occluded opening Activity, runner targets, and all other state and shapes untouched; do
-  not allow the native prepare unless the same-process normalizer hook is ready, and clear that
-  readiness before hot reload.
+  Keep the occluded opening Activity, runner targets, and all other state and shapes untouched.
+  Do not gate the exact native prepare on a module-owned readiness bit: if exact-shape inspection
+  is uncertain or the normalizer is unavailable or fails, preserve the platform prepare instead
+  of reviving the old skip fallback. Known non-exact unified non-home shapes retain the existing
+  compatibility skip. Preserve the normalizer hook's replacement, presence, and backfill lifecycle
+  across hot reload without maintaining separate readiness state.
 - Navigation-done cleanup may call `clearBackAnimations(false)` only after a committed
   navigation when the handler is still composed and both prepared-open and prepared-close
   transition fields are null. Leave normal transition-owned cleanup untouched.
