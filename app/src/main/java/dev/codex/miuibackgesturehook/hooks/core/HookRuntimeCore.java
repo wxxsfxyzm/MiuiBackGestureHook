@@ -83,7 +83,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected static final String TAG = "MiuiBackGestureHook";
     protected static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.2-r89-freeform-scrim-atomic-show";
+            "systemui-aosp-back-0.7.2-r92-prepared-focused-task-owner";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =

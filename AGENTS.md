@@ -250,6 +250,14 @@ Remote-animation rules:
 - For prepared remote animations, mark the tracker finished and call or wait for
   `startPostCommitAnimation()` so the runner receives cancel/invoke before navigation
   cleanup. Do not finish an active prepared animation directly from the overlay.
+- When an exact current freeform cross-activity prepared transition reaches
+  `BackTransitionHandler.startAnimation(...)` before its remote targets, defer only that original
+  invocation on the Shell owner. Prove the focused task through `BackNavigationInfo` and
+  `ShellTaskOrganizer`, require one matching prepared root and exactly two taskless Activity
+  changes with the expected roles, flags, bounds, display, and immutable gesture-session owner.
+  Resume the stock handler only after the same adapter publishes matching targets/callback, or
+  through the exact terminal cleanup path if navigation ends first. Any ambiguity or reflection
+  failure proceeds through the stock call; do not poll, delay by timeout, or retain a stale hold.
 - Run the complete release transaction on the Shell executor: synchronize the requested
   trigger, read the active tracker's actual trigger, update focused-task/tracker state,
   inspect the runner, and finish or enter post-commit there. The SystemUI input Looper must
