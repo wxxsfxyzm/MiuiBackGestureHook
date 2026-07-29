@@ -221,11 +221,6 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             ClassLoader serverClassLoader = findSystemServerClassLoader(
                     preferredServerClassLoader);
             if (serverClassLoader != null) {
-                if (!oldHookIds.contains(
-                        "server_back_promote_to_tf_if_needed")) {
-                    hookTaskFragmentPromotionCompatibility(
-                            serverClassLoader);
-                }
                 if (!oldHookIds.contains("server_back_window_start_animation")) {
                     hookBackWindowStartAnimation(serverClassLoader);
                 }
@@ -644,8 +639,6 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::observeMiuiHomeReturnHomeWallpaperSet;
             case "miui_home_return_home_wallpaper_anim":
                 return this::observeMiuiHomeReturnHomeWallpaperAnim;
-            case "server_back_promote_to_tf_if_needed":
-                return this::interceptPromoteToTaskFragmentIfNeeded;
             case "server_back_window_start_animation":
                 return this::prepareOpeningTaskFragment;
             case "server_freeform_prepare_role_normalization":
@@ -706,6 +699,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             case "shell_back_finishBackAnimation":
                 return this::onShellAnimationFinished;
             case "systemui_navigation_bar_view_insets":
+            case "server_back_promote_to_tf_if_needed":
             case "systemui_navigation_bar_window_state":
             case "systemui_navigation_bar_abort_transient":
             case "systemui_navigation_bar_auto_hide":

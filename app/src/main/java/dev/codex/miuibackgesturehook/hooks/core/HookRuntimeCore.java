@@ -83,7 +83,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected static final String TAG = "MiuiBackGestureHook";
     protected static final String BUILD_MARK =
-            "systemui-aosp-back-0.7.2-r93-remove-fallbacks";
+            "systemui-aosp-back-0.7.2-r96-taskfragment-role";
     protected static final String SYSTEM_UI = "com.android.systemui";
     protected static final String MIUI_HOME = "com.miui.home";
     protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
@@ -226,8 +226,6 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.android.wm.shell.common.transition.DefaultTransitionImpl";
     protected static final String BACK_NAVIGATION_CONTROLLER =
             "com.android.server.wm.BackNavigationController";
-    protected static final String BACK_ANIMATION_HANDLER =
-            "com.android.server.wm.BackNavigationController$AnimationHandler";
     protected static final String BACK_WINDOW_ANIMATION_ADAPTOR =
             "com.android.server.wm.BackNavigationController$AnimationHandler$BackWindowAnimationAdaptor";
     protected static final String SCHEDULE_ANIMATION_BUILDER =

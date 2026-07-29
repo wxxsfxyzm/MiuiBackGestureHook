@@ -438,6 +438,12 @@ Return-to-home rules:
 
 System-server compatibility rules:
 
+- Preserve `AnimationHandler.promoteToTFIfNeeded(...)` for every native Activity switch. Distinct
+  embedded TaskFragments must remain promoted before both prepared-transition construction and
+  remote-adaptor creation; the same embedded TaskFragment keeps the native Activity targets. Do
+  not gate promotion on the obsolete migrate flag. Keep the retired
+  `server_back_promote_to_tf_if_needed` hook neutralized across hot reload, but do not normally
+  install or backfill it.
 - Resolve window flags from `com.android.window.flags.Flags` first, Xiaomi's relocated
   `com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags` second,
   and `android.window.flags.Flags` only as the legacy fallback. Unreadable migrate/unify
@@ -448,10 +454,14 @@ System-server compatibility rules:
   the unified `TYPE_RETURN_TO_HOME` prepare path; if `mIsLaunchBehind` or the relevant flag
   cannot be proven, preserve the original platform method.
 - In unified mode, preserve the native prepared transition for the exact single-Task freeform or
-  fullscreen cross-Activity shape only when both endpoints are distinct ActivityRecords in the same
-  standard Task and the opening Activity is still hidden. Xiaomi reports both prepared changes as
-  `TO_FRONT`; after WMS builds that exact prepared `TransitionInfo` and before it is dispatched to
-  Shell, set only the already-visible departing Activity's final mode to AOSP `CHANGE`. Preserve
+  fullscreen cross-Activity shape only when the two distinct ActivityRecords are in the same
+  standard Task, the opening Activity is still hidden, and the supplied containers exactly match
+  `promoteToTFIfNeeded(...)` (the ActivityRecords themselves or their native embedded-TaskFragment
+  promotion). Xiaomi reports both prepared changes as `TO_FRONT`; after WMS builds that exact
+  prepared `TransitionInfo` and before it is dispatched to Shell, set only the already-visible
+  departing Activity or embedded TaskFragment's final mode to AOSP `CHANGE`. Preserve
+  `FLAG_CHANGE_YES_ANIMATION` only when target calculation adds it to the promoted opening
+  TaskFragment; do not broadly mask other internal `ChangeInfo` flags. Preserve
   both changes' flags, including the platform and Xiaomi predictive-back flags, and let the stock
   Shell handler perform the resulting closing/opening leash reparent in its original transaction.
   Keep the occluded opening Activity, runner targets, and all other state and shapes untouched.

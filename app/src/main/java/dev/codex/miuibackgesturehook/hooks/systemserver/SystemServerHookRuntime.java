@@ -12,7 +12,6 @@ import android.os.Handler;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
-import android.util.Pair;
 import android.view.SurfaceControl;
 
 import java.lang.reflect.Field;
@@ -31,6 +30,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
 
     protected static final int SERVER_CHANGE_INFO_BACK_TOP = 128;
     protected static final int SERVER_CHANGE_INFO_BACK_BELOW = 256;
+    protected static final int SERVER_CHANGE_INFO_CHANGE_YES_ANIMATION = 16;
     protected static final int SERVER_ANIMATION_TYPE_PREDICTIVE_BACK = 256;
     protected static final int SERVER_TRANSITION_INFO_BACK_TOP = 0x08000000;
     protected static final int SERVER_FREEFORM_PREPARED_CLOSING_FLAGS =
@@ -48,7 +48,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         + BACK_NAVIGATION_CONTROLLER);
                 return;
             }
-            hookTaskFragmentPromotionCompatibility(serverClassLoader);
             hookBackNavigationDoneCleanup(serverClassLoader);
             hookPredictiveBackOptInMetadata(serverClassLoader);
             hookSecuritySidebarTransientBars(serverClassLoader);
@@ -372,32 +371,6 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         return null;
     }
 
-    protected void hookTaskFragmentPromotionCompatibility(ClassLoader classLoader) {
-        try {
-            Class.forName(BACK_NAVIGATION_CONTROLLER, false, classLoader);
-            Class<?> handlerClass = Class.forName(BACK_ANIMATION_HANDLER, false, classLoader);
-            Method promote = null;
-            for (Method method : handlerClass.getDeclaredMethods()) {
-                if ("promoteToTFIfNeeded".equals(method.getName())
-                        && method.getParameterCount() == 2) {
-                    promote = method;
-                    break;
-                }
-            }
-            if (promote == null) {
-                log(Log.WARN, TAG, "BackNavigationController promoteToTFIfNeeded not found");
-                return;
-            }
-            promote.setAccessible(true);
-            recordHookHandle(hook(promote)
-                    .setId("server_back_promote_to_tf_if_needed")
-                    .intercept(this::interceptPromoteToTaskFragmentIfNeeded));
-            log(Log.INFO, TAG, "Hooked BackNavigationController promoteToTFIfNeeded");
-        } catch (Throwable throwable) {
-            log(Log.ERROR, TAG, "Failed to hook TaskFragment promotion compatibility", throwable);
-        }
-    }
-
     protected void hookBackNavigationDoneCleanup(ClassLoader classLoader) {
         try {
             Class<?> controllerClass = Class.forName(BACK_NAVIGATION_CONTROLLER, false,
@@ -709,51 +682,60 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         }
         Object closingInfo = null;
         Object openingInfo = null;
-        Object closingActivity = null;
-        Object openingActivity = null;
+        Object closingContainer = null;
+        Object openingContainer = null;
         for (Object changeInfo : (List<?>) targetsObject) {
             Object container = readField(changeInfo, "mContainer");
             Object activity = container == null ? null : invokeAnyMethod(
                     container, "asActivityRecord", new Object[0]);
-            int flags = flagsField.getInt(changeInfo);
-            if (activity == null) {
-                return null;
+            boolean embeddedTaskFragment = activity != container;
+            if (embeddedTaskFragment) {
+                Object taskFragment = container == null ? null : invokeAnyMethod(
+                        container, "asTaskFragment", new Object[0]);
+                if (activity != null || taskFragment != container
+                        || !Boolean.TRUE.equals(invokeAnyMethod(
+                        taskFragment, "isEmbedded", new Object[0]))) {
+                    return null;
+                }
             }
+            int flags = flagsField.getInt(changeInfo);
             if (flags == SERVER_CHANGE_INFO_BACK_TOP && closingInfo == null) {
                 closingInfo = changeInfo;
-                closingActivity = activity;
-            } else if (flags == SERVER_CHANGE_INFO_BACK_BELOW
+                closingContainer = container;
+            } else if (flags == (SERVER_CHANGE_INFO_BACK_BELOW
+                    | (embeddedTaskFragment
+                    ? SERVER_CHANGE_INFO_CHANGE_YES_ANIMATION : 0))
                     && openingInfo == null) {
                 openingInfo = changeInfo;
-                openingActivity = activity;
+                openingContainer = container;
             } else {
                 return null;
             }
         }
-        if (closingActivity == null || openingActivity == null
-                || closingActivity == openingActivity
+        if (closingContainer == null || openingContainer == null
+                || closingContainer == openingContainer
                 || !Boolean.TRUE.equals(readField(closingInfo, "mVisible"))
                 || !Boolean.FALSE.equals(readField(openingInfo, "mVisible"))
                 || !Boolean.TRUE.equals(invokeAnyMethod(
-                closingActivity, "isVisibleRequested", new Object[0]))
+                closingContainer, "isVisibleRequested", new Object[0]))
                 || !Boolean.TRUE.equals(invokeAnyMethod(
-                openingActivity, "isVisibleRequested", new Object[0]))) {
+                openingContainer, "isVisibleRequested", new Object[0]))) {
             return null;
         }
         Object closingTask = invokeAnyMethod(
-                closingActivity, "getTask", new Object[0]);
+                closingContainer, "getTask", new Object[0]);
         Object openingTask = invokeAnyMethod(
-                openingActivity, "getTask", new Object[0]);
+                openingContainer, "getTask", new Object[0]);
         Object activityType = closingTask == null ? null : invokeAnyMethod(
                 closingTask, "getActivityType", new Object[0]);
         Object closingMode = invokeAnyMethod(
-                closingActivity, "getWindowingMode", new Object[0]);
+                closingContainer, "getWindowingMode", new Object[0]);
         Object openingMode = invokeAnyMethod(
-                openingActivity, "getWindowingMode", new Object[0]);
+                openingContainer, "getWindowingMode", new Object[0]);
         Object closingBounds = invokeAnyMethod(
-                closingActivity, "getBounds", new Object[0]);
+                closingContainer, "getBounds", new Object[0]);
         Object openingBounds = invokeAnyMethod(
-                openingActivity, "getBounds", new Object[0]);
+                openingContainer, "getBounds", new Object[0]);
         return closingTask != null
                 && closingTask == openingTask
                 && activityType instanceof Number
@@ -1010,16 +992,34 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 || close == null || promotedOpen[0] == null) {
             return false;
         }
-        Object closeActivity = invokeAnyMethod(
-                close, "asActivityRecord", new Object[0]);
-        Object openActivity = invokeAnyMethod(
-                promotedOpen[0], "asActivityRecord", new Object[0]);
+        Object closeActivity = readField(builder, "mCloseTarget");
+        Object openActivity = visibleOpen[0];
         if (closeActivity == null || openActivity == null
-                || close != closeActivity
-                || promotedOpen[0] != openActivity
-                || closeActivity == openActivity
-                || visibleOpen[0] != openActivity
-                || readField(builder, "mCloseTarget") != close) {
+                || invokeAnyMethod(closeActivity,
+                "asActivityRecord", new Object[0]) != closeActivity
+                || invokeAnyMethod(openActivity,
+                "asActivityRecord", new Object[0]) != openActivity
+                || closeActivity == openActivity) {
+            return false;
+        }
+        Object closeTaskFragment = invokeAnyMethod(
+                closeActivity, "getTaskFragment", new Object[0]);
+        Object openTaskFragment = invokeAnyMethod(
+                openActivity, "getTaskFragment", new Object[0]);
+        if (closeTaskFragment != null && !Boolean.TRUE.equals(invokeAnyMethod(
+                closeTaskFragment, "isEmbedded", new Object[0]))) {
+            closeTaskFragment = null;
+        }
+        if (openTaskFragment != null && !Boolean.TRUE.equals(invokeAnyMethod(
+                openTaskFragment, "isEmbedded", new Object[0]))) {
+            openTaskFragment = null;
+        }
+        boolean promoted = closeTaskFragment != openTaskFragment;
+        Object expectedClose = promoted && closeTaskFragment != null
+                ? closeTaskFragment : closeActivity;
+        Object expectedOpen = promoted && openTaskFragment != null
+                ? openTaskFragment : openActivity;
+        if (close != expectedClose || promotedOpen[0] != expectedOpen) {
             return false;
         }
         Object closeTask = invokeAnyMethod(
@@ -1057,19 +1057,4 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 openActivity, "mLaunchTaskBehind"));
     }
 
-    protected Object interceptPromoteToTaskFragmentIfNeeded(XposedInterface.Chain chain)
-            throws Throwable {
-        Object close = chain.getArg(0);
-        Object open = chain.getArg(1);
-        boolean migrate = readWindowFlag("migratePredictiveBackTransition",
-                chain.getExecutable().getDeclaringClass().getClassLoader(), false);
-        if (!migrate) {
-            Pair<Object, Object> result = new Pair<>(close, open);
-            log(Log.INFO, TAG, "Bypassed TaskFragment promotion for predictive back"
-                    + ", close=" + shortObject(close)
-                    + ", open=" + shortObject(open));
-            return result;
-        }
-        return chain.proceed();
-    }
 }
