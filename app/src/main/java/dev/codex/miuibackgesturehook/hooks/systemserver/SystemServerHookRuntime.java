@@ -31,6 +31,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
 
     protected static final int SERVER_CHANGE_INFO_BACK_TOP = 128;
     protected static final int SERVER_CHANGE_INFO_BACK_BELOW = 256;
+    protected static final int SERVER_ANIMATION_TYPE_PREDICTIVE_BACK = 256;
     protected static final int SERVER_TRANSITION_INFO_BACK_TOP = 0x08000000;
     protected static final int SERVER_FREEFORM_PREPARED_CLOSING_FLAGS =
             SERVER_TRANSITION_INFO_BACK_TOP | FLAG_BACK_GESTURE_ANIMATED | FLAG_FILLS_TASK;
@@ -523,7 +524,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                             .intercept(this::normalizeFreeformCrossActivityTransitionInfo));
                     serverFreeformPrepareRoleHookReady = true;
                     log(Log.INFO, TAG,
-                            "Hooked server freeform predictive-back prepare role"
+                            "Hooked server cross-activity predictive-back prepare role"
                                     + " normalization");
                     return;
                 }
@@ -535,7 +536,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             serverTransitionChangeInfoFlagsField = null;
             serverTransitionInfoChangeSetModeMethod = null;
             log(Log.ERROR, TAG,
-                    "Failed to hook server freeform predictive-back prepare role",
+                    "Failed to hook server cross-activity predictive-back prepare role",
                     throwable);
         }
     }
@@ -569,7 +570,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             serverTransitionChangeInfoFlagsField = null;
             serverTransitionInfoChangeSetModeMethod = null;
             log(Log.ERROR, TAG,
-                    "Server freeform prepare-role reflection unavailable", throwable);
+                    "Server cross-activity prepare-role reflection unavailable", throwable);
             return false;
         }
     }
@@ -596,8 +597,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         } catch (Throwable throwable) {
             serverFreeformPrepareRoleHookReady = false;
             log(Log.WARN, TAG,
-                    "Failed to inspect server freeform prepared targets;"
-                            + " disabling native freeform prepare",
+                    "Failed to inspect server cross-activity prepared targets;"
+                            + " disabling native cross-activity prepare",
                     throwable);
         }
         Object result = chain.proceed();
@@ -628,13 +629,43 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     openingChange, "getFlags", new Object[0])).intValue();
             if ((closingMode != TRANSIT_TO_FRONT && closingMode != TRANSIT_CHANGE)
                     || openingMode != TRANSIT_TO_FRONT
-                    || closingFlags != SERVER_FREEFORM_PREPARED_CLOSING_FLAGS
-                    || openingFlags != SERVER_FREEFORM_PREPARED_OPENING_FLAGS) {
+                    || (closingFlags & SERVER_FREEFORM_PREPARED_CLOSING_FLAGS)
+                    != SERVER_FREEFORM_PREPARED_CLOSING_FLAGS
+                    || (openingFlags & SERVER_FREEFORM_PREPARED_OPENING_FLAGS)
+                    != SERVER_FREEFORM_PREPARED_OPENING_FLAGS) {
                 throw new IllegalStateException("unexpected prepared roles, closingMode="
                         + closingMode + ", openingMode=" + openingMode
                         + ", closingFlags=0x" + Integer.toHexString(closingFlags)
                         + ", openingFlags=0x" + Integer.toHexString(openingFlags));
             }
+            Object closingContainer = readField(closingChangeInfo, "mContainer");
+            Object surfaceAnimator = readField(closingContainer, "mSurfaceAnimator");
+            Object animation = readField(surfaceAnimator, "mAnimation");
+            Object closingLeash = readField(surfaceAnimator, "mLeash");
+            Object startTransaction = chain.getArg(3);
+            int closingLayer = ((Number) readField(
+                    closingContainer, "mLastLayer")).intValue();
+            if (animation == null
+                    || !BACK_WINDOW_ANIMATION_ADAPTOR.equals(
+                    animation.getClass().getName())
+                    || readField(animation, "mTarget") != closingContainer
+                    || readField(animation, "mCapturedLeash") != closingLeash
+                    || Boolean.TRUE.equals(readField(animation, "mIsOpen"))
+                    || ((Number) readField(surfaceAnimator,
+                    "mAnimationType")).intValue()
+                    != SERVER_ANIMATION_TYPE_PREDICTIVE_BACK
+                    || readField(closingContainer, "mLastRelativeToLayer") != null
+                    || !(closingLeash instanceof SurfaceControl)
+                    || !((SurfaceControl) closingLeash).isValid()
+                    || !(startTransaction instanceof SurfaceControl.Transaction)
+                    || closingLayer < 0) {
+                throw new IllegalStateException("closing predictive leash unavailable"
+                        + ", animation=" + shortObject(animation)
+                        + ", leash=" + shortObject(closingLeash)
+                        + ", layer=" + closingLayer);
+            }
+            ((SurfaceControl.Transaction) startTransaction).setLayer(
+                    (SurfaceControl) closingLeash, closingLayer);
             if (closingMode == TRANSIT_TO_FRONT) {
                 setModeMethod.invoke(closingChange, TRANSIT_CHANGE);
             }
@@ -659,17 +690,18 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         + Integer.toHexString(preservedOpeningFlags));
             }
             log(Log.INFO, TAG,
-                    "Normalized server freeform cross-activity prepare role"
+                    "Normalized server cross-activity prepare role"
                             + ", transitionId=" + chain.getArg(4)
                             + ", changeIndex=" + closingIndex
                             + ", mode=" + closingMode + "->" + TRANSIT_CHANGE
                             + ", changed=" + (closingMode == TRANSIT_TO_FRONT)
+                            + ", closingLeashLayer=" + closingLayer
                             + ", flags=0x" + Integer.toHexString(normalizedFlags));
         } catch (Throwable throwable) {
             serverFreeformPrepareRoleHookReady = false;
             log(Log.ERROR, TAG,
-                    "Server freeform prepare-role normalization failed;"
-                            + " disabling native freeform prepare",
+                    "Server cross-activity prepare-role normalization failed;"
+                            + " disabling native cross-activity prepare",
                     throwable);
         }
         return result;
@@ -733,9 +765,11 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 && activityType instanceof Number
                 && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
                 && closingMode instanceof Number
-                && ((Number) closingMode).intValue() == WINDOWING_MODE_FREEFORM
                 && openingMode instanceof Number
-                && ((Number) openingMode).intValue() == WINDOWING_MODE_FREEFORM
+                && ((Number) closingMode).intValue()
+                == ((Number) openingMode).intValue()
+                && (((Number) closingMode).intValue() == WINDOWING_MODE_FREEFORM
+                || ((Number) closingMode).intValue() == WINDOWING_MODE_FULLSCREEN)
                 && closingBounds instanceof Rect
                 && !((Rect) closingBounds).isEmpty()
                 && closingBounds.equals(openingBounds)
@@ -927,11 +961,11 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     && isExactFreeformCrossActivityPrepare(chain, builder)) {
                 Object close = chain.getArg(1);
                 Object[] open = (Object[]) chain.getArg(2);
-                log(Log.INFO, TAG, "Allowing native unified prepare for exact freeform"
+                log(Log.INFO, TAG, "Allowing native unified prepare for exact"
                         + " cross-activity, close=" + shortObject(close)
                         + ", open=" + shortObject(open[0]));
                 Object transition = chain.proceed();
-                log(Log.INFO, TAG, "Native freeform cross-activity prepare completed"
+                log(Log.INFO, TAG, "Native cross-activity prepare completed"
                         + ", transition=" + shortObject(transition));
                 return transition;
             }
@@ -940,7 +974,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     + ", unifyBackNavigationTransition=true"
                     + ", returnToHome=false"
                     + ", launchBehind=" + launchBehind
-                    + ", freeformRoleNormalizerReady="
+                    + ", crossActivityRoleNormalizerReady="
                     + serverFreeformPrepareRoleHookReady
                     + ", builder=" + shortObject(builder));
             return null;
@@ -1000,20 +1034,31 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     closeActivity, "getWindowingMode", new Object[0]);
             Object openMode = invokeAnyMethod(
                     openActivity, "getWindowingMode", new Object[0]);
+            Object closeBounds = invokeAnyMethod(
+                    closeActivity, "getBounds", new Object[0]);
+            Object openBounds = invokeAnyMethod(
+                    openActivity, "getBounds", new Object[0]);
             return closeTask != null
                     && closeTask == openTask
                     && activityType instanceof Number
                     && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
                     && closeMode instanceof Number
-                    && ((Number) closeMode).intValue() == WINDOWING_MODE_FREEFORM
                     && openMode instanceof Number
-                    && ((Number) openMode).intValue() == WINDOWING_MODE_FREEFORM
+                    && ((Number) closeMode).intValue()
+                    == ((Number) openMode).intValue()
+                    && (((Number) closeMode).intValue() == WINDOWING_MODE_FREEFORM
+                    || ((Number) closeMode).intValue() == WINDOWING_MODE_FULLSCREEN)
+                    && closeBounds instanceof Rect
+                    && !((Rect) closeBounds).isEmpty()
+                    && closeBounds.equals(openBounds)
+                    && Boolean.TRUE.equals(invokeAnyMethod(
+                    closeActivity, "isVisibleRequested", new Object[0]))
                     && Boolean.FALSE.equals(invokeAnyMethod(
                     openActivity, "isVisibleRequested", new Object[0]))
                     && Boolean.FALSE.equals(readField(
                     openActivity, "mLaunchTaskBehind"));
         } catch (Throwable throwable) {
-            log(Log.WARN, TAG, "Failed to inspect freeform cross-activity prepare;"
+            log(Log.WARN, TAG, "Failed to inspect cross-activity prepare;"
                     + " preserving compatibility skip", throwable);
             return false;
         }

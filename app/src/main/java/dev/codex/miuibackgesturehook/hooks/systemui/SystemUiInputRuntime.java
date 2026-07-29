@@ -351,6 +351,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             }
             if (!pilfered && hasXiaomiBackIntent(
                     distance, event.getRawY() - downY, dp(PILFER_THRESHOLD_DP))) {
+                if (!driver.canPilferAtIntentThreshold()) {
+                    cancelNativeCandidate(event,
+                            "Shell unavailable before pilfer");
+                    return false;
+                }
                 pilferPointers(distance);
                 if (!pilfered) {
                     cancelNativeCandidate(event, "failed to pilfer outward gesture");
@@ -1376,6 +1381,40 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             return gestureActive && gestureSuppressed;
         }
 
+        protected boolean canPilferAtIntentThreshold() {
+            if (!gestureActive || gestureSuppressed) {
+                return false;
+            }
+            if (!shellGestureStartDeferred
+                    || findReversibleRunningOpenTransition() != null) {
+                return true;
+            }
+            ShellOwner owner = gestureOwner;
+            if (!isShellOwnerCurrent(owner)
+                    || !prepareShellSessionSlotForStart()) {
+                return false;
+            }
+            AtomicBoolean ready = new AtomicBoolean();
+            AtomicReference<String> state = new AtomicReference<>("not-run");
+            boolean completed = executeShellBlocking(owner.executor, () -> {
+                state.set(describeShellStateOnOwner(owner.controller));
+                try {
+                    ready.set(isShellStartReadyOnOwner(owner.controller));
+                } catch (Throwable throwable) {
+                    log(Log.WARN, TAG,
+                            "Failed Shell readiness check before pilfer",
+                            throwable);
+                }
+            }, "prePilferReadiness");
+            if (!completed || !ready.get()) {
+                log(Log.INFO, TAG,
+                        "Left accepted gesture unpilfered while Shell is busy"
+                                + ", state=" + state.get());
+                return false;
+            }
+            return true;
+        }
+
         protected boolean onDown(MotionEvent event, int edge,
                                boolean launcherOpenBreakCandidate,
                                long launcherOpenBreakGenerationCandidate,
@@ -1996,7 +2035,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         return;
                     }
                     String state = describeShellStateOnOwner(owner.controller);
-                    if (!isShellReadyOnOwner(owner.controller)) {
+                    if (!isShellStartReadyOnOwner(owner.controller)) {
                         startResult.set(new ShellStartSnapshot(
                                 false, false, state, null, null,
                                 false, null));
@@ -2391,12 +2430,29 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             return isTrackerInitial(current) && isTrackerInitial(queued);
         }
 
+        protected boolean isShellStartReadyOnOwner(Object stateController)
+                throws Exception {
+            if (!isShellReadyOnOwner(stateController)) {
+                return false;
+            }
+            Object transitionHandler = readField(stateController,
+                    "mBackTransitionHandler");
+            return !Boolean.TRUE.equals(readField(transitionHandler,
+                    "mCloseTransitionRequested"))
+                    && readField(transitionHandler,
+                    "mPrepareOpenTransition") == null
+                    && readField(transitionHandler,
+                    "mClosePrepareTransition") == null;
+        }
+
         protected boolean isTrackerInitial(Object tracker) throws Exception {
             return tracker == null || ((BackTouchTracker) tracker).isInInitialState();
         }
 
         protected String describeShellStateOnOwner(Object stateController) {
             try {
+                Object transitionHandler = readField(stateController,
+                        "mBackTransitionHandler");
                 return "postCommit=" + readField(
                         stateController, "mPostCommitAnimationInProgress")
                         + ", backStarted=" + readField(stateController, "mBackGestureStarted")
@@ -2407,7 +2463,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         + ", current=" + shortObject(readField(
                         stateController, "mCurrentTracker"))
                         + ", queued=" + shortObject(readField(
-                        stateController, "mQueuedTracker"));
+                        stateController, "mQueuedTracker"))
+                        + ", closeRequested=" + readField(
+                        transitionHandler, "mCloseTransitionRequested")
+                        + ", prepareOpen=" + shortObject(readField(
+                        transitionHandler, "mPrepareOpenTransition"))
+                        + ", prepareClose=" + shortObject(readField(
+                        transitionHandler, "mClosePrepareTransition"));
             } catch (Throwable throwable) {
                 return "unavailable:" + throwable.getClass().getSimpleName();
             }
