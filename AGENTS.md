@@ -462,8 +462,12 @@ System-server compatibility rules:
   departing Activity or embedded TaskFragment's final mode to AOSP `CHANGE`. Preserve
   `FLAG_CHANGE_YES_ANIMATION` only when target calculation adds it to the promoted opening
   TaskFragment; do not broadly mask other internal `ChangeInfo` flags. Preserve
-  both changes' flags, including the platform and Xiaomi predictive-back flags, and let the stock
-  Shell handler perform the resulting closing/opening leash reparent in its original transaction.
+  both changes' flags, including the platform and Xiaomi predictive-back flags. After BLAST has
+  merged the exact prepared targets' sync transactions, reassert both captured predictive leashes'
+  native absolute layers in the existing start transaction so Xiaomi's initial parent-relative
+  leash layer cannot win by merge order; do not change their parent, alpha, visibility, or geometry.
+  Let the stock Shell handler perform the resulting closing/opening leash reparent in its original
+  transaction.
   Keep the occluded opening Activity, runner targets, and all other state and shapes untouched.
   Do not gate the exact native prepare on a module-owned readiness bit: if exact-shape inspection
   is uncertain or the normalizer is unavailable or fails, preserve the platform prepare instead

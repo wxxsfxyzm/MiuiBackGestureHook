@@ -549,6 +549,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         Field flagsField = serverTransitionChangeInfoFlagsField;
         Method setModeMethod = serverTransitionInfoChangeSetModeMethod;
         Object closingChangeInfo = null;
+        Object openingChangeInfo = null;
         int closingIndex = -1;
         try {
             Object type = chain.getArg(0);
@@ -561,6 +562,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         targetsObject, flagsField);
                 if (closingChangeInfo != null) {
                     closingIndex = ((List<?>) targetsObject).indexOf(closingChangeInfo);
+                    if (closingIndex >= 0) {
+                        openingChangeInfo = ((List<?>) targetsObject).get(1 - closingIndex);
+                    }
                 }
             }
         } catch (Throwable throwable) {
@@ -570,7 +574,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     throwable);
         }
         Object result = chain.proceed();
-        if (closingChangeInfo == null || closingIndex < 0 || setModeMethod == null) {
+        if (closingChangeInfo == null || openingChangeInfo == null
+                || closingIndex < 0 || setModeMethod == null) {
             return result;
         }
 
@@ -607,33 +612,53 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         + ", openingFlags=0x" + Integer.toHexString(openingFlags));
             }
             Object closingContainer = readField(closingChangeInfo, "mContainer");
+            Object openingContainer = readField(openingChangeInfo, "mContainer");
             Object surfaceAnimator = readField(closingContainer, "mSurfaceAnimator");
+            Object openingSurfaceAnimator = readField(
+                    openingContainer, "mSurfaceAnimator");
             Object animation = readField(surfaceAnimator, "mAnimation");
+            Object openingAnimation = readField(
+                    openingSurfaceAnimator, "mAnimation");
             Object closingLeash = readField(surfaceAnimator, "mLeash");
+            Object openingLeash = readField(openingSurfaceAnimator, "mLeash");
             Object startTransaction = chain.getArg(3);
             int closingLayer = ((Number) readField(
                     closingContainer, "mLastLayer")).intValue();
+            int openingLayer = ((Number) readField(
+                    openingContainer, "mLastLayer")).intValue();
             if (animation == null
                     || !BACK_WINDOW_ANIMATION_ADAPTOR.equals(
                     animation.getClass().getName())
+                    || openingAnimation == null
+                    || !BACK_WINDOW_ANIMATION_ADAPTOR.equals(
+                    openingAnimation.getClass().getName())
                     || readField(animation, "mTarget") != closingContainer
+                    || readField(openingAnimation, "mTarget") != openingContainer
                     || readField(animation, "mCapturedLeash") != closingLeash
-                    || Boolean.TRUE.equals(readField(animation, "mIsOpen"))
+                    || readField(openingAnimation, "mCapturedLeash") != openingLeash
+                    || !Boolean.FALSE.equals(readField(animation, "mIsOpen"))
+                    || !Boolean.TRUE.equals(readField(openingAnimation, "mIsOpen"))
                     || ((Number) readField(surfaceAnimator,
                     "mAnimationType")).intValue()
                     != SERVER_ANIMATION_TYPE_PREDICTIVE_BACK
+                    || ((Number) readField(openingSurfaceAnimator,
+                    "mAnimationType")).intValue()
+                    != SERVER_ANIMATION_TYPE_PREDICTIVE_BACK
                     || readField(closingContainer, "mLastRelativeToLayer") != null
+                    || readField(openingContainer, "mLastRelativeToLayer") != null
                     || !(closingLeash instanceof SurfaceControl)
+                    || !(openingLeash instanceof SurfaceControl)
                     || !((SurfaceControl) closingLeash).isValid()
+                    || !((SurfaceControl) openingLeash).isValid()
                     || !(startTransaction instanceof SurfaceControl.Transaction)
-                    || closingLayer < 0) {
-                throw new IllegalStateException("closing predictive leash unavailable"
-                        + ", animation=" + shortObject(animation)
-                        + ", leash=" + shortObject(closingLeash)
-                        + ", layer=" + closingLayer);
+                    || closingLayer <= openingLayer || openingLayer < 0) {
+                throw new IllegalStateException("predictive leashes unavailable"
+                        + ", closingAnimation=" + shortObject(animation)
+                        + ", openingAnimation=" + shortObject(openingAnimation)
+                        + ", closingLeash=" + shortObject(closingLeash)
+                        + ", openingLeash=" + shortObject(openingLeash)
+                        + ", layers=" + closingLayer + "/" + openingLayer);
             }
-            ((SurfaceControl.Transaction) startTransaction).setLayer(
-                    (SurfaceControl) closingLeash, closingLayer);
             if (closingMode == TRANSIT_TO_FRONT) {
                 setModeMethod.invoke(closingChange, TRANSIT_CHANGE);
             }
@@ -657,13 +682,17 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         + Integer.toHexString(openingFlags) + "->0x"
                         + Integer.toHexString(preservedOpeningFlags));
             }
+            SurfaceControl.Transaction transaction =
+                    (SurfaceControl.Transaction) startTransaction;
+            transaction.setLayer((SurfaceControl) openingLeash, openingLayer);
+            transaction.setLayer((SurfaceControl) closingLeash, closingLayer);
             log(Log.INFO, TAG,
                     "Normalized server cross-activity prepare role"
                             + ", transitionId=" + chain.getArg(4)
                             + ", changeIndex=" + closingIndex
                             + ", mode=" + closingMode + "->" + TRANSIT_CHANGE
                             + ", changed=" + (closingMode == TRANSIT_TO_FRONT)
-                            + ", closingLeashLayer=" + closingLayer
+                            + ", leashLayers=" + closingLayer + "/" + openingLayer
                             + ", flags=0x" + Integer.toHexString(normalizedFlags));
         } catch (Throwable throwable) {
             log(Log.ERROR, TAG,
