@@ -299,12 +299,17 @@ Remote-animation rules:
   the container pixels on the runner leashes. The revealed lower layer follows the finger:
   its dim scrim tracks the finger during the drag, then fades on a critically damped
   decay seeded with the release speed (leaving the committed value at the finger's rate,
-  no step and no lurch, decoupled from the geometry's ease-out) and its corner radius is
-  cleared (only the sliding top card is rounded). The dim peaks at a fixed 0.5 to match
+  no step and no lurch, decoupled from the geometry's ease-out). Fullscreen clears that
+  lower layer's radius so only the sliding top card is rounded. For an exact adopted
+  freeform root, both Activity targets instead receive Xiaomi's task-local corner radius.
+  For the stock default and slide geometries, inverse-map the fixed task bounds into each
+  moving target's local crop immediately before the animation transaction applies; keep custom
+  app-transition matrices and crops native.
+  The dim peaks at a fixed 0.5 to match
   DefaultTransitionImpl's standard activity open/close dim, not the native predictive-back
   scrim (0.8 dark / 0.2 light) which is calibrated for the scaled card. Targets, letterboxes, the
-  progress/commit/cancel lifecycle, and `finishAnimation()` stay native; any hook or
-  reflection failure falls back to the stock AOSP animation for that gesture.
+  progress/commit/cancel lifecycle, and `finishAnimation()` stay native; a slide-hook failure
+  preserves the stock AOSP geometry for that gesture.
   `TYPE_CROSS_TASK`, `TYPE_RETURN_TO_HOME`, and `TYPE_CALLBACK` are never restyled. With
   the slide on, cross-task's native color-layer background is repainted pure black by
   overwriting the color in the animation's own pending transaction (its stock hard-coded
@@ -316,9 +321,14 @@ Remote-animation rules:
   matching the animation crop. Keep the scrim hidden until the first apply, then merge the root
   crop/radius and both layer reparents into the animation's pending transaction. Keep the scrim
   immediately below the closing leash, preserve its native dim, and set only the redundant
-  background alpha to zero. If exact capture, adoption, or reflection fails, discard the candidate
-  and leave the native layers unchanged; never fall back to suppressing their alpha. Native finish
-  still owns cleanup; preserve fullscreen and every other target shape.
+  background alpha to zero. Apply the same Xiaomi task-local corner radius to the root and both
+  exact Activity targets before every native animation-frame transaction apply. For the stock
+  default and slide geometries, replace only each target's crop/radius with the inverse-mapped
+  intersection of its current rect and the fixed task frame; retain its matrix, position, alpha,
+  layer, and parent. If initial capture or adoption fails, discard the candidate and leave the
+  native layers unchanged. A later per-frame geometry failure stops target normalization without
+  undoing already-adopted layers; never fall back to suppressing their alpha. Native finish still
+  owns cleanup; preserve fullscreen and every other target shape.
 - Keep SystemUI's native `BackPanelController` as the sole indicator state owner: it
   receives every claimed event and owns thresholds, release state, and haptics. The
   optional HyperOS-style skin (`hyperos_indicator_style` remote preference, default off)

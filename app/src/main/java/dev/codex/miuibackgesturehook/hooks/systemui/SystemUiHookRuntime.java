@@ -2154,13 +2154,15 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
      * Restyles the native cross-activity predictive-back animation into the miuix slide
      * when the preference is on: the closing surface follows the finger full-width with
      * no scale and no fade, the entering surface parallaxes in from a quarter width
-     * behind at alpha 0.9 -> 1 with its dim scrim tracking the drag and its corner
-     * radius cleared, and the commit settles on a cubic ease-out. Exact freeform also
-     * puts Xiaomi's fixed task radius on the prepared root and clears the moving page
-     * radius. Targets, letterboxes, and the finish lifecycle stay native. Cross-task
-     * and return-to-home are untouched. The independent apply hook adopts exact
-     * freeform ColorLayers and that fixed clip into their prepared root whether or not
-     * the slide preference is enabled.
+     * behind at alpha 0.9 -> 1 with its dim scrim tracking the drag, and the commit
+     * settles on a cubic ease-out. Exact freeform puts Xiaomi's task-local radius on
+     * the prepared root and both Activity targets; the default and slide geometries
+     * also inverse-map a fixed task crop into each moving target. Fullscreen still
+     * clears only the revealed lower page. Targets, letterboxes, and the finish
+     * lifecycle stay native.
+     * Cross-task and return-to-home are untouched. The independent apply hook adopts
+     * exact freeform ColorLayers and normalizes those corners whether or not the slide
+     * preference is enabled.
      */
     protected void hookFreeformCrossActivityScrimCreation() {
         try {
@@ -2355,8 +2357,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             throws Throwable {
         miuixSlideAnimActive = false;
         freeformColorRootCandidate.set(null);
-        if (freeformColorRootAnimation == chain.getThisObject()) {
-            freeformColorRootAnimation = null;
+        FreeformColorRootAdoption adoption = freeformColorRootAdoption;
+        if (adoption != null && adoption.animation == chain.getThisObject()) {
+            freeformColorRootAdoption = null;
         }
         return chain.proceed();
     }
@@ -2442,7 +2445,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected volatile Method multiTaskingControllerGetInstance;
     protected final AtomicReference<FreeformColorRootCandidate>
             freeformColorRootCandidate = new AtomicReference<>();
-    protected volatile Object freeformColorRootAnimation;
+    protected volatile FreeformColorRootAdoption freeformColorRootAdoption;
 
     protected static final long MIUIX_SLIDE_SETTLE_DURATION_MS = 400L;
     protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
@@ -2479,6 +2482,19 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             this.closingLeash = closingLeash;
             this.enteringLeash = enteringLeash;
             this.rootCornerRadius = rootCornerRadius;
+        }
+    }
+
+    protected static final class FreeformColorRootAdoption {
+        final Object animation;
+        final FreeformColorRootCandidate candidate;
+        final Rect closingCrop = new Rect();
+        final Rect enteringCrop = new Rect();
+
+        FreeformColorRootAdoption(Object animation,
+                                  FreeformColorRootCandidate candidate) {
+            this.animation = animation;
+            this.candidate = candidate;
         }
     }
 
@@ -2571,9 +2587,24 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             throws Throwable {
         FreeformColorRootCandidate candidate = freeformColorRootCandidate.get();
         if (candidate == null) {
+            FreeformColorRootAdoption adoption = freeformColorRootAdoption;
+            if (adoption != null && adoption.animation == chain.getThisObject()) {
+                try {
+                    applyAdoptedFreeformTargetGeometry(
+                            chain.getThisObject(), adoption);
+                } catch (Throwable throwable) {
+                    if (freeformColorRootAdoption == adoption) {
+                        freeformColorRootAdoption = null;
+                    }
+                    log(Log.WARN, TAG,
+                            "Failed freeform Activity geometry normalization;"
+                                    + " preserving native target geometry",
+                            throwable);
+                }
+            }
             return chain.proceed();
         }
-        Object adoptedAnimation = null;
+        FreeformColorRootAdoption adopted = null;
         try {
             Object animation = chain.getThisObject();
             if (!matchesFreeformColorRootCandidate(candidate, animation)) {
@@ -2641,9 +2672,17 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                         SurfaceControl.class, int.class},
                                 new Object[]{scrim, candidate.closingLeash,
                                         Integer.valueOf(-1)});
+                        invokeMethod(donor, "setCornerRadius",
+                                new Class<?>[]{SurfaceControl.class, float.class},
+                                new Object[]{candidate.closingLeash,
+                                        Float.valueOf(candidate.rootCornerRadius)});
+                        invokeMethod(donor, "setCornerRadius",
+                                new Class<?>[]{SurfaceControl.class, float.class},
+                                new Object[]{candidate.enteringLeash,
+                                        Float.valueOf(candidate.rootCornerRadius)});
                         surfaceTransaction.merge(donor);
                     }
-                    adoptedAnimation = animation;
+                    adopted = new FreeformColorRootAdoption(animation, candidate);
                 }
             }
         } catch (Throwable throwable) {
@@ -2653,8 +2692,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     throwable);
         }
         Object result = chain.proceed();
-        if (adoptedAnimation != null) {
-            freeformColorRootAnimation = adoptedAnimation;
+        if (adopted != null) {
+            freeformColorRootAdoption = adopted;
             log(Log.INFO, TAG,
                     "Adopted freeform cross-activity color layers into prepared root"
                             + ", backgroundAlpha=0.0"
@@ -2663,6 +2702,124 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             candidate.closingTarget, "taskId", -1));
         }
         return result;
+    }
+
+    protected void applyAdoptedFreeformTargetGeometry(
+            Object animation, FreeformColorRootAdoption adoption) throws Exception {
+        FreeformColorRootCandidate candidate = adoption.candidate;
+        Object transaction = readFieldOrNull(animation, "transaction");
+        if (readFieldOrNull(animation, "closingTarget") != candidate.closingTarget
+                || readFieldOrNull(animation, "enteringTarget")
+                != candidate.enteringTarget
+                || !(transaction instanceof SurfaceControl.Transaction)
+                || !candidate.closingLeash.isValid()
+                || !candidate.enteringLeash.isValid()) {
+            throw new IllegalStateException(
+                    "freeform Activity target ownership changed");
+        }
+        SurfaceControl.Transaction surfaceTransaction =
+                (SurfaceControl.Transaction) transaction;
+        boolean defaultGeometry = DEFAULT_CROSS_ACTIVITY_BACK_ANIMATION.equals(
+                animation.getClass().getName());
+        WeakReference<Object> slideReference = miuixSlideArmedAnimation;
+        boolean slideGeometry = defaultGeometry && miuixSlideAnimActive
+                && slideReference != null
+                && slideReference.get() == animation;
+        if (!defaultGeometry) {
+            setFreeformTargetCornerRadius(surfaceTransaction,
+                    candidate.closingLeash, candidate.rootCornerRadius);
+            setFreeformTargetCornerRadius(surfaceTransaction,
+                    candidate.enteringLeash, candidate.rootCornerRadius);
+            return;
+        }
+        Object frame = readFieldOrNull(animation, "backAnimRect");
+        Object nativeCrop = readFieldOrNull(animation, "cropRect");
+        Object closingRect = readFieldOrNull(animation, "currentClosingRect");
+        Object enteringRect = readFieldOrNull(animation, "currentEnteringRect");
+        if (!(frame instanceof Rect) || !(nativeCrop instanceof Rect)
+                || !(closingRect instanceof RectF)
+                || !(enteringRect instanceof RectF)
+                || ((RectF) closingRect).isEmpty()
+                || ((RectF) enteringRect).isEmpty()) {
+            setFreeformTargetCornerRadius(surfaceTransaction,
+                    candidate.closingLeash, candidate.rootCornerRadius);
+            setFreeformTargetCornerRadius(surfaceTransaction,
+                    candidate.enteringLeash, candidate.rootCornerRadius);
+            return;
+        }
+        float postCommitScale = 1.0f;
+        if (!slideGeometry) {
+            Object lastFlingScale = readFieldOrNull(
+                    animation, "lastPostCommitFlingScale");
+            if (lastFlingScale instanceof Number) {
+                float value = ((Number) lastFlingScale).floatValue();
+                if (value > 0.0f && value <= 1.0f) {
+                    postCommitScale = value;
+                }
+            }
+        }
+        float closingRadius = resolveFixedFreeformTargetClip(
+                (Rect) frame, (Rect) nativeCrop,
+                (RectF) closingRect, postCommitScale,
+                candidate.rootCornerRadius, adoption.closingCrop);
+        float enteringRadius = resolveFixedFreeformTargetClip(
+                (Rect) frame, (Rect) nativeCrop,
+                (RectF) enteringRect, postCommitScale,
+                candidate.rootCornerRadius, adoption.enteringCrop);
+        surfaceTransaction.setCrop(candidate.closingLeash, adoption.closingCrop);
+        setFreeformTargetCornerRadius(surfaceTransaction,
+                candidate.closingLeash, closingRadius);
+        surfaceTransaction.setCrop(candidate.enteringLeash, adoption.enteringCrop);
+        setFreeformTargetCornerRadius(surfaceTransaction,
+                candidate.enteringLeash, enteringRadius);
+    }
+
+    protected void setFreeformTargetCornerRadius(
+            SurfaceControl.Transaction transaction, SurfaceControl leash,
+            float cornerRadius) throws Exception {
+        invokeMethod(transaction, "setCornerRadius",
+                new Class<?>[]{SurfaceControl.class, float.class},
+                new Object[]{leash, Float.valueOf(cornerRadius)});
+    }
+
+    protected float resolveFixedFreeformTargetClip(
+            Rect frame, Rect nativeCrop, RectF currentRect,
+            float additionalScale, float rootCornerRadius, Rect outCrop) {
+        if (frame.isEmpty() || frame.left != 0 || frame.top != 0
+                || !nativeCrop.equals(frame)
+                || !(additionalScale > 0.0f)
+                || !Float.isFinite(additionalScale)) {
+            throw new IllegalStateException("unsupported freeform target crop geometry");
+        }
+        float visualWidth = currentRect.width() * additionalScale;
+        float visualHeight = currentRect.height() * additionalScale;
+        float scaleX = visualWidth / frame.width();
+        float scaleY = visualHeight / frame.height();
+        if (!(scaleX > 0.0f) || !(scaleY > 0.0f)
+                || !Float.isFinite(scaleX) || !Float.isFinite(scaleY)
+                || Math.abs(scaleX - scaleY) > 0.01f) {
+            throw new IllegalStateException("non-uniform freeform target transform");
+        }
+        float visualLeft = currentRect.centerX() - (visualWidth / 2.0f);
+        float visualTop = currentRect.centerY() - (visualHeight / 2.0f);
+        int left = Math.max(nativeCrop.left, Math.min(nativeCrop.right,
+                (int) Math.ceil((frame.left - visualLeft) / scaleX)));
+        int top = Math.max(nativeCrop.top, Math.min(nativeCrop.bottom,
+                (int) Math.ceil((frame.top - visualTop) / scaleY)));
+        int right = Math.max(nativeCrop.left, Math.min(nativeCrop.right,
+                (int) Math.floor((frame.right - visualLeft) / scaleX)));
+        int bottom = Math.max(nativeCrop.top, Math.min(nativeCrop.bottom,
+                (int) Math.floor((frame.bottom - visualTop) / scaleY)));
+        if (right < left) {
+            right = left;
+        }
+        if (bottom < top) {
+            bottom = top;
+        }
+        outCrop.set(left, top, right, bottom);
+        return outCrop.isEmpty() ? 0.0f
+                : Math.min(rootCornerRadius / scaleX,
+                Math.min(outCrop.width(), outCrop.height()) / 2.0f);
     }
 
     protected boolean matchesFreeformColorRootCandidate(
@@ -2969,16 +3126,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             Math.max(0.0f, Math.min(1.0f, scrimAlpha)));
         }
         Object transaction = readField(animation, "transaction");
-        // Fullscreen keeps the moving top card rounded. In freeform the prepared root is
-        // the fixed rounded frame, so both Activity surfaces are square internal pages.
-        if (freeformColorRootAnimation == animation
-                && closingLeash instanceof SurfaceControl
-                && ((SurfaceControl) closingLeash).isValid()) {
-            invokeMethod(transaction, "setCornerRadius",
-                    new Class<?>[]{SurfaceControl.class, float.class},
-                    new Object[]{closingLeash, Float.valueOf(0.0f)});
-        }
-        if (enteringLeash instanceof SurfaceControl
+        FreeformColorRootAdoption adoption = freeformColorRootAdoption;
+        // Fullscreen keeps only the moving top card rounded. Exact freeform is
+        // normalized for both targets by the common applyTransaction hook.
+        if ((adoption == null || adoption.animation != animation)
+                && enteringLeash instanceof SurfaceControl
                 && ((SurfaceControl) enteringLeash).isValid()) {
             invokeMethod(transaction, "setCornerRadius",
                     new Class<?>[]{SurfaceControl.class, float.class},
@@ -3158,7 +3310,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected Object correctPredictiveBackPrepareReparent(
             XposedInterface.Chain chain) throws Throwable {
         freeformColorRootCandidate.set(null);
-        freeformColorRootAnimation = null;
+        freeformColorRootAdoption = null;
         Object result = chain.proceed();
         if (!Boolean.TRUE.equals(result)) {
             return result;

@@ -83,7 +83,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         preparedBackTerminalHookReady = false;
         preparedBackStartAnimationInvoker = null;
         freeformColorRootCandidate.set(null);
-        freeformColorRootAnimation = null;
+        freeformColorRootAdoption = null;
         backCommitCompositionHookReady = false;
         backFinishOpenAtomicHookReady = false;
         backFinishOpenCallerDeoptimized = false;
