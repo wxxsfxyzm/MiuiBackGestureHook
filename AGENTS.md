@@ -378,6 +378,18 @@ Return-to-home rules:
   `WindowElement` against only that closing leash; leave the opening Home target, alpha,
   and layer order untouched. Drive Xiaomi preview blur from the same smoothed progress
   rather than a separate or release-time snap.
+- Keep Shell gesture geometry in display coordinates. At the Xiaomi `WindowElement` boundary,
+  claim the unified preview only when the launcher's native WindowManager Home rotation is zero,
+  then convert only the spring start/target rects from its current display rotation to that native
+  Home coordinate space through Xiaomi's `CoordinateTransforms`. Initialize `ClipAnimationHelper`
+  with the launcher's root bounds, and convert the spring rect back through
+  `WindowElement.getSurfaceRotationRect(...)` before deriving display-space handoff geometry.
+  Verify cancel completion against the fullscreen rect in that same native Home coordinate space.
+  For a rotated native CLOSE, take handoff geometry from its real `SurfaceParams`; accept only a
+  non-empty origin-aligned crop contained by the fullscreen source instead of inferring its crop
+  from the Home-coordinate spring rect.
+  A nonzero Home rotation, launcher/closing-target rotation mismatch, or unreadable native geometry
+  fails closed.
 - Correct Xiaomi's prepared/commit composition only for the exact single fullscreen
   standard task-to-Home shape. A valid prepared transition contains exactly the application
   and Home changes, optionally plus one taskless wallpaper change when Shell already represents

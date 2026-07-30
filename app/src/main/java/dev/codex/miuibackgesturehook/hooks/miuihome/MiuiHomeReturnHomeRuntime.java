@@ -17,6 +17,7 @@ import android.util.Log;
 import android.util.Pair;
 import android.view.SurfaceControl;
 import android.view.View;
+import android.view.WindowManager;
 import android.view.animation.PathInterpolator;
 import android.window.BackMotionEvent;
 import android.window.BackProgressAnimator;
@@ -98,6 +99,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
         protected Constructor<?> nativeCornerRadiiConstructor;
         protected Constructor<?> nativeClipAnimationHelperConstructor;
         protected Method nativeGestureAnimExecutorMethod;
+        protected Method nativeCoordinateTransformMethod;
         protected Object nativeCloseToDragType;
         protected Object nativeAppToAppType;
 
@@ -4615,7 +4617,21 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 if (!exact) {
                     return null;
                 }
-                RectF currentRect = new RectF((RectF) currentRectObject);
+                if (session.unifiedNativeCurrentRotation
+                        != session.unifiedNativeHomeRotation
+                        && isReturnHomeNativeCloseType(typeName)) {
+                    session.nativeGeometrySnapshot.set(null);
+                    return null;
+                }
+                RectF nativeCurrentRect = new RectF((RectF) currentRectObject);
+                Object surfaceRectObject = invokeAnyMethod(
+                        windowElement, "getSurfaceRotationRect",
+                        new Object[]{nativeCurrentRect});
+                if (!(surfaceRectObject instanceof RectF)) {
+                    throw new IllegalStateException(
+                            "missing Xiaomi surface-space geometry");
+                }
+                RectF currentRect = new RectF((RectF) surfaceRectObject);
                 Rect fullscreen = session.startRect;
                 if (currentRect.isEmpty() || fullscreen.isEmpty()
                         || fullscreen.left != 0 || fullscreen.top != 0) {
@@ -4746,7 +4762,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 publishNativeGeometrySnapshot(session, captured);
                 return captured;
             } catch (Throwable throwable) {
-                // The anim-update snapshot remains the guarded fallback for this frame.
+                // Unrotated frames may retain their guarded anim-update fallback.
                 return null;
             }
         }
@@ -4858,7 +4874,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             if (fullscreen.isEmpty() || fullscreen.left != 0
                     || fullscreen.top != 0 || crop.left != 0
                     || crop.top != 0
-                    || Math.abs(crop.width() - fullscreen.width()) > 1
+                    || crop.width() > fullscreen.width()
                     || crop.height() > fullscreen.height()) {
                 throw new IllegalStateException(
                         "unsupported native crop: fullscreen="
@@ -6694,10 +6710,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     Object rectObject = invokeAnyMethod(
                             animationIdentity, "getCurrentRectF",
                             new Object[0]);
-                    float tolerance = Math.max(2.0f, dp(2.0f));
-                    fullscreen = rectObject instanceof RectF
-                            && rectsNear((RectF) rectObject,
-                            new RectF(session.startRect), tolerance);
+                    fullscreen = isUnifiedNativeFullscreen(
+                            session, rectObject);
                 }
                 return new UnifiedNativeRetargetInspection(
                         attempt, requestedType, actualType,
@@ -6721,6 +6735,20 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && Math.abs(first.top - second.top) <= tolerance
                     && Math.abs(first.right - second.right) <= tolerance
                     && Math.abs(first.bottom - second.bottom) <= tolerance;
+        }
+
+        protected boolean isUnifiedNativeFullscreen(
+                ReturnHomeSession session, Object rectObject)
+                throws Exception {
+            if (!(rectObject instanceof RectF)) {
+                return false;
+            }
+            RectF nativeFullscreen = toUnifiedNativeHomeRect(
+                    session.unifiedNativeCurrentRotation,
+                    session.unifiedNativeHomeRotation,
+                    new RectF(session.startRect));
+            return rectsNear((RectF) rectObject, nativeFullscreen,
+                    Math.max(2.0f, dp(2.0f)));
         }
 
         protected UnifiedNativeFinishSnapshot captureUnifiedNativeFinishSnapshot(
@@ -6783,10 +6811,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     Object rectObject = invokeAnyMethod(
                             animationIdentity, "getCurrentRectF",
                             new Object[0]);
-                    float tolerance = Math.max(2.0f, dp(2.0f));
-                    fullscreen = rectObject instanceof RectF
-                            && rectsNear((RectF) rectObject,
-                            new RectF(session.startRect), tolerance);
+                    fullscreen = isUnifiedNativeFullscreen(
+                            session, rectObject);
                 }
             } catch (Throwable throwable) {
                 failure = throwable;
@@ -7675,6 +7701,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     && nativeCornerRadiiConstructor != null
                     && nativeClipAnimationHelperConstructor != null
                     && nativeGestureAnimExecutorMethod != null
+                    && nativeCoordinateTransformMethod != null
                     && nativeCloseToDragType != null
                     && nativeAppToAppType != null) {
                 return;
@@ -7705,6 +7732,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             Class<?> gestureCalculatorClass = Class.forName(
                     MIUI_HOME_GESTURE_HOME_CALCULATOR, false,
                     classLoader);
+            Class<?> coordinateTransformsClass = Class.forName(
+                    "com.miui.home.launcher.util.CoordinateTransforms",
+                    false, classLoader);
 
             Constructor<?> targetSet = targetSetClass.getDeclaredConstructor(
                     compatArrayClass, int.class, compatArrayClass);
@@ -7726,12 +7756,15 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     clipAnimationHelperClass.getDeclaredConstructor();
             Method gestureAnimExecutor = springAnimClass.getDeclaredMethod(
                     "getGestureAnimRunningExecutor");
+            Method coordinateTransform = coordinateTransformsClass.getDeclaredMethod(
+                    "transformCoordinate", int.class, int.class, RectF.class);
             targetSet.setAccessible(true);
             windowParams.setAccessible(true);
             rectParams.setAccessible(true);
             radii.setAccessible(true);
             clip.setAccessible(true);
             gestureAnimExecutor.setAccessible(true);
+            coordinateTransform.setAccessible(true);
             Class<? extends Enum> enumClass =
                     (Class<? extends Enum>) animTypeClass.asSubclass(
                             Enum.class);
@@ -7742,6 +7775,7 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
             nativeCornerRadiiConstructor = radii;
             nativeClipAnimationHelperConstructor = clip;
             nativeGestureAnimExecutorMethod = gestureAnimExecutor;
+            nativeCoordinateTransformMethod = coordinateTransform;
             nativeCloseToDragType = Enum.valueOf(
                     enumClass, "CLOSE_TO_DRAG");
             nativeAppToAppType = Enum.valueOf(enumClass, "APP_TO_APP");
@@ -7832,15 +7866,21 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 RectF targetRect, float endRadius, boolean needFinish,
                 RectF explicitStartRect) throws Exception {
             ensureUnifiedNativePreviewReflection();
+            RectF nativeTargetRect = toUnifiedNativeHomeRect(
+                    session.unifiedNativeCurrentRotation,
+                    session.unifiedNativeHomeRotation, targetRect);
+            RectF nativeStartRect = explicitStartRect == null ? null
+                    : toUnifiedNativeHomeRect(
+                    session.unifiedNativeCurrentRotation,
+                    session.unifiedNativeHomeRotation, explicitStartRect);
             Object startRadii = nativeCornerRadiiConstructor.newInstance(
                     Float.valueOf(session.currentCornerRadius));
             Object endRadii = nativeCornerRadiiConstructor.newInstance(
                     Float.valueOf(endRadius));
             Object windowParams =
                     nativeWindowAnimParamsConstructor.newInstance(
-                            explicitStartRect == null ? null
-                                    : new RectF(explicitStartRect),
-                            new RectF(targetRect), startRadii, endRadii,
+                            nativeStartRect, nativeTargetRect,
+                            startRadii, endRadii,
                             Float.valueOf(1.0f), Float.valueOf(1.0f));
             return nativeRectFParamsConstructor.newInstance(
                     session.unifiedNativeTargetSet, windowParams, animType,
@@ -7854,6 +7894,20 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                     Integer.valueOf(session.unifiedNativeTaskId),
                     Integer.valueOf(2), Boolean.valueOf(needFinish),
                     Boolean.FALSE, Boolean.FALSE);
+        }
+
+        protected RectF toUnifiedNativeHomeRect(
+                int currentRotation, int homeRotation, RectF displayRect)
+                throws Exception {
+            ensureUnifiedNativePreviewReflection();
+            Object result = nativeCoordinateTransformMethod.invoke(
+                    null, Integer.valueOf(currentRotation),
+                    Integer.valueOf(homeRotation), new RectF(displayRect));
+            if (!(result instanceof RectF) || ((RectF) result).isEmpty()) {
+                throw new IllegalStateException(
+                        "invalid Xiaomi Home-coordinate transform");
+            }
+            return new RectF((RectF) result);
         }
 
         protected boolean prepareUnifiedNativePreview(
@@ -7873,8 +7927,6 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         session.openingTarget, "taskInfo");
                 Object closingConfiguration = readField(
                         session.closingTarget, "windowConfiguration");
-                Object openingConfiguration = readField(
-                        session.openingTarget, "windowConfiguration");
                 int taskId = readIntFieldOrDefault(
                         session.closingTarget, "taskId", -1);
                 int closingDisplay = readIntFieldOrDefault(
@@ -7883,15 +7935,43 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         openingTaskInfo, "displayId", -1);
                 Object closingRotationObject = invokeAnyMethod(
                         closingConfiguration, "getRotation", new Object[0]);
-                Object openingRotationObject = invokeAnyMethod(
-                        openingConfiguration, "getRotation", new Object[0]);
                 int closingRotation = closingRotationObject instanceof Number
                         ? ((Number) closingRotationObject).intValue() : -1;
-                int openingRotation = openingRotationObject instanceof Number
-                        ? ((Number) openingRotationObject).intValue() : -1;
+                Class<?> applicationClass = Class.forName(
+                        MIUI_HOME_APPLICATION, false, classLoader);
+                Method getLauncher = applicationClass.getDeclaredMethod(
+                        "getLauncher");
+                getLauncher.setAccessible(true);
+                Object launcher = getLauncher.invoke(null);
+                Class<?> baseLauncherClass = Class.forName(
+                        MIUI_HOME_BASE_LAUNCHER, false, classLoader);
+                Method getCurrentDisplayRotation =
+                        baseLauncherClass.getDeclaredMethod(
+                                "getCurrentDisplayRotation");
+                Method getRootViewRect = baseLauncherClass.getDeclaredMethod(
+                        "getRootViewRect");
+                getCurrentDisplayRotation.setAccessible(true);
+                getRootViewRect.setAccessible(true);
+                Object launcherRotationObject = launcher == null ? null
+                        : getCurrentDisplayRotation.invoke(launcher);
+                int launcherRotation = launcherRotationObject instanceof Number
+                        ? ((Number) launcherRotationObject).intValue() : -1;
+                WindowManager windowManager = launcher instanceof Context
+                        ? (WindowManager) ((Context) launcher).getSystemService(
+                        Context.WINDOW_SERVICE) : null;
+                int homeRotation = windowManager == null
+                        || windowManager.getDefaultDisplay() == null
+                        ? -1 : windowManager.getDefaultDisplay().getRotation();
+                Object homeBoundsObject = launcher == null ? null
+                        : getRootViewRect.invoke(launcher);
+                Rect homeBounds = homeBoundsObject instanceof Rect
+                        ? new Rect((Rect) homeBoundsObject) : null;
                 boolean exactShape = taskId >= 0 && closingDisplay >= 0
                         && closingDisplay == openingDisplay
-                        && closingRotation >= 0 && openingRotation >= 0
+                        && closingRotation >= 0
+                        && launcherRotation == closingRotation
+                        && homeRotation == 0
+                        && homeBounds != null && !homeBounds.isEmpty()
                         && resolveRemoteTargetActivityType(
                         session.closingTarget) == ACTIVITY_TYPE_STANDARD
                         && resolveRemoteTargetWindowingMode(
@@ -7911,6 +7991,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                 }
 
                 ensureUnifiedNativePreviewReflection();
+                RectF nativeStartRect = toUnifiedNativeHomeRect(
+                        launcherRotation, homeRotation,
+                        new RectF(session.startRect));
                 Object compatApps = wrapNativeAnimationTargets(session.apps);
                 Object closingCompat = null;
                 int appCount = Array.getLength(compatApps);
@@ -7951,18 +8034,14 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         new Object[]{firstTarget});
                 invokeAnyMethod(clipHelper, "updateSourceStackBounds",
                         new Object[]{targetSet, Boolean.TRUE});
-                Object sourceBounds = readField(
-                        firstTarget, "sourceContainerBounds");
-                Rect nativeBounds = sourceBounds instanceof Rect
-                        && !((Rect) sourceBounds).isEmpty()
-                        ? new Rect((Rect) sourceBounds)
-                        : new Rect(session.startRect);
                 invokeAnyMethod(clipHelper, "updateHomeStack",
-                        new Object[]{nativeBounds});
-                invokeAnyMethod(clipHelper, "updateTargetRect",
-                        new Object[]{nativeBounds});
+                        new Object[]{homeBounds});
                 invokeAnyMethod(clipHelper, "prepareAnimation",
                         new Object[]{Boolean.FALSE});
+                Rect nativeStartBounds = new Rect();
+                nativeStartRect.round(nativeStartBounds);
+                invokeAnyMethod(clipHelper, "updateTargetRect",
+                        new Object[]{nativeStartBounds});
                 invokeAnyMethod(clipHelper, "setIsUseForHomeGesture",
                         new Object[]{Boolean.TRUE});
 
@@ -8008,8 +8087,8 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         animationIdentity;
                 session.unifiedNativeTargetSet = targetSet;
                 session.unifiedNativeClipHelper = clipHelper;
-                session.unifiedNativeCurrentRotation = closingRotation;
-                session.unifiedNativeHomeRotation = openingRotation;
+                session.unifiedNativeCurrentRotation = launcherRotation;
+                session.unifiedNativeHomeRotation = homeRotation;
                 session.unifiedNativePreviewOwned = true;
                 // Exercise both generated accessors (with the exact backing-field fallback)
                 // before the module starts the first native frame. Later finish-epoch gating
@@ -8067,6 +8146,9 @@ public abstract class MiuiHomeReturnHomeRuntime extends SystemUiHookRuntime {
                         "Unified predictive preview with Xiaomi WindowElement"
                                 + ", generation=" + session.generation
                                 + ", taskId=" + taskId
+                                + ", currentRotation="
+                                + launcherRotation
+                                + ", homeRotation=" + homeRotation
                                 + ", animationIdentity="
                                 + shortObject(animationIdentity)
                                 + ", leash="
