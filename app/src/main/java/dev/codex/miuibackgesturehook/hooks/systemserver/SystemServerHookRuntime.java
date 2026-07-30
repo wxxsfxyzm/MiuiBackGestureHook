@@ -1065,7 +1065,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 closeActivity, "getBounds", new Object[0]);
         Object openBounds = invokeAnyMethod(
                 openActivity, "getBounds", new Object[0]);
-        return closeTask != null
+        boolean exact = closeTask != null
                 && closeTask == openTask
                 && activityType instanceof Number
                 && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
@@ -1084,6 +1084,21 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 openActivity, "isVisibleRequested", new Object[0]))
                 && Boolean.FALSE.equals(readField(
                 openActivity, "mLaunchTaskBehind"));
+        if (!exact) {
+            return false;
+        }
+        Object displayContent = readField(openActivity, "mDisplayContent");
+        int fixedRotation = ((Number) invokeAnyMethod(displayContent,
+                "rotationForActivityInDifferentOrientation",
+                new Object[]{openActivity})).intValue();
+        if (fixedRotation != -1) {
+            log(Log.INFO, TAG, "Treating fixed-rotation cross-activity prepare as non-exact"
+                    + ", rotation=" + fixedRotation
+                    + ", close=" + shortObject(closeActivity)
+                    + ", open=" + shortObject(openActivity));
+            return false;
+        }
+        return true;
     }
 
 }

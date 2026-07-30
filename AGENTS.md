@@ -467,7 +467,11 @@ System-server compatibility rules:
   fullscreen cross-Activity shape only when the two distinct ActivityRecords are in the same
   standard Task, the opening Activity is still hidden, and the supplied containers exactly match
   `promoteToTFIfNeeded(...)` (the ActivityRecords themselves or their native embedded-TaskFragment
-  promotion). Xiaomi reports both prepared changes as `TO_FRONT`; after WMS builds that exact
+  promotion). Treat a shape for which the opening Activity's native
+  `DisplayContent.rotationForActivityInDifferentOrientation(...)` returns a concrete rotation as
+  non-exact and retain the compatibility skip; Xiaomi's prepared transition loses its stable roles
+  and close ownership when fixed rotation ends during the gesture. Xiaomi reports both prepared
+  changes as `TO_FRONT`; after WMS builds that exact
   prepared `TransitionInfo` and before it is dispatched to Shell, set only the already-visible
   departing Activity or embedded TaskFragment's final mode to AOSP `CHANGE`. Preserve
   `FLAG_CHANGE_YES_ANIMATION` only when target calculation adds it to the promoted opening
