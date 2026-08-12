@@ -814,6 +814,7 @@ abstract class MiuiHomeReturnHomeUnifiedRuntime
             if (!deferredControllerReplacement
                     || currentSession != null
                     || pendingLauncherOpenBarrier.get() != null
+                    || pendingWidgetOpenBarrier.get() != null
                     || !pendingUnifiedInterruptedAnimToConfigs.isEmpty()) {
                 return;
             }

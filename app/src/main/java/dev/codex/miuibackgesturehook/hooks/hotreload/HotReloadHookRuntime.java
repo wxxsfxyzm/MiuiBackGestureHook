@@ -391,8 +391,12 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         !oldHookIds.contains("systemui_back_slide_finish"),
                         !oldHookIds.contains("systemui_back_color_root_apply"));
             }
-            if (!oldHookIds.contains("systemui_cross_task_background")) {
-                hookCrossTaskBackground(hotReloadClassLoader);
+            if (!oldHookIds.contains("systemui_predictive_background_remove")
+                    || (!oldHookIds.contains(
+                    "systemui_predictive_background_ensure_4")
+                    && !oldHookIds.contains(
+                    "systemui_predictive_background_ensure_6"))) {
+                hookPredictiveBackBackground(hotReloadClassLoader);
             }
             if (!backCommitCompositionHookReady) {
                 hookBackCommitComposition(hotReloadClassLoader);
@@ -546,6 +550,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (!oldHookIds.contains("miui_home_return_home_fresh_open")) {
                     hookMiuiHomeReturnHomeFreshOpen(hotReloadClassLoader);
                 }
+                if (!oldHookIds.contains("miui_home_widget_open_shell_barrier")) {
+                    hookMiuiHomeWidgetOpenBarrier(hotReloadClassLoader);
+                }
                 if (!oldHookIds.contains("miui_home_return_home_cancel_direct")) {
                     hookMiuiHomeReturnHomeDirectCancel(hotReloadClassLoader);
                 }
@@ -657,6 +664,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::routeMiuiHomeReturnHomeSameIconParallel;
             case "miui_home_return_home_fresh_open":
                 return this::forceMiuiHomeReturnHomeFreshOpen;
+            case "miui_home_widget_open_shell_barrier":
+                return this::deferMiuiHomeWidgetOpenUntilShellCleanup;
             case "miui_home_return_home_cancel_direct":
                 return this::wrapMiuiHomeReturnHomeDirectCancel;
             case "miui_home_drawer_state":
@@ -707,7 +716,11 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             case "systemui_back_color_root_scrim_creation":
                 return this::keepFreeformScrimHiddenUntilFirstApply;
             case "systemui_cross_task_background":
-                return this::tintCrossTaskBackground;
+            case "systemui_predictive_background_ensure_4":
+            case "systemui_predictive_background_ensure_6":
+                return this::customizePredictiveBackBackground;
+            case "systemui_predictive_background_remove":
+                return this::removePredictiveBackBackground;
             case "systemui_back_prepare_reparent":
                 return this::correctPredictiveBackPrepareReparent;
             case "systemui_back_prepared_target_arrival":
@@ -964,6 +977,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     Collections.emptySet());
             hookMiuiHomeReturnHomeSameIconParallel(classLoader);
             hookMiuiHomeReturnHomeFreshOpen(classLoader);
+            hookMiuiHomeWidgetOpenBarrier(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
             hookMiuiHomeDrawerState(classLoader);
             hookMiuiHomeFreeformBackTouchability(classLoader);

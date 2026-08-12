@@ -157,6 +157,18 @@ private fun PredictiveBackSettingsScreen(
     var confirmedHyperOsHapticsEnhanced by remember { mutableStateOf(false) }
     var hyperOsSlideAnimation by remember { mutableStateOf(false) }
     var confirmedHyperOsSlideAnimation by remember { mutableStateOf(false) }
+    var aospBackgroundMode by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE)
+    }
+    var confirmedAospBackgroundMode by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE)
+    }
+    var aospWallpaperBlur by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR)
+    }
+    var confirmedAospWallpaperBlur by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR)
+    }
     var moduleLogging by remember { mutableStateOf(true) }
     var confirmedModuleLogging by remember { mutableStateOf(true) }
     val writeMutex = remember(preferences) { Mutex() }
@@ -180,6 +192,12 @@ private fun PredictiveBackSettingsScreen(
         confirmedHyperOsHapticsEnhanced = false
         hyperOsSlideAnimation = false
         confirmedHyperOsSlideAnimation = false
+        aospBackgroundMode = PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE
+        confirmedAospBackgroundMode =
+            PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE
+        aospWallpaperBlur = PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR
+        confirmedAospWallpaperBlur =
+            PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR
         moduleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         confirmedModuleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         if (!serviceStateObserved) {
@@ -234,8 +252,25 @@ private fun PredictiveBackSettingsScreen(
                         PredictiveBackPreferences.KEY_MODULE_LOGGING,
                         PredictiveBackPreferences.DEFAULT_MODULE_LOGGING,
                     ),
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR,
+                        PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR,
+                    ),
                 )
-                remotePreferences to flags
+                val storedAospBackgroundMode = remotePreferences.getInt(
+                    PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE,
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE,
+                )
+                val aospBackgroundMode = if (
+                    PredictiveBackPreferences.isValidAospBackgroundMode(
+                        storedAospBackgroundMode,
+                    )
+                ) {
+                    storedAospBackgroundMode
+                } else {
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE
+                }
+                Triple(remotePreferences, flags, aospBackgroundMode)
             }
             preferences = loaded.first
             hyperOsIndicator = loaded.second[0]
@@ -246,8 +281,12 @@ private fun PredictiveBackSettingsScreen(
             confirmedHyperOsHapticsEnhanced = loaded.second[2]
             hyperOsSlideAnimation = loaded.second[3]
             confirmedHyperOsSlideAnimation = loaded.second[3]
+            aospBackgroundMode = loaded.third
+            confirmedAospBackgroundMode = loaded.third
             moduleLogging = loaded.second[4]
             confirmedModuleLogging = loaded.second[4]
+            aospWallpaperBlur = loaded.second[5]
+            confirmedAospWallpaperBlur = loaded.second[5]
         } catch (_: Throwable) {
             configurationError = configurationErrorMessage
         } finally {
@@ -345,6 +384,61 @@ private fun PredictiveBackSettingsScreen(
             { confirmedModuleLogging = it },
         )
     }
+    val persistAospWallpaperBlur: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR,
+            requestedEnabled,
+            { aospWallpaperBlur = it },
+            { confirmedAospWallpaperBlur },
+            { confirmedAospWallpaperBlur = it },
+        )
+    }
+    val persistAospBackgroundMode: (Int) -> Unit = persistMode@{ requestedMode ->
+        if (!PredictiveBackPreferences.isValidAospBackgroundMode(requestedMode)) {
+            return@persistMode
+        }
+        val activePreferences = preferences ?: return@persistMode
+        aospBackgroundMode = requestedMode
+        saveError = null
+        scope.launch {
+            val saved = writeMutex.withLock {
+                val fallbackMode = confirmedAospBackgroundMode
+                val commitSucceeded = withContext(Dispatchers.IO) {
+                    val succeeded = try {
+                        activePreferences.edit()
+                            .putInt(
+                                PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE,
+                                requestedMode,
+                            )
+                            .commit()
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    if (!succeeded) {
+                        try {
+                            activePreferences.edit()
+                                .putInt(
+                                    PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE,
+                                    fallbackMode,
+                                )
+                                .commit()
+                        } catch (_: Throwable) {
+                            // Restore the RemotePreferences cache where possible.
+                        }
+                    }
+                    succeeded
+                }
+                if (preferences === activePreferences && commitSucceeded) {
+                    confirmedAospBackgroundMode = requestedMode
+                }
+                commitSucceeded
+            }
+            if (preferences === activePreferences && !saved) {
+                aospBackgroundMode = confirmedAospBackgroundMode
+                saveError = saveErrorMessage
+            }
+        }
+    }
     val statusMessage = when {
         configurationLoading -> SettingsStatusCardMessage(
             text = serviceLoadingMessage,
@@ -428,6 +522,19 @@ private fun PredictiveBackSettingsScreen(
                     moduleLogging = moduleLogging,
                     configurationEnabled = configurationEnabled,
                     onModuleLoggingToggle = persistModuleLogging,
+                    modifier = Modifier
+                        .padding(horizontal = 12.dp)
+                        .padding(bottom = 8.dp),
+                )
+            }
+            item(key = "aosp_background") {
+                AospBackgroundCard(
+                    backgroundMode = aospBackgroundMode,
+                    wallpaperBlur = aospWallpaperBlur,
+                    configurationEnabled = configurationEnabled,
+                    hyperOsSlideAnimation = hyperOsSlideAnimation,
+                    onBackgroundModeChange = persistAospBackgroundMode,
+                    onWallpaperBlurToggle = persistAospWallpaperBlur,
                     modifier = Modifier
                         .padding(horizontal = 12.dp)
                         .padding(bottom = 8.dp),
@@ -594,6 +701,64 @@ private fun ModuleLoggingCard(
             checked = moduleLogging,
             enabled = configurationEnabled,
             onCheckedChange = onModuleLoggingToggle,
+        )
+    }
+}
+
+@Composable
+private fun AospBackgroundCard(
+    backgroundMode: Int,
+    wallpaperBlur: Boolean,
+    configurationEnabled: Boolean,
+    hyperOsSlideAnimation: Boolean,
+    onBackgroundModeChange: (Int) -> Unit,
+    onWallpaperBlurToggle: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val switchesEnabled = configurationEnabled && !hyperOsSlideAnimation
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        insideMargin = PaddingValues(0.dp),
+    ) {
+        SwitchPreference(
+            title = stringResource(R.string.aosp_background_black_title),
+            summary = stringResource(R.string.aosp_background_black_summary),
+            checked = backgroundMode ==
+                PredictiveBackPreferences.AOSP_BACKGROUND_BLACK,
+            enabled = switchesEnabled,
+            onCheckedChange = { checked ->
+                onBackgroundModeChange(
+                    if (checked) {
+                        PredictiveBackPreferences.AOSP_BACKGROUND_BLACK
+                    } else {
+                        PredictiveBackPreferences.AOSP_BACKGROUND_SYSTEM
+                    },
+                )
+            },
+        )
+        SwitchPreference(
+            title = stringResource(R.string.aosp_background_wallpaper_title),
+            summary = stringResource(R.string.aosp_background_wallpaper_summary),
+            checked = backgroundMode ==
+                PredictiveBackPreferences.AOSP_BACKGROUND_WALLPAPER,
+            enabled = switchesEnabled,
+            onCheckedChange = { checked ->
+                onBackgroundModeChange(
+                    if (checked) {
+                        PredictiveBackPreferences.AOSP_BACKGROUND_WALLPAPER
+                    } else {
+                        PredictiveBackPreferences.AOSP_BACKGROUND_SYSTEM
+                    },
+                )
+            },
+        )
+        SwitchPreference(
+            title = stringResource(R.string.aosp_wallpaper_blur_title),
+            summary = stringResource(R.string.aosp_wallpaper_blur_summary),
+            checked = wallpaperBlur,
+            enabled = switchesEnabled && backgroundMode ==
+                PredictiveBackPreferences.AOSP_BACKGROUND_WALLPAPER,
+            onCheckedChange = onWallpaperBlurToggle,
         )
     }
 }
