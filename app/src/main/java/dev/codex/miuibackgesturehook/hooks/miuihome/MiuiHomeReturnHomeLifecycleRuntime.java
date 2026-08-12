@@ -1182,14 +1182,210 @@ abstract class MiuiHomeReturnHomeLifecycleRuntime
                 StandardReturnHomeCommitSignal signal) {
             ReturnHomeLauncherOpenBarrierToken token =
                     pendingLauncherOpenBarrier.get();
-            if (token == null || signal == null
-                    || !matchesReturnHomeSignal(
+            if (token != null && signal != null
+                    && matchesReturnHomeSignal(
                     token.expectedSignal, signal)) {
+                token.finishSignal = signal;
+                token.finishReceived.set(true);
+                completeLauncherOpenBarrier(token);
+            }
+            ReturnHomeWidgetOpenBarrierToken widgetToken =
+                    pendingWidgetOpenBarrier.get();
+            if (widgetToken == null || signal == null
+                    || !matchesReturnHomeSignal(
+                    widgetToken.expectedSignal, signal)) {
                 return;
             }
-            token.finishSignal = signal;
-            token.finishReceived.set(true);
-            completeLauncherOpenBarrier(token);
+            widgetToken.finishSignal = signal;
+            widgetToken.finishReceived.set(true);
+            releaseWidgetOpenBarrier(widgetToken);
+        }
+
+        protected ReturnHomeWidgetOpenBarrierToken prepareWidgetOpenBarrier(
+                Object stateManager, Object[] args) throws Throwable {
+            if (args == null || args.length != 4
+                    || args[3] == null
+                    || Looper.myLooper() != Looper.getMainLooper()) {
+                return null;
+            }
+            Class<?> widgetEventClass = Class.forName(
+                    MIUI_HOME_WIDGET_CLICK_EVENT_INFO, false, classLoader);
+            if (!widgetEventClass.isInstance(args[3])) {
+                return null;
+            }
+
+            ReturnHomeWidgetOpenBarrierToken pending =
+                    pendingWidgetOpenBarrier.get();
+            if (pending != null) {
+                if (pending.stateManager != stateManager
+                        || pending.widgetEvent != args[3]
+                        || pending.args.length != args.length) {
+                    return null;
+                }
+                for (int index = 0; index < args.length; index++) {
+                    if (pending.args[index] != args[index]) {
+                        return null;
+                    }
+                }
+                if (pending.releasing.get()
+                        && pending.resumeEntered.compareAndSet(false, true)) {
+                    return pending;
+                }
+                // Suppress an exact duplicate invocation while the same click is already
+                // waiting for its authenticated Shell cleanup boundary.
+                return pending;
+            }
+
+            ReturnHomeSession session = currentSession;
+            if (session == null || session.finished.get() != 0
+                    || session.cleaned.get() != 0
+                    || !session.nativeHandoffStarted
+                    || !session.nativeAnimationStarted
+                    || !session.nativeContinuationVerified
+                    || session.stateManager != stateManager
+                    || session.nativeWindowElement == null
+                    || session.nativeAnimationIdentity == null
+                    || !"CLOSE_TO_HOME".equals(session.nativeAnimationType)) {
+                return null;
+            }
+            UnifiedNativeAdoptedStandardCommitIdentity standard =
+                    session.unifiedNativeAdoptedStandardCommit;
+            StandardReturnHomeCommitSignal expected = standard == null
+                    ? null : standard.signal;
+            Object currentElement = invokeAnyMethod(
+                    stateManager, "getCurrentWindowElement", new Object[0]);
+            Object currentIdentity = invokeAnyMethod(
+                    session.nativeWindowElement, "getAnimSymbol", new Object[0]);
+            String currentType = readNativeAnimationType(
+                    session.nativeWindowElement);
+            boolean standardOwned = standard != null
+                    && standard.session == session
+                    && standard.generation == session.generation
+                    && standard.windowElement == session.nativeWindowElement
+                    && standard.animationIdentity
+                    == session.nativeAnimationIdentity
+                    && expected != null && !expected.elementBoundaryOnly
+                    && standardSignalMatchesSession(expected, session);
+            if (currentSession != session
+                    || currentElement != session.nativeWindowElement
+                    || currentIdentity != session.nativeAnimationIdentity
+                    || !"CLOSE_TO_HOME".equals(currentType)
+                    || !standardOwned) {
+                moduleLog(Log.WARN, TAG,
+                        "Rejected Xiaomi widget OPEN cleanup barrier"
+                                + ", generation=" + session.generation
+                                + ", sameElement="
+                                + (currentElement == session.nativeWindowElement)
+                                + ", sameIdentity="
+                                + (currentIdentity == session.nativeAnimationIdentity)
+                                + ", type=" + currentType
+                                + ", standardOwned=" + standardOwned);
+                return null;
+            }
+            Method method = stateManager.getClass().getDeclaredMethod(
+                    "onLauncherStartActivity", android.content.Intent.class,
+                    Object.class, View.class, widgetEventClass);
+            method.setAccessible(true);
+            ReturnHomeWidgetOpenBarrierToken token =
+                    new ReturnHomeWidgetOpenBarrierToken(
+                            session, stateManager, method, args.clone(),
+                            args[3], expected);
+            if (!pendingWidgetOpenBarrier.compareAndSet(null, token)) {
+                return null;
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Deferred Xiaomi widget OPEN until Shell cleanup"
+                            + ", generation=" + token.generation
+                            + ", attempt=" + expected.attempt
+                            + ", taskId=" + expected.taskId
+                            + ", transitionDebugId="
+                            + expected.transitionDebugId
+                            + ", widgetEvent="
+                            + shortObject(token.widgetEvent));
+            return token;
+        }
+
+        protected void releaseWidgetOpenBarrier(
+                ReturnHomeWidgetOpenBarrierToken token) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                handler.post(() -> releaseWidgetOpenBarrier(token));
+                return;
+            }
+            boolean valid = pendingWidgetOpenBarrier.get() == token
+                    && (attached || deferredControllerReplacement)
+                    && !token.invalidated.get()
+                    && token.finishReceived.get()
+                    && token.expectedSignal != null
+                    && token.expectedSignal.runnerSession
+                    == token.session.finishedCallback
+                    && matchesReturnHomeSignal(
+                    token.expectedSignal, token.finishSignal);
+            if (!valid || !token.releasing.compareAndSet(false, true)) {
+                if (!valid) {
+                    invalidatePendingWidgetOpenBarrier(
+                            "completionIdentityMismatch");
+                }
+                return;
+            }
+            try {
+                token.method.invoke(token.stateManager, token.args);
+                if (!token.resumeEntered.get()) {
+                    completeWidgetOpenBarrierInvocation(token,
+                            new IllegalStateException(
+                                    "Widget OPEN re-entry was not intercepted"));
+                }
+            } catch (InvocationTargetException exception) {
+                Throwable cause = exception.getCause() == null
+                        ? exception : exception.getCause();
+                completeWidgetOpenBarrierInvocation(token, cause);
+            } catch (Throwable throwable) {
+                completeWidgetOpenBarrierInvocation(token, throwable);
+            }
+        }
+
+        protected void completeWidgetOpenBarrierInvocation(
+                ReturnHomeWidgetOpenBarrierToken token, Throwable failure) {
+            if (token == null || !token.completed.compareAndSet(false, true)) {
+                return;
+            }
+            pendingWidgetOpenBarrier.compareAndSet(token, null);
+            if (failure == null) {
+                moduleLog(Log.INFO, TAG,
+                        "Released Xiaomi widget OPEN after Shell cleanup"
+                                + ", generation=" + token.generation
+                                + ", attempt="
+                                + token.expectedSignal.attempt
+                                + ", taskId="
+                                + token.expectedSignal.taskId
+                                + ", transitionDebugId="
+                                + token.expectedSignal.transitionDebugId);
+            } else {
+                moduleLog(Log.WARN, TAG,
+                        "Failed delayed Xiaomi widget OPEN"
+                                + ", generation=" + token.generation,
+                        failure);
+            }
+            maybeFinishDeferredControllerAfterConfigAck(
+                    "widgetOpenBarrier");
+        }
+
+        protected void invalidatePendingWidgetOpenBarrier(String reason) {
+            ReturnHomeWidgetOpenBarrierToken token =
+                    pendingWidgetOpenBarrier.getAndSet(null);
+            if (token == null || token.completed.get()) {
+                return;
+            }
+            token.invalidated.set(true);
+            token.completed.set(true);
+            moduleLog(Log.INFO, TAG,
+                    "Invalidated Xiaomi widget OPEN cleanup barrier"
+                            + ", generation=" + token.generation
+                            + ", finishReceived="
+                            + token.finishReceived.get()
+                            + ", releasing=" + token.releasing.get()
+                            + ", reason=" + reason);
+            maybeFinishDeferredControllerAfterConfigAck(
+                    "widgetOpenBarrierInvalidated:" + reason);
         }
 
         protected boolean matchesReturnHomeSignal(

@@ -16,9 +16,15 @@ public final class PredictiveBackPreferences {
     public static final String KEY_HYPEROS_SLIDE_ANIMATION =
             "hyperos_slide_back_animation";
     public static final boolean DEFAULT_HYPEROS_SLIDE_ANIMATION = false;
+    public static final String KEY_AOSP_BACKGROUND_MODE = "aosp_background_mode";
+    public static final int AOSP_BACKGROUND_SYSTEM = 0;
+    public static final int AOSP_BACKGROUND_BLACK = 1;
+    public static final int AOSP_BACKGROUND_WALLPAPER = 2;
+    public static final int DEFAULT_AOSP_BACKGROUND_MODE = AOSP_BACKGROUND_SYSTEM;
+    public static final String KEY_AOSP_WALLPAPER_BLUR = "aosp_wallpaper_blur";
+    public static final boolean DEFAULT_AOSP_WALLPAPER_BLUR = false;
     public static final String KEY_MODULE_LOGGING = "module_logging";
     public static final boolean DEFAULT_MODULE_LOGGING = true;
-
     /** The vertical size of both Xiaomi side trigger areas, expressed as a percentage. */
     public static final String KEY_GESTURE_TRIGGER_HEIGHT_PERCENT =
             "gesture_trigger_height_percent";
@@ -34,5 +40,9 @@ public final class PredictiveBackPreferences {
     public static final int MAX_GESTURE_TRIGGER_POSITION_PERCENT = 100;
 
     private PredictiveBackPreferences() {
+    }
+
+    public static boolean isValidAospBackgroundMode(int mode) {
+        return mode >= AOSP_BACKGROUND_SYSTEM && mode <= AOSP_BACKGROUND_WALLPAPER;
     }
 }

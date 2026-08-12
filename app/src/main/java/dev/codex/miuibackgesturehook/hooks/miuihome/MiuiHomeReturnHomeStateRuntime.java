@@ -52,6 +52,8 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
                 pendingDirectCancel = new AtomicReference<>();
         protected final AtomicReference<ReturnHomeLauncherOpenBarrierToken>
                 pendingLauncherOpenBarrier = new AtomicReference<>();
+        protected final AtomicReference<ReturnHomeWidgetOpenBarrierToken>
+                pendingWidgetOpenBarrier = new AtomicReference<>();
         protected final AtomicReference<ReturnHomeElementLeashReuseToken>
                 pendingElementLeashReuse = new AtomicReference<>();
         protected final AtomicReference<StandardReturnHomeCommitSignal>
@@ -722,6 +724,15 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
         protected abstract void onStandardShellReturnHomeFinished(
                 StandardReturnHomeCommitSignal signal);
 
+        protected abstract ReturnHomeWidgetOpenBarrierToken
+                prepareWidgetOpenBarrier(
+                Object stateManager, Object[] args) throws Throwable;
+
+        protected abstract void completeWidgetOpenBarrierInvocation(
+                ReturnHomeWidgetOpenBarrierToken token, Throwable failure);
+
+        protected abstract void invalidatePendingWidgetOpenBarrier(String reason);
+
         protected abstract boolean matchesReturnHomeSignal(
                 StandardReturnHomeCommitSignal expected,
                 StandardReturnHomeCommitSignal actual);
@@ -1128,6 +1139,35 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
                 this.pendingCommitInterruption =
                         pendingCommitInterruption;
                 this.nativeParallelRoute = nativeParallelRoute;
+            }
+        }
+
+        protected final class ReturnHomeWidgetOpenBarrierToken {
+            final long generation;
+            final ReturnHomeSession session;
+            final Object stateManager;
+            final Method method;
+            final Object[] args;
+            final Object widgetEvent;
+            final StandardReturnHomeCommitSignal expectedSignal;
+            final AtomicBoolean finishReceived = new AtomicBoolean();
+            final AtomicBoolean releasing = new AtomicBoolean();
+            final AtomicBoolean resumeEntered = new AtomicBoolean();
+            final AtomicBoolean completed = new AtomicBoolean();
+            final AtomicBoolean invalidated = new AtomicBoolean();
+            volatile StandardReturnHomeCommitSignal finishSignal;
+
+            ReturnHomeWidgetOpenBarrierToken(
+                    ReturnHomeSession session, Object stateManager,
+                    Method method, Object[] args, Object widgetEvent,
+                    StandardReturnHomeCommitSignal expectedSignal) {
+                this.generation = session.generation;
+                this.session = session;
+                this.stateManager = stateManager;
+                this.method = method;
+                this.args = args;
+                this.widgetEvent = widgetEvent;
+                this.expectedSignal = expectedSignal;
             }
         }
 
@@ -1626,7 +1666,6 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
             float initialTouchY;
             int swipeEdge;
             float startCornerRadius;
-            float endCornerRadius;
             float currentCornerRadius;
             float previewProgressDistancePx;
             float lastInputProgress;

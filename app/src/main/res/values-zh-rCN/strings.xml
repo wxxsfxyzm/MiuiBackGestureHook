@@ -26,6 +26,12 @@
     <string name="hyperos_slide_animation_summary">以全宽侧滑替代 AOSP 预测性返回</string>
     <string name="module_logging_title">详细模块日志</string>
     <string name="module_logging_summary">保留信息日志；关闭后仍保留警告和错误日志</string>
+    <string name="aosp_background_black_title">返回动画纯黑背景</string>
+    <string name="aosp_background_black_summary">将 AOSP、HyperOS 及应用间返回动画的共同底板改为纯黑</string>
+    <string name="aosp_background_wallpaper_title">返回动画显示桌面壁纸</string>
+    <string name="aosp_background_wallpaper_summary">保留上下层 Activity，将 AOSP、HyperOS 及应用间返回的共同底板替换为当前壁纸快照</string>
+    <string name="aosp_wallpaper_blur_title">壁纸模糊（实验）</string>
+    <string name="aosp_wallpaper_blur_summary">尝试使用 HyperOS 合成器模糊壁纸底板；设备不支持时自动显示清晰壁纸</string>
     <string name="gesture_trigger_title">两侧触发区域</string>
     <string name="gesture_trigger_entry_title">两侧触发区域</string>
     <string name="gesture_trigger_entry_summary">调整左右两侧触发区域的高度和垂直位置</string>

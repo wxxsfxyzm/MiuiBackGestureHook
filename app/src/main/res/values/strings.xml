@@ -28,6 +28,12 @@
     <string name="hyperos_slide_animation_summary">Full-width slide instead of the AOSP predictive back</string>
     <string name="module_logging_title">Detailed module logs</string>
     <string name="module_logging_summary">Keep informational logs enabled; warnings and errors are always kept</string>
+    <string name="aosp_background_black_title">Pure black return background</string>
+    <string name="aosp_background_black_summary">Use a pure-black shared backdrop for AOSP, HyperOS, and cross-app return animations</string>
+    <string name="aosp_background_wallpaper_title">Show wallpaper during return</string>
+    <string name="aosp_background_wallpaper_summary">Keep both Activity targets and show the current wallpaper snapshot behind AOSP, HyperOS, and cross-app return animations</string>
+    <string name="aosp_wallpaper_blur_title">Wallpaper blur (experimental)</string>
+    <string name="aosp_wallpaper_blur_summary">Try the HyperOS compositor blur for the wallpaper backdrop; fall back to the clear wallpaper when unsupported</string>
     <string name="gesture_trigger_title">Side trigger area</string>
     <string name="gesture_trigger_entry_title">Side trigger area</string>
     <string name="gesture_trigger_entry_summary">Adjust the height and vertical position of both side trigger areas</string>

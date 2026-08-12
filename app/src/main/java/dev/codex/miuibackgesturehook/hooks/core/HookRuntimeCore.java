@@ -126,6 +126,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.miui.home.recents.anim.StateManager$windowElementAnimListener$1";
     protected static final String MIUI_HOME_STATE_MANAGER =
             "com.miui.home.recents.anim.StateManager";
+    protected static final String MIUI_HOME_WIDGET_CLICK_EVENT_INFO =
+            "com.miui.home.recents.event.WidgetClickEventInfo";
     protected static final String MIUI_HOME_WINDOW_ELEMENT =
             "com.miui.home.recents.anim.WindowElement";
     protected static final String MIUI_HOME_REMOTE_TRANSITION_INFO =
@@ -152,6 +154,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.miui.home.launcher.Application";
     protected static final String MIUI_HOME_OVERVIEW_PROXY_IMPL =
             "com.miui.home.recents.OverviewProxyImpl";
+    protected static final String MIUI_HOME_TOUCH_INTERACTION_OVERVIEW_PROXY =
+            "com.miui.home.recents.TouchInteractionService$1";
     protected static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT =
             "com.android.systemui.shared.recents.system.RemoteAnimationTargetCompat";
     protected static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_SET =
@@ -226,9 +230,6 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.android.wm.shell.back.DefaultCrossActivityBackAnimation";
     protected static final String BACK_ANIMATION_BACKGROUND =
             "com.android.wm.shell.back.BackAnimationBackground";
-    // The hard-coded color CrossTaskBackAnimation passes to ensureBackground (0x43433A);
-    // used to distinguish its background from cross-activity's task-colored one.
-    protected static final int CROSS_TASK_BACKGROUND_COLOR = 4408122;
     protected static final String BACK_TRANSITION_HANDLER =
             "com.android.wm.shell.back.BackAnimationController$BackTransitionHandler";
     protected static final String DEFAULT_TRANSITION_HANDLER =
@@ -283,6 +284,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final String EXTRA_INPUT_SOURCE = "input_source";
     protected static final String EXTRA_INPUT_DISPLAY_ID = "input_display_id";
     protected static final String EXTRA_INPUT_EDGE = "input_edge";
+    protected static final String EXTRA_LAUNCHER_OVERVIEW_ACTIVE =
+            "launcher_overview_active";
     protected static final String EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE =
             "launcher_open_break_available";
     protected static final String EXTRA_LAUNCHER_OPEN_ACTIVE =
@@ -337,7 +340,6 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
     protected static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
     protected static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
-    protected static final float RETURN_HOME_END_CORNER_RADIUS_DP = 28.0f;
     protected static final String MIUI_SIDEBAR_BOUNDS = "sidebar_bounds";
     protected static final float MIUI_SIDEBAR_EXCLUSION_PADDING_DP = 8.0f;
     protected static final long MIUI_OVERVIEW_DISMISS_TIMEOUT_MS = 2500L;
@@ -474,16 +476,38 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile boolean predictiveBackApplicationMetadataFailureLogged;
     protected volatile boolean moduleLoggingEnabled =
             PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+    protected volatile int aospBackgroundMode =
+            PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE;
+    protected volatile boolean aospWallpaperBlurEnabled =
+            PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR;
+    protected volatile boolean cachedHyperOsSlideAnimationEnabled =
+            PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION;
     protected volatile SharedPreferences moduleLoggingPreferences;
     private final SharedPreferences.OnSharedPreferenceChangeListener
             moduleLoggingPreferenceListener = (preferences, key) -> {
-                if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)) {
+                if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)
+                        && !PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE.equals(key)
+                        && !PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR.equals(key)
+                        && !PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION.equals(key)) {
                     return;
                 }
                 try {
                     moduleLoggingEnabled = preferences.getBoolean(
                             PredictiveBackPreferences.KEY_MODULE_LOGGING,
                             PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+                    int mode = preferences.getInt(
+                            PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE,
+                            PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE);
+                    aospBackgroundMode = PredictiveBackPreferences
+                            .isValidAospBackgroundMode(mode)
+                            ? mode
+                            : PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE;
+                    aospWallpaperBlurEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR,
+                            PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR);
+                    cachedHyperOsSlideAnimationEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
+                            PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
                 } catch (Throwable ignored) {
                     // Keep the last known logging policy when the remote preference is unreadable.
                 }
@@ -495,6 +519,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile Field defaultTransitionAnimationSizeField;
     protected volatile Field defaultTransitionAnimExecutorField;
     protected volatile Method animatorCanReverseMethod;
+    protected final ConcurrentHashMap<String, Boolean> windowFlagValues =
+            new ConcurrentHashMap<>();
     protected LegacyBackAttempt legacyBackAttempt;
     protected int legacyBackGuardPhase = BACK_GUARD_IDLE;
     protected long legacyBackGuardDeadlineUptime;
@@ -943,8 +969,27 @@ public abstract class HookRuntimeCore extends XposedModule {
             moduleLoggingEnabled = preferences.getBoolean(
                     PredictiveBackPreferences.KEY_MODULE_LOGGING,
                     PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+            int mode = preferences.getInt(
+                    PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE,
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE);
+            aospBackgroundMode = PredictiveBackPreferences
+                    .isValidAospBackgroundMode(mode)
+                    ? mode
+                    : PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE;
+            aospWallpaperBlurEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR,
+                    PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR);
+            cachedHyperOsSlideAnimationEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
+                    PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
         } catch (Throwable ignored) {
             moduleLoggingEnabled = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+            aospBackgroundMode =
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACKGROUND_MODE;
+            aospWallpaperBlurEnabled =
+                    PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR;
+            cachedHyperOsSlideAnimationEnabled =
+                    PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION;
         }
     }
 
@@ -1056,11 +1101,33 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int displayId;
         public final int edge;
         public final long generation;
+        public final boolean launcherOpenActive;
+        public final long launcherOpenGeneration;
+        public final boolean launcherOverviewActive;
         public final long receivedUptime;
 
         public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
                                           int source, int displayId, int edge,
                                           long generation) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, false, 0L, false);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation,
+                                          boolean launcherOpenActive,
+                                          long launcherOpenGeneration) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, launcherOpenActive, launcherOpenGeneration, false);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation,
+                                          boolean launcherOpenActive,
+                                          long launcherOpenGeneration,
+                                          boolean launcherOverviewActive) {
             this.eventId = eventId;
             this.downTime = downTime;
             this.deviceId = deviceId;
@@ -1068,6 +1135,9 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.displayId = displayId;
             this.edge = edge;
             this.generation = generation;
+            this.launcherOpenActive = launcherOpenActive;
+            this.launcherOpenGeneration = launcherOpenGeneration;
+            this.launcherOverviewActive = launcherOverviewActive;
             this.receivedUptime = SystemClock.uptimeMillis();
         }
 
@@ -1082,6 +1152,10 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected boolean readWindowFlag(String methodName, ClassLoader preferredLoader,
                                      boolean defaultValue) {
+        Boolean cached = windowFlagValues.get(methodName);
+        if (cached != null) {
+            return cached.booleanValue();
+        }
         String[] classNames = new String[]{
                 "com.android.window.flags.Flags",
                 "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
@@ -1094,9 +1168,12 @@ public abstract class HookRuntimeCore extends XposedModule {
                 method.setAccessible(true);
                 Object result = method.invoke(null);
                 if (result instanceof Boolean) {
+                    boolean value = ((Boolean) result).booleanValue();
+                    windowFlagValues.putIfAbsent(methodName,
+                            Boolean.valueOf(value));
                     moduleLog(Log.INFO, TAG, "Read " + methodName + " from "
                             + className + ": " + result);
-                    return ((Boolean) result).booleanValue();
+                    return value;
                 }
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Flag lookup failed for " + className
@@ -1106,6 +1183,8 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
         moduleLog(Log.WARN, TAG, "Unable to read " + methodName
                 + "; defaulting to " + defaultValue);
+        windowFlagValues.putIfAbsent(methodName,
+                Boolean.valueOf(defaultValue));
         return defaultValue;
     }
 

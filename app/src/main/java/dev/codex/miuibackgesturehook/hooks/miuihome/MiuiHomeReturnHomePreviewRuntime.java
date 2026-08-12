@@ -53,6 +53,7 @@ abstract class MiuiHomeReturnHomePreviewRuntime
             ReturnHomeSession session = currentSession;
             return (session != null && session.cleaned.get() == 0)
                     || pendingLauncherOpenBarrier.get() != null
+                    || pendingWidgetOpenBarrier.get() != null
                     || !pendingUnifiedInterruptedAnimToConfigs.isEmpty();
         }
 
@@ -84,6 +85,7 @@ abstract class MiuiHomeReturnHomePreviewRuntime
             deathLinked = false;
             invalidatePendingLauncherOpenBarrier(
                     "shellBinderDied", true);
+            invalidatePendingWidgetOpenBarrier("shellBinderDied");
             beginDeferredControllerReplacement("shellBinderDied");
         }
 
@@ -111,6 +113,7 @@ abstract class MiuiHomeReturnHomePreviewRuntime
             attached = false;
             invalidatePendingLauncherOpenBarrier(
                     "detach:" + reason, true);
+            invalidatePendingWidgetOpenBarrier("detach:" + reason);
             invalidatePendingDirectCancel(null, "detach:" + reason, true);
             invalidateElementTransitionContinuity(
                     null, "detach:" + reason, true);
@@ -397,8 +400,6 @@ abstract class MiuiHomeReturnHomePreviewRuntime
                 session.currentRect.set(startBounds);
                 session.startCornerRadius = resolveMiuiWindowCornerRadius(
                         session.previewTarget);
-                session.endCornerRadius =
-                        dp(RETURN_HOME_END_CORNER_RADIUS_DP);
                 session.currentCornerRadius = session.startCornerRadius;
                 Context currentContext = context;
                 session.previewProgressDistancePx = currentContext == null
@@ -691,8 +692,11 @@ abstract class MiuiHomeReturnHomePreviewRuntime
                     ? session.startRect.left + margin
                     : session.startRect.right - margin - width;
             session.currentRect.set(left, top, left + width, top + height);
-            session.currentCornerRadius = lerp(session.startCornerRadius,
-                    session.endCornerRadius, progress);
+            // WindowAnimParams consumes a visual-space radius and compensates it for the
+            // shrinking surface matrix internally. Keep that visual radius stable during
+            // the interactive preview; interpolating toward a smaller dp value makes the
+            // app's physical corners visibly sharpen as it approaches the launcher icon.
+            session.currentCornerRadius = session.startCornerRadius;
             updateNativePreviewBlur(session, rawProgress);
             if (!driveUnifiedNativePreviewFrame(session, false)) {
                 rejectUnavailableNativePreview(

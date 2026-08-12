@@ -1,16 +1,26 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
+
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.annotation.SuppressLint;
+import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Paint;
+import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -21,6 +31,7 @@ import android.util.Log;
 import android.view.Display;
 import android.view.HapticFeedbackConstants;
 import android.view.InsetsFrameProvider;
+import android.view.Surface;
 import android.view.SurfaceControl;
 import android.view.View;
 import android.view.WindowInsets;
@@ -191,8 +202,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             animators[index] = (Animator) animator;
         }
         Object originalSizeObject = ((Map<?, ?>) animationSizeObject).get(token);
-        int originalSize = originalSizeObject instanceof Number
+        int recordedSize = originalSizeObject instanceof Number
                 ? ((Number) originalSizeObject).intValue() : 0;
+        // HyperOS 3 keeps mAnimationSize at zero for the normal two-animator
+        // Activity OPEN path even though mAnimations already contains the complete set.
+        // Treat the atomically captured list as the baseline on that implementation;
+        // the executor-side equality, canReverse(), and isRunning() checks below still
+        // reject a partial, stale, or non-interruptible transition.
+        int originalSize = recordedSize > 0 ? recordedSize : animators.length;
         if (animators.length == 0) {
             return;
         }
@@ -1644,7 +1661,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookFreeformCrossActivityScrimCreation();
             hookCrossActivitySlideAnimation(classLoader,
                     true, true, true, true, true, true);
-            hookCrossTaskBackground(classLoader);
+            hookPredictiveBackBackground(classLoader);
             moduleLog(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG, "Failed to hook Shell back animation", throwable);
@@ -2379,42 +2396,65 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
-    protected void hookCrossTaskBackground(ClassLoader classLoader) {
+    protected void hookPredictiveBackBackground(ClassLoader classLoader) {
         try {
             Class<?> backgroundClass = Class.forName(
                     BACK_ANIMATION_BACKGROUND, false, classLoader);
+            boolean ensureHooked = false;
+            boolean removeHooked = false;
             for (Method method : backgroundClass.getDeclaredMethods()) {
                 if ("ensureBackground".equals(method.getName())
-                        && method.getParameterCount() == 6) {
+                        && (method.getParameterCount() == 4
+                        || method.getParameterCount() == 6)) {
                     method.setAccessible(true);
                     recordHookHandle(hook(method)
-                            .setId("systemui_cross_task_background")
-                            .intercept(this::tintCrossTaskBackground));
-                    moduleLog(Log.INFO, TAG, "Hooked cross-task background tint");
-                    return;
+                            .setId("systemui_predictive_background_ensure_"
+                                    + method.getParameterCount())
+                            .intercept(this::customizePredictiveBackBackground));
+                    ensureHooked = true;
+                } else if ("removeBackground".equals(method.getName())
+                        && method.getParameterCount() == 1) {
+                    method.setAccessible(true);
+                    recordHookHandle(hook(method)
+                            .setId("systemui_predictive_background_remove")
+                            .intercept(this::removePredictiveBackBackground));
+                    removeHooked = true;
                 }
             }
-            moduleLog(Log.WARN, TAG, "BackAnimationBackground.ensureBackground not found");
+            if (!ensureHooked) {
+                moduleLog(Log.WARN, TAG,
+                        "BackAnimationBackground.ensureBackground not found");
+            }
+            if (!removeHooked) {
+                moduleLog(Log.WARN, TAG,
+                        "BackAnimationBackground.removeBackground not found");
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Hooked shared predictive-back backdrop lifecycle"
+                            + ", ensure=" + ensureHooked
+                            + ", remove=" + removeHooked);
         } catch (Throwable throwable) {
-            moduleLog(Log.ERROR, TAG, "Failed to hook cross-task background", throwable);
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to hook predictive-back backdrop lifecycle", throwable);
         }
     }
 
     /**
-     * With the slide preference on, repaints the native cross-task color-layer
-     * background pure black. ensureBackground(bounds, color, transaction, ...) creates
-     * the color layer and writes the color into the caller's pending transaction; when
-     * the color is cross-task's hard-coded tint, overwrite it on that same transaction
-     * before it is applied. Cross-activity passes its task color and is left alone.
+     * Customizes the native predictive-back color layer in the caller's pending transaction.
+     * HyperOS slide mode keeps its established black tint. AOSP mode may either retain
+     * the system fill, paint it black, or make only that fill layer transparent so the
+     * real lower target (including Home's static/live wallpaper) remains visible. No
+     * wallpaper bitmap is copied or retained on this animation hot path.
      */
-    protected Object tintCrossTaskBackground(XposedInterface.Chain chain)
+    protected Object customizePredictiveBackBackground(XposedInterface.Chain chain)
             throws Throwable {
         Object colorArg = chain.getArg(1);
         int color = colorArg instanceof Number ? ((Number) colorArg).intValue() : 0;
         Object result = chain.proceed();
         try {
-            if (color != CROSS_TASK_BACKGROUND_COLOR
-                    || !isHyperOsSlideAnimationEnabled()) {
+            int backgroundMode = getAospBackgroundMode();
+            if (backgroundMode
+                    == PredictiveBackPreferences.AOSP_BACKGROUND_SYSTEM) {
                 return result;
             }
             Object surface = readFieldOrNull(
@@ -2423,28 +2463,91 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             if (surface instanceof SurfaceControl
                     && ((SurfaceControl) surface).isValid()
                     && transaction instanceof SurfaceControl.Transaction) {
-                invokeMethod(transaction, "setColor",
+                SurfaceControl background = (SurfaceControl) surface;
+                SurfaceControl.Transaction surfaceTransaction =
+                        (SurfaceControl.Transaction) transaction;
+                surfaceTransaction.setAlpha(background, 1.0f);
+                invokeMethod(surfaceTransaction, "setColor",
                         new Class<?>[]{SurfaceControl.class, float[].class},
-                        new Object[]{surface, new float[]{0.0f, 0.0f, 0.0f}});
-                moduleLog(Log.INFO, TAG, "Repainted cross-task background black");
+                        new Object[]{background, new float[]{0.0f, 0.0f, 0.0f}});
+                AospBackgroundMaskState previous = aospBackgroundMaskState;
+                if (previous != null
+                        && previous.animation == chain.getThisObject()
+                        && previous.background == background
+                        && previous.mode == backgroundMode) {
+                    return result;
+                }
+                if (previous != null) {
+                    releaseAospWallpaperLayer(previous.wallpaperBlurLayer);
+                    releaseAospWallpaperLayer(previous.wallpaperLayer);
+                    aospBackgroundMaskState = null;
+                }
+                SurfaceControl wallpaperLayer = null;
+                SurfaceControl wallpaperBlurLayer = null;
+                if (backgroundMode
+                        == PredictiveBackPreferences.AOSP_BACKGROUND_WALLPAPER) {
+                    Rect bounds = chain.getArg(0) instanceof Rect
+                            ? (Rect) chain.getArg(0) : null;
+                    AospWallpaperBackdrop backdrop =
+                            createAospWallpaperBackdrop(
+                                    chain.getThisObject(), bounds,
+                                    background, surfaceTransaction);
+                    wallpaperLayer = backdrop.wallpaperLayer;
+                    wallpaperBlurLayer = backdrop.blurLayer;
+                    surfaceTransaction.setLayer(wallpaperLayer, 0)
+                            .setAlpha(wallpaperLayer, 1.0f);
+                }
+                aospBackgroundMaskState = new AospBackgroundMaskState(
+                        chain.getThisObject(), backgroundMode,
+                        surfaceTransaction, null, null, background,
+                        wallpaperLayer, wallpaperBlurLayer, false);
+                moduleLog(Log.INFO, TAG,
+                        "Applied shared predictive-back backdrop"
+                                + ", mode=" + backgroundMode
+                                + ", originalColor=0x"
+                                + Integer.toHexString(color)
+                                + ", wallpaperLayer="
+                                + (wallpaperLayer != null)
+                                + ", blurLayer="
+                                + (wallpaperBlurLayer != null));
             }
         } catch (Throwable throwable) {
-            moduleLog(Log.WARN, TAG, "Failed to tint cross-task background black", throwable);
+            moduleLog(Log.WARN, TAG,
+                    "Failed to customize predictive-back backdrop", throwable);
         }
         return result;
+    }
+
+    protected Object removePredictiveBackBackground(XposedInterface.Chain chain)
+            throws Throwable {
+        AospBackgroundMaskState state = aospBackgroundMaskState;
+        if (state != null && state.animation == chain.getThisObject()) {
+            aospBackgroundMaskState = null;
+            releaseAospWallpaperLayer(state.wallpaperBlurLayer);
+            releaseAospWallpaperLayer(state.wallpaperLayer);
+        }
+        return chain.proceed();
     }
 
     // finishAnimation() is the animation's natural end; clear the session flag so a
     // later gesture re-arms cleanly. The original always runs.
     protected Object onCrossActivitySlideFinish(XposedInterface.Chain chain)
             throws Throwable {
+        Object animation = chain.getThisObject();
         miuixSlideAnimActive = false;
         freeformColorRootCandidate.set(null);
         FreeformColorRootAdoption adoption = freeformColorRootAdoption;
-        if (adoption != null && adoption.animation == chain.getThisObject()) {
+        if (adoption != null && adoption.animation == animation) {
             freeformColorRootAdoption = null;
         }
-        return chain.proceed();
+        Object result = chain.proceed();
+        AospBackgroundMaskState maskState = aospBackgroundMaskState;
+        if (maskState != null && maskState.animation == animation) {
+            aospBackgroundMaskState = null;
+            releaseAospWallpaperLayer(maskState.wallpaperBlurLayer);
+            releaseAospWallpaperLayer(maskState.wallpaperLayer);
+        }
+        return result;
     }
 
     /**
@@ -2511,6 +2614,50 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     }
 
     protected volatile boolean miuixSlideAnimActive;
+    protected volatile AospBackgroundMaskState aospBackgroundMaskState;
+
+    protected static final class AospBackgroundMaskState {
+        final Object animation;
+        final int mode;
+        final SurfaceControl.Transaction transaction;
+        final SurfaceControl closingLeash;
+        final SurfaceControl enteringLeash;
+        final SurfaceControl background;
+        final SurfaceControl wallpaperLayer;
+        final SurfaceControl wallpaperBlurLayer;
+        final boolean failed;
+
+        AospBackgroundMaskState(
+                Object animation, int mode,
+                SurfaceControl.Transaction transaction,
+                SurfaceControl closingLeash, SurfaceControl enteringLeash,
+                SurfaceControl background, SurfaceControl wallpaperLayer,
+                SurfaceControl wallpaperBlurLayer,
+                boolean failed) {
+            this.animation = animation;
+            this.mode = mode;
+            this.transaction = transaction;
+            this.closingLeash = closingLeash;
+            this.enteringLeash = enteringLeash;
+            this.background = background;
+            this.wallpaperLayer = wallpaperLayer;
+            this.wallpaperBlurLayer = wallpaperBlurLayer;
+            this.failed = failed;
+        }
+    }
+    protected static final class AospWallpaperBackdrop {
+        final SurfaceControl wallpaperLayer;
+        final SurfaceControl blurLayer;
+
+        AospWallpaperBackdrop(
+                SurfaceControl wallpaperLayer, SurfaceControl blurLayer) {
+            this.wallpaperLayer = wallpaperLayer;
+            this.blurLayer = blurLayer;
+        }
+    }
+    protected final Object aospWallpaperSnapshotLock = new Object();
+    protected volatile Bitmap aospWallpaperSnapshot;
+    protected volatile int aospWallpaperSnapshotId = Integer.MIN_VALUE;
     protected final RectF miuixSlideCommitClosing = new RectF();
     protected final RectF miuixSlideCommitEntering = new RectF();
     protected boolean miuixSlideCommitPoseCaptured;
@@ -2781,6 +2928,174 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             candidate.closingTarget, "taskId", -1));
         }
         return result;
+    }
+
+    protected AospWallpaperBackdrop createAospWallpaperBackdrop(
+            Object backgroundOwner, Rect frame, SurfaceControl background,
+            SurfaceControl.Transaction transaction) throws Exception {
+        Object ownerContext = readFieldOrNull(backgroundOwner, "mContext");
+        Context context = ownerContext instanceof Context
+                ? ((Context) ownerContext).getApplicationContext()
+                : miuiOverviewReceiverContext;
+        if (context == null || frame == null || frame.isEmpty()) {
+            throw new IllegalStateException("wallpaper context or animation bounds unavailable");
+        }
+        int width = frame.width();
+        int height = frame.height();
+        Bitmap snapshot = obtainAospWallpaperSnapshot(context);
+        SurfaceControl layer = new SurfaceControl.Builder()
+                .setName("MiuiBackGestureHook-AospWallpaper")
+                .setParent(background)
+                .setBufferSize(width, height)
+                .setFormat(PixelFormat.RGBA_8888)
+                .setOpaque(true)
+                .setHidden(false)
+                .build();
+        boolean drawn = false;
+        Surface surface = null;
+        Canvas canvas = null;
+        try {
+            surface = new Surface(layer);
+            canvas = surface.lockCanvas(null);
+            canvas.drawColor(Color.BLACK);
+            float scale = Math.max(
+                    width / (float) snapshot.getWidth(),
+                    height / (float) snapshot.getHeight());
+            float drawnWidth = snapshot.getWidth() * scale;
+            float drawnHeight = snapshot.getHeight() * scale;
+            RectF destination = new RectF(
+                    (width - drawnWidth) * 0.5f,
+                    (height - drawnHeight) * 0.5f,
+                    (width + drawnWidth) * 0.5f,
+                    (height + drawnHeight) * 0.5f);
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            canvas.drawBitmap(snapshot, null, destination, paint);
+            surface.unlockCanvasAndPost(canvas);
+            canvas = null;
+            drawn = true;
+            SurfaceControl blurLayer = aospWallpaperBlurEnabled
+                    ? createAospWallpaperBlurLayer(
+                    background, width, height, transaction)
+                    : null;
+            return new AospWallpaperBackdrop(layer, blurLayer);
+        } finally {
+            if (surface != null) {
+                if (canvas != null) {
+                    try {
+                        surface.unlockCanvasAndPost(canvas);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                surface.release();
+            }
+            if (!drawn) {
+                layer.release();
+            }
+        }
+    }
+
+    protected SurfaceControl createAospWallpaperBlurLayer(
+            SurfaceControl background, int width, int height,
+            SurfaceControl.Transaction transaction) {
+        SurfaceControl layer = null;
+        Surface surface = null;
+        Canvas canvas = null;
+        boolean prepared = false;
+        try {
+            layer = new SurfaceControl.Builder()
+                    .setName("MiuiBackGestureHook-AospWallpaperBlur")
+                    .setParent(background)
+                    .setBufferSize(width, height)
+                    .setFormat(PixelFormat.RGBA_8888)
+                    .setOpaque(false)
+                    .setHidden(false)
+                    .build();
+            surface = new Surface(layer);
+            canvas = surface.lockCanvas(null);
+            canvas.drawColor(Color.TRANSPARENT,
+                    android.graphics.PorterDuff.Mode.CLEAR);
+            surface.unlockCanvasAndPost(canvas);
+            canvas = null;
+            invokeMethod(transaction, "setBackgroundBlurRadius",
+                    new Class<?>[]{SurfaceControl.class, int.class},
+                    new Object[]{layer, Integer.valueOf(100)});
+            transaction.setLayer(layer, 1).setAlpha(layer, 1.0f);
+            prepared = true;
+            moduleLog(Log.INFO, TAG,
+                    "Enabled experimental HyperOS compositor wallpaper blur"
+                            + ", radius=100");
+            return layer;
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "HyperOS compositor wallpaper blur unavailable;"
+                            + " using clear wallpaper",
+                    throwable);
+            return null;
+        } finally {
+            if (surface != null) {
+                if (canvas != null) {
+                    try {
+                        surface.unlockCanvasAndPost(canvas);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                surface.release();
+            }
+            if (!prepared && layer != null) {
+                layer.release();
+            }
+        }
+    }
+
+    protected Bitmap obtainAospWallpaperSnapshot(Context context) {
+        WallpaperManager wallpaperManager = WallpaperManager.getInstance(context);
+        int wallpaperId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_SYSTEM);
+        Bitmap cached = aospWallpaperSnapshot;
+        if (cached != null && !cached.isRecycled()
+                && aospWallpaperSnapshotId == wallpaperId) {
+            return cached;
+        }
+        synchronized (aospWallpaperSnapshotLock) {
+            cached = aospWallpaperSnapshot;
+            if (cached != null && !cached.isRecycled()
+                    && aospWallpaperSnapshotId == wallpaperId) {
+                return cached;
+            }
+            Drawable drawable = wallpaperManager.getDrawable(WallpaperManager.FLAG_SYSTEM);
+            if (!(drawable instanceof BitmapDrawable)) {
+                throw new IllegalStateException("system wallpaper snapshot is not bitmap-backed");
+            }
+            Bitmap bitmap = ((BitmapDrawable) drawable).getBitmap();
+            if (bitmap == null || bitmap.isRecycled()
+                    || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
+                throw new IllegalStateException("system wallpaper snapshot is unavailable");
+            }
+            aospWallpaperSnapshot = bitmap;
+            aospWallpaperSnapshotId = wallpaperId;
+            return bitmap;
+        }
+    }
+
+    protected void releaseAospWallpaperLayer(SurfaceControl wallpaperLayer) {
+        if (wallpaperLayer == null) {
+            return;
+        }
+        try {
+            if (wallpaperLayer.isValid()) {
+                try (SurfaceControl.Transaction transaction =
+                             new SurfaceControl.Transaction()) {
+                    invokeMethod(transaction, "remove",
+                            new Class<?>[]{SurfaceControl.class},
+                            new Object[]{wallpaperLayer});
+                    transaction.apply();
+                }
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to remove AOSP wallpaper backdrop layer", throwable);
+        } finally {
+            wallpaperLayer.release();
+        }
     }
 
     protected void applyAdoptedFreeformTargetGeometry(
@@ -4919,7 +5234,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 intent.getIntExtra(EXTRA_INPUT_DEVICE_ID, Integer.MIN_VALUE),
                 intent.getIntExtra(EXTRA_INPUT_SOURCE, 0),
                 intent.getIntExtra(EXTRA_INPUT_DISPLAY_ID, Integer.MIN_VALUE),
-                intent.getIntExtra(EXTRA_INPUT_EDGE, -1), generation);
+                intent.getIntExtra(EXTRA_INPUT_EDGE, -1), generation,
+                intent.getBooleanExtra(EXTRA_LAUNCHER_OPEN_ACTIVE, false),
+                intent.getLongExtra(
+                        EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, 0L),
+                intent.getBooleanExtra(EXTRA_LAUNCHER_OVERVIEW_ACTIVE, false));
         if (token.downTime == Long.MIN_VALUE
                 || token.deviceId == Integer.MIN_VALUE
                 || token.displayId == Integer.MIN_VALUE
@@ -4931,6 +5250,15 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     + ", displayId=" + token.displayId
                     + ", edge=" + token.edge);
             return;
+        }
+        if (token.launcherOpenActive
+                && token.launcherOpenGeneration != 0L
+                && token.launcherOpenGeneration
+                >= miuiLauncherOpenBreakGeneration) {
+            // The accepted-DOWN broadcast is emitted synchronously from MiuiHome's processor.
+            // It can beat the separate settled-state broadcast at the start of launcher OPEN.
+            miuiLauncherOpenActive = true;
+            miuiLauncherOpenBreakGeneration = token.launcherOpenGeneration;
         }
         acceptedInputToken.set(token);
         boolean consumed = new ArrayList<>(nativeInputMonitors.values()).stream()
@@ -4947,6 +5275,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 + ", downTime=" + token.downTime
                 + ", displayId=" + token.displayId
                 + ", edge=" + token.edge
+                + ", launcherOpen=" + token.launcherOpenActive
+                + ", launcherOpenGeneration="
+                + token.launcherOpenGeneration
                 + ", matchedPendingDown=" + consumed
                 + ", generation=" + generation);
     }
