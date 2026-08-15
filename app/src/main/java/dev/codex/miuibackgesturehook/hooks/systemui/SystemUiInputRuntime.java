@@ -184,7 +184,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     }
 
     protected NativeBackInputMonitor createNativeBackInputMonitor(Context context,
-                                                                Object edgeBackGestureHandler, Object controller, Object backAnimationImpl)
+                                                                 Object edgeBackGestureHandler, Object controller, Object backAnimationImpl)
             throws Exception {
         InputManager inputManager = context.getSystemService(InputManager.class);
         int displayId = readIntFieldOrDefault(
@@ -203,6 +203,29 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         return new NativeBackInputMonitor(context, edgeBackGestureHandler, controller,
                 backAnimationImpl, (InputMonitor) monitor, (InputChannel) inputChannel,
                 displayId);
+    }
+
+    protected boolean isShellReadyOnOwner(Object stateController)
+            throws Exception {
+        if (Boolean.TRUE.equals(readField(stateController,
+                "mPostCommitAnimationInProgress"))
+                || Boolean.TRUE.equals(readField(
+                stateController, "mBackGestureStarted"))
+                || Boolean.TRUE.equals(readField(
+                stateController, "mReceivedNullNavigationInfo"))
+                || readField(stateController,
+                "mBackNavigationInfo") != null
+                || readField(stateController,
+                "mBackAnimationFinishedCallback") != null) {
+            return false;
+        }
+        Object current = readField(stateController, "mCurrentTracker");
+        Object queued = readField(stateController, "mQueuedTracker");
+        return isTrackerInitial(current) && isTrackerInitial(queued);
+    }
+
+    protected boolean isTrackerInitial(Object tracker) throws Exception {
+        return tracker == null || ((BackTouchTracker) tracker).isInInitialState();
     }
 
     protected final class NativeBackInputMonitor extends InputEventReceiver {
@@ -2528,25 +2551,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             return active;
         }
 
-        protected boolean isShellReadyOnOwner(Object stateController)
-                throws Exception {
-            if (Boolean.TRUE.equals(readField(stateController,
-                    "mPostCommitAnimationInProgress"))
-                    || Boolean.TRUE.equals(readField(
-                    stateController, "mBackGestureStarted"))
-                    || Boolean.TRUE.equals(readField(
-                    stateController, "mReceivedNullNavigationInfo"))
-                    || readField(stateController,
-                    "mBackNavigationInfo") != null
-                    || readField(stateController,
-                    "mBackAnimationFinishedCallback") != null) {
-                return false;
-            }
-            Object current = readField(stateController, "mCurrentTracker");
-            Object queued = readField(stateController, "mQueuedTracker");
-            return isTrackerInitial(current) && isTrackerInitial(queued);
-        }
-
         protected boolean isShellStartReadyOnOwner(Object stateController)
                 throws Exception {
             if (!isShellReadyOnOwner(stateController)) {
@@ -2560,10 +2564,6 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     "mPrepareOpenTransition") == null
                     && readField(transitionHandler,
                     "mClosePrepareTransition") == null;
-        }
-
-        protected boolean isTrackerInitial(Object tracker) throws Exception {
-            return tracker == null || ((BackTouchTracker) tracker).isInInitialState();
         }
 
         protected String describeShellStateOnOwner(Object stateController) {

@@ -1807,7 +1807,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         return result;
     }
 
-    protected boolean isExactFreeformPreparedBackTransition(
+    protected boolean isExactPreparedBackTransition(
             Object handler, Object navigation, Object info) throws Exception {
         if (!(navigation instanceof BackNavigationInfo)) {
             return false;
@@ -1827,8 +1827,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 != ACTIVITY_TYPE_STANDARD) {
             return false;
         }
-        if (resolveTaskInfoWindowingMode(taskInfo)
-                != WINDOWING_MODE_FREEFORM) {
+        int windowingMode = resolveTaskInfoWindowingMode(taskInfo);
+        if (windowingMode != WINDOWING_MODE_FREEFORM
+                && windowingMode != WINDOWING_MODE_FULLSCREEN) {
             return false;
         }
         int displayId = readIntFieldOrDefault(taskInfo, "displayId", -1);
@@ -1846,7 +1847,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 || !(rootCountObject instanceof Number)
                 || ((Number) rootCountObject).intValue() != 1) {
             throw new IllegalStateException(
-                    "freeform prepared task geometry unavailable"
+                    "prepared task geometry unavailable"
                             + ", taskId=" + focusedTaskId
                             + ", displayId=" + displayId
                             + ", bounds=" + shortObject(taskBoundsObject)
@@ -1863,7 +1864,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 || ((Point) rootOffsetObject).x != taskBounds.left
                 || ((Point) rootOffsetObject).y != taskBounds.top) {
             throw new IllegalStateException(
-                    "freeform prepared root mismatch"
+                    "prepared root mismatch"
                             + ", taskId=" + focusedTaskId
                             + ", bounds=" + taskBounds
                             + ", root=" + shortObject(rootLeashObject)
@@ -1905,7 +1906,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     || ((Number) startDisplayObject).intValue() != displayId
                     || ((Number) endDisplayObject).intValue() != displayId) {
                 throw new IllegalStateException(
-                        "freeform prepared Activity change mismatch"
+                        "prepared Activity change mismatch"
                                 + ", taskId=" + focusedTaskId
                                 + ", changeIndex=" + changeIndex
                                 + ", mode=" + mode
@@ -1931,7 +1932,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 openingLeash = (SurfaceControl) leashObject;
             } else {
                 throw new IllegalStateException(
-                        "freeform prepared Activity role mismatch"
+                        "prepared Activity role mismatch"
                                 + ", taskId=" + focusedTaskId
                                 + ", changeIndex=" + changeIndex
                                 + ", mode=" + mode
@@ -1940,7 +1941,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             changeIndex++;
         }
         return closingComponent != null && openingComponent != null
-                && !closingComponent.equals(openingComponent)
                 && !surfacesAreSame(closingLeash, openingLeash);
     }
 
@@ -2016,7 +2016,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     != TYPE_CROSS_ACTIVITY) {
                 return chain.proceed();
             }
-            if (!isExactFreeformPreparedBackTransition(
+            if (!isExactPreparedBackTransition(
                     handler, navigation, info)) {
                 return chain.proceed();
             }
@@ -3475,6 +3475,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
     protected Object correctPredictiveBackCommitComposition(
             XposedInterface.Chain chain) throws Throwable {
+        OrphanedCloseRequestCandidate orphanedCloseRequest = null;
+        try {
+            orphanedCloseRequest = captureOrphanedCloseRequestCandidate(chain);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to inspect predictive-back close-request ownership",
+                    throwable);
+        }
         ReturnHomeCommitComposition candidate = null;
         try {
             candidate = captureReturnHomeCommitComposition(chain);
@@ -3549,6 +3557,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     finishTransfer.controller,
                     finishTransfer.preparedFinishCallback, true);
         }
+        clearOrphanedCloseRequest(orphanedCloseRequest, chain);
         if (candidate == null) {
             return result;
         }
@@ -3623,6 +3632,109 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     throwable);
         }
         return result;
+    }
+
+    protected static final class OrphanedCloseRequestCandidate {
+        final Thread ownerThread;
+        final Object handler;
+        final Object controller;
+        final Object preparedOpen;
+        final Object preparedInfo;
+
+        OrphanedCloseRequestCandidate(Thread ownerThread, Object handler,
+                                      Object controller, Object preparedOpen,
+                                      Object preparedInfo) {
+            this.ownerThread = ownerThread;
+            this.handler = handler;
+            this.controller = controller;
+            this.preparedOpen = preparedOpen;
+            this.preparedInfo = preparedInfo;
+        }
+    }
+
+    protected OrphanedCloseRequestCandidate
+    captureOrphanedCloseRequestCandidate(XposedInterface.Chain chain)
+            throws Exception {
+        Thread ownerThread = Thread.currentThread();
+        if (!"wmshell.main".equals(ownerThread.getName())) {
+            return null;
+        }
+        Object handler = chain.getThisObject();
+        Object controller = readField(handler, "this$0");
+        Object preparedOpen = readField(handler, "mPrepareOpenTransition");
+        Object preparedInfo = readField(handler, "mOpenTransitionInfo");
+        Object preparedType = readTransitionInfoType(preparedInfo);
+        if (controller == null
+                || readField(controller, "mBackTransitionHandler") != handler
+                || !Boolean.TRUE.equals(readField(
+                handler, "mCloseTransitionRequested"))
+                || preparedOpen == null || preparedOpen != chain.getArg(4)
+                || preparedOpen == chain.getArg(0)
+                || preparedInfo == null || preparedInfo == chain.getArg(1)
+                || !(preparedType instanceof Number)
+                || ((Number) preparedType).intValue()
+                != TRANSIT_PREDICTIVE_BACK
+                || readField(handler, "mFinishOpenTransaction") == null
+                || readField(handler, "mFinishOpenTransitionCallback") == null
+                || readField(handler, "mClosePrepareTransition") != null
+                || readField(handler, "mOnAnimationFinishCallback") != null
+                || readField(controller, "mApps") != null
+                || readField(controller, "mActiveCallback") != null
+                || !isShellReadyOnOwner(controller)) {
+            return null;
+        }
+        return new OrphanedCloseRequestCandidate(ownerThread, handler,
+                controller, preparedOpen, preparedInfo);
+    }
+
+    protected void clearOrphanedCloseRequest(
+            OrphanedCloseRequestCandidate candidate,
+            XposedInterface.Chain chain) {
+        if (candidate == null) {
+            return;
+        }
+        try {
+            Object handler = chain.getThisObject();
+            Object controller = readField(handler, "this$0");
+            boolean orphaned = Thread.currentThread() == candidate.ownerThread
+                    && "wmshell.main".equals(
+                    candidate.ownerThread.getName())
+                    && handler == candidate.handler
+                    && controller == candidate.controller
+                    && readField(controller, "mBackTransitionHandler") == handler
+                    && chain.getArg(4) == candidate.preparedOpen
+                    && Boolean.TRUE.equals(readField(
+                    handler, "mCloseTransitionRequested"))
+                    && readField(handler, "mPrepareOpenTransition") == null
+                    && readField(handler, "mOpenTransitionInfo") == null
+                    && readField(handler, "mFinishOpenTransaction") == null
+                    && readField(handler, "mFinishOpenTransitionCallback") == null
+                    && readField(handler, "mClosePrepareTransition") == null
+                    && readField(handler, "mOnAnimationFinishCallback") == null
+                    && readField(handler, "mTakeoverHandler") == null
+                    && readField(controller, "mApps") == null
+                    && readField(controller, "mActiveCallback") == null
+                    && isShellReadyOnOwner(controller);
+            if (!orphaned) {
+                return;
+            }
+            writeField(handler, "mCloseTransitionRequested", Boolean.FALSE);
+            if (!Boolean.FALSE.equals(readField(
+                    handler, "mCloseTransitionRequested"))) {
+                throw new IllegalStateException(
+                        "predictive-back close request remained set");
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Cleared orphaned predictive-back close request"
+                            + ", preparedTransitionDebugId="
+                            + readTransitionDebugId(candidate.preparedInfo)
+                            + ", mergeTransitionDebugId="
+                            + readTransitionDebugId(chain.getArg(1)));
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to clear orphaned predictive-back close request",
+                    throwable);
+        }
     }
 
     protected Object wrapAcceptedReturnHomeFinishCallback(
