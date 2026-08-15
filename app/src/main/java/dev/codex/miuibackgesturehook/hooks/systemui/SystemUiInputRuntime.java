@@ -378,7 +378,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", launcherOpenBreakGeneration="
                     + launcherOpenBreakGenerationCandidate
                     + ", launcherShade=" + launcherShadeCandidate
-                    + ", launcherDrawer=" + launcherDrawerCandidate
+                    + ", launcherDrawerOrFolder=" + launcherDrawerCandidate
                     + ", launcherEditing=" + launcherEditingCandidate
                     + ", inputModel=miuihome-accepted-token"
                     + ", displayId=" + displayId
@@ -757,20 +757,29 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && miuiDrawerVisible
                     && !miuiOverviewVisible
                     && !launcherOpenBreak;
+            boolean launcherFolder = launcherHome
+                    && !launcherShade
+                    && miuiFolderVisible
+                    && !miuiOverviewVisible
+                    && !launcherOpenBreak
+                    && !launcherDrawer;
             boolean launcherEditing = launcherHome
                     && !launcherShade
                     && miuiLauncherEditing
                     && !miuiOverviewVisible
                     && !launcherOpenBreak
-                    && !launcherDrawer;
+                    && !launcherDrawer
+                    && !launcherFolder;
             if (launcherHome && !miuiOverviewVisible
                     && !launcherOpenBreak && !launcherShade
-                    && !launcherDrawer && !launcherEditing) {
+                    && !launcherDrawer && !launcherFolder
+                    && !launcherEditing) {
                 moduleLog(Log.INFO, TAG, "Ignored native back on launcher Home"
                         + ", topActivity=" + topActivity.flattenToShortString()
                         + ", overviewVisible=false"
                         + ", launcherShade=false"
                         + ", launcherDrawer=false"
+                        + ", launcherFolder=false"
                         + ", launcherEditing=false"
                         + ", launcherOpenActive="
                         + miuiLauncherOpenActive
@@ -798,6 +807,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             if (launcherDrawer) {
                 moduleLog(Log.INFO, TAG, "Accepted native back in MiuiHome app drawer"
                         + ", drawerVisible=true"
+                        + ", requireShellCallback=true"
+                        + ", displayId=" + displayId
+                        + ", edge=" + edge);
+            }
+            if (launcherFolder) {
+                moduleLog(Log.INFO, TAG, "Accepted native back in MiuiHome folder"
+                        + ", folderVisible=true"
                         + ", requireShellCallback=true"
                         + ", displayId=" + displayId
                         + ", edge=" + edge);
@@ -874,7 +890,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             launcherOpenBreakGenerationCandidate = launcherOpenBreak
                     ? miuiLauncherOpenBreakGeneration : 0L;
             launcherShadeCandidate = launcherShade;
-            launcherDrawerCandidate = launcherDrawer;
+            // Drawer and folder are mutually exclusive launcher surfaces with the same
+            // callback-only Shell contract, so they share the established probe path.
+            launcherDrawerCandidate = launcherDrawer || launcherFolder;
             launcherEditingCandidate = launcherEditing;
             // Geometry, attachment, touchability, and redirect acceptance are proved later
             // by the matching token emitted only from MiuiHome's accepted processor boundary.
@@ -1642,11 +1660,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         : launcherOverviewGesture
                         ? "SystemUI-owned Recents back gesture candidate"
                         : launcherDrawerGesture
-                        ? "SystemUI-owned MiuiHome drawer back gesture candidate"
+                        ? "SystemUI-owned MiuiHome drawer/folder back gesture candidate"
                         : "SystemUI-owned MiuiHome editing back gesture candidate")
                         + ", useShellCallback=true"
                         + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
-                // Launcher Home, Recents, the drawer, and editing surfaces share one Activity.
+                // Launcher Home, Recents, drawer/folder, and editing share one Activity.
                 // Resolve the callback on DOWN while the real stream is still unpilfered.
                 if (!startShellGesture()) {
                     if (recentsVisualOnlyGesture) {
@@ -1661,7 +1679,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     moduleLog(Log.INFO, TAG, (launcherShadeGesture
                             ? "Ignored NotificationShade gesture without a callback target"
                             : launcherDrawerGesture
-                            ? "Ignored MiuiHome drawer gesture without a callback target"
+                            ? "Ignored MiuiHome drawer/folder gesture without a callback target"
                             : launcherEditingGesture
                             ? "Ignored MiuiHome editing gesture without a callback target"
                             : "Ignored Recents edge gesture without a back navigation target")
@@ -1680,7 +1698,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", shellStartDeferred=" + shellGestureStartDeferred
                     + ", inputModel=miuihome-accepted-token"
                     + ", launcherShade=" + launcherShadeGesture
-                    + ", launcherDrawer=" + launcherDrawerGesture
+                    + ", launcherDrawerOrFolder=" + launcherDrawerGesture
                     + ", launcherEditing=" + launcherEditingGesture
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
             return true;
@@ -1935,7 +1953,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", releaseAllowed=" + releaseAllowed
                     + ", recentsShellCallback=" + launcherOverviewGesture
                     + ", shadeShellCallback=" + launcherShadeGesture
-                    + ", drawerShellCallback=" + launcherDrawerGesture
+                    + ", drawerOrFolderShellCallback=" + launcherDrawerGesture
                     + ", editingShellCallback=" + launcherEditingGesture
                     + ", aospNullNavigation=" + aospNullNavigationGesture
                     + ", shellSessionId=" + session.id
@@ -2401,7 +2419,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             : launcherOverviewGesture
                             ? "Rejected stale Recents Shell target"
                             : launcherDrawerGesture
-                            ? "Rejected non-callback MiuiHome drawer Shell target"
+                            ? "Rejected non-callback MiuiHome drawer/folder Shell target"
                             : "Rejected non-callback MiuiHome editing Shell target")
                             + ", type=" + navigationType
                             + ", info=" + shortObject(info));
@@ -2416,7 +2434,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         : launcherOverviewGesture
                         ? "Resolved Launcher Recents Shell callback, type="
                         : launcherDrawerGesture
-                        ? "Resolved MiuiHome drawer Shell callback, type="
+                        ? "Resolved MiuiHome drawer/folder Shell callback, type="
                         : "Resolved MiuiHome editing Shell callback, type=")
                         + navigationType);
             }
@@ -2610,7 +2628,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             + ", releaseAllowed=false"
                             + ", recentsProbe=" + launcherOverviewGesture
                             + ", shadeProbe=" + launcherShadeGesture
-                            + ", drawerProbe=" + launcherDrawerGesture
+                            + ", drawerOrFolderProbe=" + launcherDrawerGesture
                             + ", editingProbe=" + launcherEditingGesture
                             + ", shellSessionId=" + session.id
                             + ", edge=" + session.edge);
@@ -3346,7 +3364,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", outcome=" + outcome
                     + ", recentsShellCallback=" + recentsCallback
                     + ", shadeShellCallback=" + shadeCallback
-                    + ", drawerShellCallback=" + drawerCallback
+                    + ", drawerOrFolderShellCallback=" + drawerCallback
                     + ", editingShellCallback=" + editingCallback
                     + ", edge=" + releaseEdge);
         }

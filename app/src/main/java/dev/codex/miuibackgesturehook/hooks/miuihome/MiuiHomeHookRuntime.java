@@ -575,6 +575,38 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 .intercept(this::mirrorMiuiHomeDrawerState));
     }
 
+    protected void hookMiuiHomeFolderState(ClassLoader classLoader,
+                                           boolean hookOpen,
+                                           boolean hookClose) {
+        try {
+            Class<?> launcherClass = Class.forName(
+                    MIUI_HOME_BASE_LAUNCHER, false, classLoader);
+            Method open = hookOpen ? launcherClass.getDeclaredMethod(
+                    "afterFolderOpenBeforeAnim", Class.forName(
+                            "com.miui.home.model.api.IFolderInfo", false,
+                            classLoader)) : null;
+            Method close = hookClose ? launcherClass.getDeclaredMethod(
+                    "afterFolderCloseBeforeAnim", boolean.class) : null;
+            if (open != null) {
+                open.setAccessible(true);
+                recordHookHandle(hook(open)
+                        .setId("miui_home_folder_open_state")
+                        .intercept(this::mirrorMiuiHomeFolderOpened));
+            }
+            if (close != null) {
+                close.setAccessible(true);
+                recordHookHandle(hook(close)
+                        .setId("miui_home_folder_close_state")
+                        .intercept(this::mirrorMiuiHomeFolderClosed));
+            }
+            moduleLog(Log.INFO, TAG, "Hooked MiuiHome folder state"
+                    + ", open=" + hookOpen + ", close=" + hookClose);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "MiuiHome folder-state lifecycle unavailable",
+                    throwable);
+        }
+    }
+
     protected void hookMiuiHomeFreeformBackTouchability(ClassLoader classLoader) {
         try {
             Class<?> launcherClass = Class.forName(
@@ -2411,6 +2443,62 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         return chain.proceed();
     }
 
+    protected Object mirrorMiuiHomeFolderOpened(XposedInterface.Chain chain)
+            throws Throwable {
+        Object launcher = chain.getThisObject();
+        Object result = chain.proceed();
+        publishMiuiHomeFolderState(launcher, true,
+                "afterFolderOpenBeforeAnim");
+        return result;
+    }
+
+    protected Object mirrorMiuiHomeFolderClosed(XposedInterface.Chain chain)
+            throws Throwable {
+        Object launcher = chain.getThisObject();
+        Object result = chain.proceed();
+        publishMiuiHomeFolderState(launcher, false,
+                "afterFolderCloseBeforeAnim");
+        return result;
+    }
+
+    protected void publishMiuiHomeFolderState(Object launcher,
+                                              boolean visible,
+                                              String reason) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            new Handler(Looper.getMainLooper()).post(
+                    () -> publishMiuiHomeFolderState(
+                            launcher, visible, reason + ":main"));
+            return;
+        }
+        if (!(launcher instanceof Context)) {
+            moduleLog(Log.WARN, TAG, "Cannot mirror MiuiHome folder state: launcher="
+                    + shortObject(launcher));
+            return;
+        }
+        try {
+            ClassLoader classLoader = launcher.getClass().getClassLoader();
+            Object activeLauncher = resolveActiveMiuiHomeLauncher(classLoader);
+            if (activeLauncher != launcher) {
+                moduleLog(Log.INFO, TAG, "Ignored stale MiuiHome folder-state callback"
+                        + ", reason=" + reason
+                        + ", callbackLauncher=" + shortObject(launcher)
+                        + ", activeLauncher=" + shortObject(activeLauncher));
+                return;
+            }
+            Intent stateIntent = new Intent(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+            stateIntent.putExtra(EXTRA_LAUNCHER_FOLDER_VISIBLE, visible);
+            sendAuthenticatedMiuiHomeState((Context) launcher, stateIntent);
+            miuiFolderVisible = visible;
+            moduleLog(Log.INFO, TAG, "Mirrored MiuiHome folder state"
+                    + ", visible=" + visible
+                    + ", reason=" + reason
+                    + ", launcher=" + shortObject(launcher));
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to mirror MiuiHome folder state",
+                    throwable);
+        }
+    }
+
     protected Object restoreMiuiHomeFreeformBackTouchability(
             XposedInterface.Chain chain) throws Throwable {
         Object enabled = chain.getArg(0);
@@ -2467,11 +2555,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         }
         try {
             ClassLoader classLoader = launcher.getClass().getClassLoader();
-            Class<?> applicationClass = Class.forName(
-                    MIUI_HOME_APPLICATION, false, classLoader);
-            Method getLauncher = applicationClass.getDeclaredMethod("getLauncher");
-            getLauncher.setAccessible(true);
-            Object activeLauncher = getLauncher.invoke(null);
+            Object activeLauncher = resolveActiveMiuiHomeLauncher(classLoader);
             if (activeLauncher != launcher) {
                 moduleLog(Log.INFO, TAG, "Ignored stale MiuiHome editing-state callback"
                         + ", reason=" + reason
@@ -2499,6 +2583,39 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to mirror MiuiHome editing state", throwable);
         }
+    }
+
+    protected Object resolveActiveMiuiHomeLauncher(ClassLoader classLoader)
+            throws Exception {
+        Class<?> applicationClass = Class.forName(
+                MIUI_HOME_APPLICATION, false, classLoader);
+        Method getLauncher = applicationClass.getDeclaredMethod("getLauncher");
+        getLauncher.setAccessible(true);
+        return getLauncher.invoke(null);
+    }
+
+    protected void refreshMiuiHomeFolderState(ClassLoader classLoader,
+                                              String reason) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                Object launcher = resolveActiveMiuiHomeLauncher(classLoader);
+                if (launcher == null) {
+                    moduleLog(Log.INFO, TAG,
+                            "Deferred MiuiHome folder-state backfill until Launcher is ready");
+                    return;
+                }
+                Class<?> launcherClass = Class.forName(
+                        MIUI_HOME_BASE_LAUNCHER, false, classLoader);
+                Method isFolderOpened = launcherClass.getDeclaredMethod(
+                        "isFolderOpened");
+                isFolderOpened.setAccessible(true);
+                publishMiuiHomeFolderState(launcher,
+                        Boolean.TRUE.equals(isFolderOpened.invoke(launcher)), reason);
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG, "Failed to backfill MiuiHome folder state",
+                        throwable);
+            }
+        });
     }
 
     protected void refreshMiuiHomeEditingState(ClassLoader classLoader, String reason) {
@@ -2936,6 +3053,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     miuiHomeAcceptedInputIdentity.set(null);
                     miuiHomeEditingStatePublished = false;
                     refreshMiuiHomeEditingState(
+                            receiverContext.getClassLoader(), "systemUiArbiterGeneration");
+                    refreshMiuiHomeFolderState(
                             receiverContext.getClassLoader(), "systemUiArbiterGeneration");
                     Object openBreakController = miuiHomeOpenBreakController;
                     if (openBreakController != null) {

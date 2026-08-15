@@ -58,6 +58,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 + ", hooks=" + hookHandles.size());
         boolean savedMiuiOverviewVisible = miuiOverviewVisible;
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
+        boolean savedMiuiFolderVisible = miuiFolderVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
         long savedMiuiOverviewDismissDeadline = miuiOverviewDismissPendingUntilUptime;
         Object savedMiuiHomeOpenBreakController = miuiHomeOpenBreakController;
@@ -133,7 +134,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 Boolean.valueOf(savedMiuiDrawerVisible),
                 savedMiuiHomeReturnHomeBinder,
                 savedHeadlessState,
-                Boolean.valueOf(savedMiuiLauncherEditing)
+                Boolean.valueOf(savedMiuiLauncherEditing),
+                Boolean.valueOf(savedMiuiFolderVisible)
         });
         return true;
     }
@@ -552,6 +554,14 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (!oldHookIds.contains("miui_home_drawer_state")) {
                     hookMiuiHomeDrawerState(hotReloadClassLoader);
                 }
+                boolean missingFolderOpen = !oldHookIds.contains(
+                        "miui_home_folder_open_state");
+                boolean missingFolderClose = !oldHookIds.contains(
+                        "miui_home_folder_close_state");
+                if (missingFolderOpen || missingFolderClose) {
+                    hookMiuiHomeFolderState(hotReloadClassLoader,
+                            missingFolderOpen, missingFolderClose);
+                }
                 if (!oldHookIds.contains("miui_home_freeform_back_touchability")) {
                     hookMiuiHomeFreeformBackTouchability(hotReloadClassLoader);
                 }
@@ -573,6 +583,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 }
                 restoreMiuiHomeGestureStubsAfterHotReload(hotReloadClassLoader);
                 refreshMiuiHomeEditingState(
+                        hotReloadClassLoader, "hotReloadBackfill");
+                refreshMiuiHomeFolderState(
                         hotReloadClassLoader, "hotReloadBackfill");
                 restoreMiuiHomeOpenBreakAfterHotReload();
                 restoreMiuiHomeReturnHomeAfterHotReload(hotReloadClassLoader);
@@ -661,6 +673,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::wrapMiuiHomeReturnHomeDirectCancel;
             case "miui_home_drawer_state":
                 return this::mirrorMiuiHomeDrawerState;
+            case "miui_home_folder_open_state":
+                return this::mirrorMiuiHomeFolderOpened;
+            case "miui_home_folder_close_state":
+                return this::mirrorMiuiHomeFolderClosed;
             case "miui_home_freeform_back_touchability":
                 return this::restoreMiuiHomeFreeformBackTouchability;
             case "miui_home_editing_state":
@@ -818,6 +834,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (state.length >= 14) {
                     miuiLauncherEditing = Boolean.TRUE.equals(state[13]);
                 }
+                if (state.length >= 15) {
+                    miuiFolderVisible = Boolean.TRUE.equals(state[14]);
+                }
             }
         }
         restoreMiuiOverviewDismissTimeoutAfterHotReload();
@@ -966,6 +985,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             hookMiuiHomeReturnHomeFreshOpen(classLoader);
             hookMiuiHomeReturnHomeDirectCancel(classLoader);
             hookMiuiHomeDrawerState(classLoader);
+            hookMiuiHomeFolderState(classLoader, true, true);
             hookMiuiHomeFreeformBackTouchability(classLoader);
             hookMiuiHomeEditingState(classLoader);
             hookMiuiHomeReturnHomeInitialize(classLoader);
@@ -981,6 +1001,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     + ", mirrorsTaskLaunchExit=true"
                     + ", mirrorsAuthenticatedFullscreenState=true"
                     + ", mirrorsDrawerState=true"
+                    + ", mirrorsFolderState=true"
                     + ", preservesSmallWindowBackTouchability=true"
                     + ", mirrorsLauncherEditingState=true"
                     + ", mirrorsLauncherOpenBreakState=true"

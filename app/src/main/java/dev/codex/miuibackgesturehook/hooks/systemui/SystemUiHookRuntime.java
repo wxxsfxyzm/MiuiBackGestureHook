@@ -4921,6 +4921,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + ", uid=" + senderUid
                             + ", package=" + senderPackage);
                 }
+                if (intent.hasExtra(EXTRA_LAUNCHER_FOLDER_VISIBLE)) {
+                    miuiFolderVisible = intent.getBooleanExtra(
+                            EXTRA_LAUNCHER_FOLDER_VISIBLE, false);
+                    moduleLog(Log.INFO, TAG, "MiuiHome folder state changed"
+                            + ", visible=" + miuiFolderVisible
+                            + ", uid=" + senderUid
+                            + ", package=" + senderPackage);
+                }
                 if (intent.hasExtra(EXTRA_LAUNCHER_EDITING)) {
                     miuiLauncherEditing = intent.getBooleanExtra(
                             EXTRA_LAUNCHER_EDITING, false);
