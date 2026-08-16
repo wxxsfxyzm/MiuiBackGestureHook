@@ -39,10 +39,17 @@ Shared native runtime:
 ```text
 hyos_spawner path:       /system_ext/bin/hyos_spawner
 hyos_spawner Build ID:   87f2632e7d68fda0226366fda5346c2d
-broadcast private ID:    7f186b331ec39d84e6016daeba65366f
+broadcast private IDs:   7f186b331ec39d84e6016daeba65366f (Xiaomi 17 Pro Max, OS4.0.0.20)
+                         c4fec5d3d810f76eff819d9379517a4a (Redmi K90, OS4.0.0.18)
 launcher process:        /proc/self/cmdline == com.miui.home
 entry symbol:            app_entry_point
 ```
+
+The broadcast-private dylib is per-ROM Build ID while its mangled symbols and
+GOT layout stay identical, so the arbiter-bridge gate accepts either ID. The
+`5334` profile has been validated on both the author's device and a Redmi K90
+(`annibale`, `OS4.0.0.18.XPKCNXM`, `MiuiSystemUI 17.03.260226.r`) with the
+full `verify-launcher-profiles.py` PASS.
 
 Launcher profiles:
 

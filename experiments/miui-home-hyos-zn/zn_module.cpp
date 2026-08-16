@@ -82,6 +82,13 @@ constexpr uint8_t kExpectedBroadcastPrivateBuildId[] = {
         0x7f, 0x18, 0x6b, 0x33, 0x1e, 0xc3, 0x9d, 0x84,
         0xe6, 0x01, 0x6d, 0xae, 0xba, 0x65, 0x36, 0x6f,
 };
+// Redmi K90 (annibale, OS4.0.0.18) ships the same broadcast-private dylib
+// layout with a different Build ID (c4fec5d3d810f76eff819d9379517a4a); the
+// arbiter-bridge gate accepts either one.
+constexpr uint8_t kExpectedBroadcastPrivateBuildIdK90[] = {
+        0xc4, 0xfe, 0xc5, 0xd3, 0xd8, 0x10, 0xf7, 0x6e,
+        0xff, 0x81, 0x9d, 0x93, 0x79, 0x51, 0x7a, 0x4a,
+};
 
 using DlopenFn = void* (*)(const char*, int);
 using AndroidDlopenExtFn = void* (*)(const char*, int,
@@ -988,7 +995,10 @@ bool InstallBroadcastIntentWithFeatureGot(void* resolved) {
     AtomicStore(&g_native_receiver_state, uint32_t{100});
     if (!ValidateElfBuildId(kBroadcastPrivatePath,
                     kExpectedBroadcastPrivateBuildId,
-                    sizeof(kExpectedBroadcastPrivateBuildId))) {
+                    sizeof(kExpectedBroadcastPrivateBuildId)) &&
+            !ValidateElfBuildId(kBroadcastPrivatePath,
+                    kExpectedBroadcastPrivateBuildIdK90,
+                    sizeof(kExpectedBroadcastPrivateBuildIdK90))) {
         AtomicStore(&g_native_receiver_state, uint32_t{101});
         return false;
     }
