@@ -59,13 +59,27 @@ constexpr char kAppPublicPath[] =
 constexpr char kAppPublicName[] = "libhyper_os_app_public.so";
 constexpr char kBroadcastPrivatePath[] =
         "/system_ext/lib64/libhyper_os_broadcast_private.dylib.so";
-constexpr uintptr_t kBroadcastIntentWithFeatureGotOffset = 0x14ed0u;
-constexpr uintptr_t kBroadcastIntentWithFeatureSymbolOffset = 0x10d74u;
-constexpr char kBroadcastReceiverOnReceiveSymbol[] =
-        "_RNvMs3_NtNtCslLvADlVgqlk_26hyper_os_broadcast_private13dyn_"
+uintptr_t kBroadcastIntentWithFeatureGotOffset = 0u;
+constexpr uintptr_t kBroadcastIntentWithFeatureGotOffsetOS3 = 0x1d1c0u;
+constexpr uintptr_t kBroadcastIntentWithFeatureGotOffsetOS4 = 0x14ed0u;
+uintptr_t kBroadcastIntentWithFeatureSymbolOffset = 0u;
+constexpr uintptr_t kBroadcastIntentWithFeatureSymbolOffsetOS3 = 0x1a7ccu;
+constexpr uintptr_t kBroadcastIntentWithFeatureSymbolOffsetOS4 = 0x10d74u;
+const char* kBroadcastReceiverOnReceiveSymbol = nullptr;
+constexpr char kBroadcastReceiverOnReceiveSymbolOS3[] =
+        "_RNvMs3_NtNtCsamj2hZJmyn0_26hyper_os_broadcast_private13dyn_"
         "broadcast23BroadcastReceiver_traitINtB5_20BroadcastReceiver_TOINtNtNtNt"
-        "Cs9Neji4M1weT_10abi_stable9std_types5boxed7private4RBoxuEE10on_receiveB9_";
-constexpr char kBroadcastIntentWithFeatureSymbol[] =
+        "Csc8ZqGyuZgC9_10abi_stable9std_types5boxed7private4RBoxuEE10on_receiveB9_";
+constexpr char kBroadcastReceiverOnReceiveSymbolOS4[] =
+         "_RNvMs3_NtNtCslLvADlVgqlk_26hyper_os_broadcast_private13dyn_"
+         "broadcast23BroadcastReceiver_traitINtB5_20BroadcastReceiver_TOINtNtNtNt"
+         "Cs9Neji4M1weT_10abi_stable9std_types5boxed7private4RBoxuEE10on_receiveB9_";
+const char* kBroadcastIntentWithFeatureSymbol = nullptr;
+constexpr char kBroadcastIntentWithFeatureSymbolOS3[] =
+        "_RNvXs_NtCsamj2hZJmyn0_26hyper_os_broadcast_private8sys_implNtB4_31"
+        "ActivityManagerServiceProxyImplNtB4_27ActivityManagerServiceProxy26"
+        "broadcastIntentWithFeature";
+constexpr char kBroadcastIntentWithFeatureSymbolOS4[] =
         "_RNvXs_NtCslLvADlVgqlk_26hyper_os_broadcast_private8sys_implNtB4_31"
         "ActivityManagerServiceProxyImplNtB4_27ActivityManagerServiceProxy26"
         "broadcastIntentWithFeature";
@@ -75,7 +89,11 @@ constexpr char kDataLauncherLibraryTail[] =
 constexpr char kSystemLauncherLibraryTail[] =
         "/MiuiHome.apk!/lib/arm64-v8a/libapp_launcher.so";
 constexpr char kLauncherEntrySymbol[] = "app_entry_point";
-constexpr uint8_t kExpectedSpawnerBuildId[] = {
+constexpr uint8_t kExpectedSpawnerBuildIdOS3[] = {
+        0x9d, 0xf1, 0x7e, 0x1f, 0xab, 0xfd, 0x23, 0x0f,
+        0xb8, 0x25, 0x37, 0x06, 0x70, 0x5d, 0x8b, 0xc8,
+};
+constexpr uint8_t kExpectedSpawnerBuildIdOS4[] = {
         0x87, 0xf2, 0x63, 0x2e, 0x7d, 0x68, 0xfd, 0xa0,
         0x22, 0x63, 0x66, 0xfd, 0xa5, 0x34, 0x6c, 0x2d,
 };
@@ -626,8 +644,23 @@ bool ValidateElfBuildId(const char* path, const uint8_t* expected,
 }
 
 bool ValidateSpawnerBuildId() {
-    return ValidateElfBuildId(kSpawnerPath, kExpectedSpawnerBuildId,
-                              sizeof(kExpectedSpawnerBuildId));
+    if (ValidateElfBuildId(kSpawnerPath, kExpectedSpawnerBuildIdOS3,
+                              sizeof(kExpectedSpawnerBuildIdOS3))) {
+        kBroadcastIntentWithFeatureGotOffset = kBroadcastIntentWithFeatureGotOffsetOS3;
+        kBroadcastIntentWithFeatureSymbolOffset = kBroadcastIntentWithFeatureSymbolOffsetOS3;
+        kBroadcastReceiverOnReceiveSymbol = kBroadcastReceiverOnReceiveSymbolOS3;
+        kBroadcastIntentWithFeatureSymbol = kBroadcastIntentWithFeatureSymbolOS3;
+        return true;
+    };
+    if (ValidateElfBuildId(kSpawnerPath, kExpectedSpawnerBuildIdOS4,
+                              sizeof(kExpectedSpawnerBuildIdOS4))) {
+        kBroadcastIntentWithFeatureGotOffset = kBroadcastIntentWithFeatureGotOffsetOS4;
+        kBroadcastIntentWithFeatureSymbolOffset = kBroadcastIntentWithFeatureSymbolOffsetOS4;
+        kBroadcastReceiverOnReceiveSymbol = kBroadcastReceiverOnReceiveSymbolOS4;
+        kBroadcastIntentWithFeatureSymbol = kBroadcastIntentWithFeatureSymbolOS4;
+        return true;
+    };
+    return false;
 }
 
 bool IsExplicitlyEnabled() {
@@ -695,6 +728,8 @@ constexpr char kArbiterQueryAction[] =
         "dev.codex.miuibackgesturehook.action.MIUI_HOME_INPUT_ARBITER_QUERY";
 constexpr char kContextualSearchTriggeredAction[] =
         "dev.codex.miuibackgesturehook.action.CONTEXTUAL_SEARCH_TRIGGERED";
+constexpr char kContextualSearchServiceAction[] =
+        "dev.codex.miuibackgesturehook.action.CONTEXTUAL_SEARCH_SERVICE";
 constexpr char kRuntimeStatusResponseAction[] =
         "dev.codex.miuibackgesturehook.action.RUNTIME_STATUS_REPLY";
 constexpr char kRuntimeStatusQueryExtra[] = "status_query";
@@ -2461,6 +2496,10 @@ void HookContextualLongPressHandler(void* closure, uint32_t trigger_mode) {
             kContextualSearchTriggeredAction, nullptr)) {
         Log(ANDROID_LOG_WARN,
             "contextual-search trigger haptic signal could not reach SystemUI");
+    } else if (!SendNativeBroadcast(
+            kContextualSearchServiceAction, nullptr)) {
+        Log(ANDROID_LOG_WARN,
+            "contextual-search service signal could not reach SystemUI");
     }
     if (!CleanupContextualLongPressClosure(closure)) {
         // This should be unreachable after the validation above.  Keep the

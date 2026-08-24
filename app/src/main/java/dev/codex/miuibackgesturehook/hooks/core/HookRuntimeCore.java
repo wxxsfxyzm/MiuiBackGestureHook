@@ -5,6 +5,8 @@ import android.animation.AnimatorListenerAdapter;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.os.Build;
@@ -165,6 +167,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "com.miui.home.launcher.Application";
     protected static final String MIUI_HOME_OVERVIEW_PROXY_IMPL =
             "com.miui.home.recents.OverviewProxyImpl";
+    protected static final String MIUI_HOME_TOUCH_INTERACTION_SERVICE =
+            "com.miui.home.recents.TouchInteractionService$1";
     protected static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_COMPAT =
             "com.android.systemui.shared.recents.system.RemoteAnimationTargetCompat";
     protected static final String MIUI_HOME_REMOTE_ANIMATION_TARGET_SET =
@@ -290,6 +294,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             "dev.codex.miuibackgesturehook.action.MIUI_HOME_INPUT_ARBITER_QUERY";
     protected static final String MODULE_CONTEXTUAL_SEARCH_TRIGGERED =
             "dev.codex.miuibackgesturehook.action.CONTEXTUAL_SEARCH_TRIGGERED";
+    protected static final String MODULE_CONTEXTUAL_SEARCH_SERVICE =
+            "dev.codex.miuibackgesturehook.action.CONTEXTUAL_SEARCH_SERVICE";
     protected static final String MODULE_RUNTIME_STATUS_QUERY =
             ZnStatusProtocol.ACTION_QUERY;
     protected static final String MODULE_RUNTIME_STATUS_REPLY =
@@ -560,6 +566,25 @@ public abstract class HookRuntimeCore extends XposedModule {
      */
     protected static boolean blockMiuiHomeXposedHooks() {
         return Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL;
+    }
+    
+    protected boolean isRustHome(Context context) {
+        try {
+            ApplicationInfo appInfo = context.getPackageManager().getApplicationInfo(
+                MIUI_HOME,
+                PackageManager.GET_SHARED_LIBRARY_FILES
+            );
+            String[] sharedLibraries = appInfo.sharedLibraryFiles;
+            if (sharedLibraries != null) {
+                for (String libPath : sharedLibraries) {
+                    if (libPath != null && libPath.contains("hyperos.rustruntime")) {
+                        return true;
+                    }
+                }
+            }
+        } catch (PackageManager.NameNotFoundException e) {
+        }
+        return false;
     }
 
     protected static boolean isMiuiHomeProcess(String candidate) {

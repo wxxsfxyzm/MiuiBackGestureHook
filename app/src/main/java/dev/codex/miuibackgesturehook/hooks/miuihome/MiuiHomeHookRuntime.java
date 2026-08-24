@@ -140,8 +140,14 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected void hookMiuiHomeReturnHomeInitialize(ClassLoader classLoader)
             throws ClassNotFoundException, NoSuchMethodException {
-        Class<?> overviewProxyClass = Class.forName(MIUI_HOME_OVERVIEW_PROXY_IMPL, false,
-                classLoader);
+        Class<?> overviewProxyClass;
+        try {
+            overviewProxyClass = Class.forName(MIUI_HOME_OVERVIEW_PROXY_IMPL, false,
+                    classLoader);
+        } catch(ClassNotFoundException e) {
+            overviewProxyClass = Class.forName(MIUI_HOME_TOUCH_INTERACTION_SERVICE, false,
+            classLoader);
+        }
         Method method = overviewProxyClass.getDeclaredMethod(
                 "lambda$onInitialize$0", Bundle.class);
         method.setAccessible(true);
@@ -3243,7 +3249,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         try {
             boolean contextualSearchEnabled =
                     isContextualSearchLongPressRuntimeEnabled();
-            Intent stateIntent = new Intent(systemUiInputArbiterStateAction());
+            Intent stateIntent = new Intent(systemUiInputArbiterStateAction(context));
             stateIntent.setPackage(MIUI_HOME);
             stateIntent.putExtra(EXTRA_INPUT_ARBITER_READY, ready);
             stateIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
