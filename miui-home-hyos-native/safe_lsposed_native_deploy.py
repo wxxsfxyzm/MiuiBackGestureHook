@@ -232,6 +232,20 @@ done
         ).text.strip()
         return int(text) if re.fullmatch(r"\d+", text) else None
 
+    def wait_for_device_connection(self, timeout_seconds: float = 90.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        last_state = ""
+        while time.monotonic() < deadline:
+            state = self.invoke_adb(["get-state"], allow_failure=True)
+            last_state = state.text.strip()
+            if state.exit_code == 0 and last_state == "device":
+                return
+            time.sleep(0.25)
+        raise RuntimeError(
+            "ADB did not reconnect within the bounded post-install window. "
+            f"Last state: {last_state or 'unavailable'}"
+        )
+
     def get_installed_apk_path(self) -> str | None:
         result = self.invoke_adb(
             ["shell", "pm", "path", PACKAGE_NAME], allow_failure=True
@@ -308,10 +322,20 @@ echo "$size"
         self, expected_systemui_pid: int, log_before: LogSnapshot
     ) -> str:
         for _ in range(100):
-            if self.get_systemui_pid() != expected_systemui_pid:
+            current_systemui_pid = self.get_systemui_pid()
+            if current_systemui_pid is None:
+                # Some devices briefly restart adbd after PackageManager
+                # replaces a debuggable APK. An unreadable PID is not evidence
+                # that SystemUI restarted: wait for the same serialized device
+                # to return, then compare the actual process identity.
+                self.wait_for_device_connection()
+                current_systemui_pid = self.get_systemui_pid()
+            if current_systemui_pid != expected_systemui_pid:
                 raise RuntimeError(
                     "SystemUI restarted during installation; API-102 hot reload was "
-                    "not preserved."
+                    "not preserved. "
+                    f"Expected PID {expected_systemui_pid}, got "
+                    f"{current_systemui_pid or 'unavailable'}."
                 )
             delta = self.read_lsposed_log_delta(log_before)
             if re.search(r"Hot reloaded, build=.*process=com\.android\.systemui", delta):
@@ -461,36 +485,44 @@ echo "$size"
 
         status_component = f"{PACKAGE_NAME}/.activity.PredictiveBackSettingsActivity"
         last_native_status = ""
-        status_log_before = self.get_lsposed_log_snapshot()
         try:
-            start = self.invoke_adb(
-                ["shell", "am", "start", "-S", "-W", "-n", status_component],
-                allow_failure=True,
-            )
-            if start.exit_code != 0 or not re.search(r"Status:\s+ok", start.text):
-                raise RuntimeError(
-                    f"Could not start the authenticated native status probe.\n{start.text}"
+            # The first authenticated query can race the private broadcast
+            # runtime-holder capture immediately after a fresh launcher fork.
+            # Retry with a new Activity instance and nonce; every attempt still
+            # requires an authenticated native response and full ready state.
+            for probe_attempt in range(3):
+                status_log_before = self.get_lsposed_log_snapshot()
+                start = self.invoke_adb(
+                    ["shell", "am", "start", "-S", "-W", "-n", status_component],
+                    allow_failure=True,
                 )
-            for _ in range(20):
-                time.sleep(0.25)
-                status_log = self.read_lsposed_log_delta(status_log_before)
-                lines = [
-                    line
-                    for line in status_log.splitlines()
-                    if "Published module runtime status reply" in line
-                    and "nativeResponse=true" in line
-                ]
-                native_status = lines[-1] if lines else ""
-                if native_status:
-                    last_native_status = native_status
-                if "statusReady=true" in native_status:
-                    return f"authenticated_native_status=ready\n{native_status}"
-                if "statusReady=false" in native_status:
+                if start.exit_code != 0 or not re.search(r"Status:\s+ok", start.text):
                     raise RuntimeError(
-                        f"Authenticated native status reported not ready.\n{native_status}"
+                        "Could not start the authenticated native status probe "
+                        f"attempt {probe_attempt + 1}.\n{start.text}"
                     )
+                for _ in range(20):
+                    time.sleep(0.25)
+                    status_log = self.read_lsposed_log_delta(status_log_before)
+                    lines = [
+                        line
+                        for line in status_log.splitlines()
+                        if "Published module runtime status reply" in line
+                        and "nativeResponse=true" in line
+                    ]
+                    native_status = lines[-1] if lines else ""
+                    if native_status:
+                        last_native_status = native_status
+                    if "statusReady=true" in native_status:
+                        return f"authenticated_native_status=ready\n{native_status}"
+                    if "statusReady=false" in native_status:
+                        raise RuntimeError(
+                            "Authenticated native status reported not ready.\n"
+                            f"{native_status}"
+                        )
             raise RuntimeError(
-                "Authenticated native status did not become ready.\n"
+                "Authenticated native status did not become ready after "
+                "3 bounded probes.\n"
                 f"{last_native_status}"
             )
         finally:
@@ -800,6 +832,7 @@ done
 
             self.install_apk(deployment_apk, enable_rollback=True)
             mutation_started = True
+            self.wait_for_device_connection()
             installed_path = self.get_installed_apk_path()
             if not installed_path:
                 raise RuntimeError(
