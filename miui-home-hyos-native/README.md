@@ -17,6 +17,19 @@ Launcher business hooks, profile validation, the runtime/Dart resolvers,
 authenticated state broadcasts, and the MiCTS-style `madvise` guard are built
 into this APK payload.
 
+The private-broadcast bridge resolves its exact Rust dynamic symbol in the
+loaded system image and then requires exactly one matching
+`R_AARCH64_JUMP_SLOT` from `DT_JMPREL`. It does not carry build-specific
+function or GOT offsets. Image ownership, the resolved slot value, RELRO page
+handling, and rollback remain fail-closed guards; missing or ambiguous
+relocations leave the bridge disabled.
+
+The mapped Dart AOT resolver also carries no launcher-version callback RVAs.
+When the compiler emits paired Overview-enter callbacks, it selects the upper
+adjacent pool-object member only after it uniquely shares the exit callback's
+state slot, shared object, and prepare/publish call targets. Missing, oversized,
+or multiply paired candidate families reject the whole Dart state profile.
+
 ## Build
 
 Use the application build; there is no separate native-module package task:
