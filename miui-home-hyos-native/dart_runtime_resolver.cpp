@@ -8,6 +8,7 @@ namespace {
 
 constexpr size_t kMaxLoadSegments = 16u;
 constexpr uintptr_t kMaxImageSpan = 0x4000000u;
+constexpr size_t kMaxOverviewCandidates = 16u;
 
 struct LoadSegment {
     uintptr_t start;
@@ -32,6 +33,7 @@ struct DrawerCandidate {
 struct OverviewCandidate {
     uintptr_t offset;
     uintptr_t state_slot;
+    uintptr_t argument_pool_object;
     uintptr_t shared_pool_object;
     uintptr_t prepare_target;
     uintptr_t publish_target;
@@ -282,10 +284,11 @@ bool MatchOverviewEnter(const ElfView& view, uintptr_t offset,
         // insert two pool loads and use relocated field offsets. Keep the
         // structural ABI checks while allowing those compiler-generated
         // immediates to move.
+        uintptr_t modern_state = 0u;
         if (code[0] != 0xa9bf79fdu || code[1] != 0xaa0f03fdu ||
                 code[2] != 0xd10041efu || code[3] != 0xaa0103e2u ||
                 code[4] != 0xf81f83a1u || code[5] != 0xf9403f40u ||
-                !IsLoadX0FromX0(code[6], nullptr) ||
+                !IsLoadX0FromX0(code[6], &modern_state) ||
                 code[7] != 0xf9402370u || code[8] != 0x6b10001fu ||
                 code[9] != 0x54000061u || !DecodeBlTarget(
                         offset + 11u * 4u, code[11], &unbox) ||
@@ -302,9 +305,12 @@ bool MatchOverviewEnter(const ElfView& view, uintptr_t offset,
                 code[28] != 0xd65f03c0u) {
             return false;
         }
-    }
-        *candidate = {offset, state_slot, shared, prepare, publish};
+        *candidate = {offset, modern_state, argument, shared, prepare,
+                      publish};
         return true;
+    }
+    *candidate = {offset, state_slot, argument, shared, prepare, publish};
+    return true;
 }
 
 bool MatchOverviewExit(const ElfView& view, uintptr_t offset,
@@ -364,11 +370,83 @@ bool MatchOverviewExit(const ElfView& view, uintptr_t offset,
                 code[42] != 0xa8c179fdu || code[43] != 0xd65f03c0u) {
             return false;
         }
-        *candidate = {offset, modern_state, modern_shared, modern_prepare,
-                      modern_publish};
+        *candidate = {offset, modern_state, 0u, modern_shared,
+                      modern_prepare, modern_publish};
         return true;
     }
-    *candidate = {offset, state_slot, shared, prepare, publish};
+    *candidate = {offset, state_slot, 0u, shared, prepare, publish};
+    return true;
+}
+
+bool SameOverviewFamily(const OverviewCandidate& enter,
+                        const OverviewCandidate& exit) {
+    return enter.state_slot != 0u &&
+            enter.state_slot == exit.state_slot &&
+            enter.shared_pool_object != 0u &&
+            enter.shared_pool_object == exit.shared_pool_object &&
+            enter.prepare_target != 0u &&
+            enter.prepare_target == exit.prepare_target &&
+            enter.publish_target != 0u &&
+            enter.publish_target == exit.publish_target;
+}
+
+bool SelectOverviewPair(const OverviewCandidate* enters, size_t enter_count,
+                        const OverviewCandidate* exits, size_t exit_count,
+                        OverviewCandidate* selected_enter,
+                        OverviewCandidate* selected_exit) {
+    if (enters == nullptr || exits == nullptr || selected_enter == nullptr ||
+            selected_exit == nullptr || enter_count == 0u ||
+            exit_count == 0u || enter_count > kMaxOverviewCandidates ||
+            exit_count > kMaxOverviewCandidates) {
+        return false;
+    }
+    if (enter_count == 1u && exit_count == 1u &&
+            SameOverviewFamily(enters[0], exits[0])) {
+        *selected_enter = enters[0];
+        *selected_exit = exits[0];
+        return true;
+    }
+
+    // Recent Dart AOT snapshots emit two otherwise identical enter callbacks
+    // from adjacent pool objects. The callback for entering Overview uses the
+    // upper object; its lower adjacent sibling is the complementary callback.
+    // Require that pairing in addition to the unique exit callback's state,
+    // shared object, and prepare/publish targets. This keeps selection dynamic
+    // while failing closed for unrelated or multiply paired callback families.
+    size_t pair_count = 0u;
+    OverviewCandidate resolved_enter{};
+    OverviewCandidate resolved_exit{};
+    for (size_t exit_index = 0u; exit_index < exit_count; ++exit_index) {
+        for (size_t enter_index = 0u; enter_index < enter_count;
+             ++enter_index) {
+            const OverviewCandidate& enter = enters[enter_index];
+            const OverviewCandidate& exit = exits[exit_index];
+            if (!SameOverviewFamily(enter, exit) ||
+                    enter.argument_pool_object < sizeof(uint64_t)) {
+                continue;
+            }
+            size_t lower_sibling_count = 0u;
+            for (size_t sibling_index = 0u; sibling_index < enter_count;
+                 ++sibling_index) {
+                if (sibling_index == enter_index) continue;
+                const OverviewCandidate& sibling = enters[sibling_index];
+                if (SameOverviewFamily(sibling, exit) &&
+                        sibling.argument_pool_object <=
+                                UINTPTR_MAX - sizeof(uint64_t) &&
+                        sibling.argument_pool_object + sizeof(uint64_t) ==
+                                enter.argument_pool_object) {
+                    ++lower_sibling_count;
+                }
+            }
+            if (lower_sibling_count != 1u) continue;
+            ++pair_count;
+            resolved_enter = enter;
+            resolved_exit = exit;
+        }
+    }
+    if (pair_count != 1u) return false;
+    *selected_enter = resolved_enter;
+    *selected_exit = resolved_exit;
     return true;
 }
 
@@ -521,6 +599,8 @@ bool ResolveDartFeatureProfile(
     diagnostics->stage = ResolveStage::kResolvingOverview;
     OverviewCandidate enter{};
     OverviewCandidate exit{};
+    OverviewCandidate enter_candidates[kMaxOverviewCandidates]{};
+    OverviewCandidate exit_candidates[kMaxOverviewCandidates]{};
     for (size_t segment_index = 0u; segment_index < view.load_count;
          ++segment_index) {
         const LoadSegment& load = view.loads[segment_index];
@@ -530,39 +610,32 @@ bool ResolveDartFeatureProfile(
             OverviewCandidate candidate{};
             if (MatchOverviewEnter(view, offset, drawer.unbox_target,
                                    &candidate)) {
+                const uint32_t candidate_index =
+                        diagnostics->overview_enter_candidate_count;
+                if (candidate_index < kMaxOverviewCandidates) {
+                    enter_candidates[candidate_index] = candidate;
+                }
                 Increment(&diagnostics->overview_enter_candidate_count);
-                enter = candidate;
             }
             candidate = {};
             if (MatchOverviewExit(view, offset, drawer.unbox_target,
                                   &candidate)) {
+                const uint32_t candidate_index =
+                        diagnostics->overview_exit_candidate_count;
+                if (candidate_index < kMaxOverviewCandidates) {
+                    exit_candidates[candidate_index] = candidate;
+                }
                 Increment(&diagnostics->overview_exit_candidate_count);
-                exit = candidate;
             }
             offset += 4u;
         }
     }
-    if (launcher_profile.id != nullptr &&
-            strcmp(launcher_profile.id, "6144") == 0 &&
-            instructions_offset == 0x826940u) {
-        OverviewCandidate modern_enter{};
-        OverviewCandidate modern_exit{};
-        if (MatchOverviewEnter(view, 0x16c543cu, drawer.unbox_target,
-                               &modern_enter) &&
-                MatchOverviewExit(view, 0xdb8a70u, drawer.unbox_target,
-                                  &modern_exit)) {
-            enter = modern_enter;
-            exit = modern_exit;
-            diagnostics->overview_enter_candidate_count = 1u;
-            diagnostics->overview_exit_candidate_count = 1u;
-        }
-    }
-    if (diagnostics->overview_enter_candidate_count != 1u ||
-            diagnostics->overview_exit_candidate_count != 1u ||
-            enter.state_slot != exit.state_slot ||
-            enter.shared_pool_object != exit.shared_pool_object ||
-            enter.prepare_target != exit.prepare_target ||
-            enter.publish_target != exit.publish_target) {
+    if (!SelectOverviewPair(
+                enter_candidates,
+                diagnostics->overview_enter_candidate_count,
+                exit_candidates,
+                diagnostics->overview_exit_candidate_count,
+                &enter, &exit)) {
         diagnostics->stage = ResolveStage::kRejectedOverview;
         return false;
     }

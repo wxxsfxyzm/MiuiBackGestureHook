@@ -22,3 +22,6 @@ void FreeNativeSymbolResolver(NativeSymbolResolver* resolver);
 void* GetNativeBaseAddress(NativeSymbolResolver* resolver);
 void* LookupNativeSymbol(NativeSymbolResolver* resolver, const char* name,
                          bool prefix, size_t* size);
+// Returns the sole R_AARCH64_JUMP_SLOT for an exact dynamic symbol name.
+// The lookup is read-only and fails closed for missing or ambiguous slots.
+void** LookupNativePltSlot(NativeSymbolResolver* resolver, const char* name);

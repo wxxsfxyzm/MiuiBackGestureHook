@@ -9,6 +9,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,8 +93,6 @@ constexpr char kSpawnerPath[] = "/system_ext/bin/hyos_spawner";
 constexpr char kHyperRuntimeName[] = "libhyper_os_flutter.so";
 constexpr char kBroadcastPrivatePath[] =
         "/system_ext/lib64/libhyper_os_broadcast_private.dylib.so";
-constexpr uintptr_t kBroadcastIntentWithFeatureGotOffset = 0x14ed0u;
-constexpr uintptr_t kBroadcastIntentWithFeatureSymbolOffset = 0x10d74u;
 constexpr char kBroadcastReceiverOnReceiveSymbol[] =
         "_RNvMs3_NtNtCslLvADlVgqlk_26hyper_os_broadcast_private13dyn_"
         "broadcast23BroadcastReceiver_traitINtB5_20BroadcastReceiver_TOINtNtNtNt"
@@ -1297,25 +1296,21 @@ bool RestoreBroadcastIntentWithFeatureGot() {
     return restored && protected_again;
 }
 
-bool InstallBroadcastIntentWithFeatureGot(void* resolved) {
+bool InstallBroadcastIntentWithFeatureGot(void* resolved, void* expected_base,
+                                          void** slot) {
     AtomicStore(&g_native_receiver_state, uint32_t{100});
     Dl_info image{};
     if (resolved == nullptr || dladdr(resolved, &image) == 0 ||
             image.dli_fbase == nullptr || image.dli_fname == nullptr ||
-            !StringsEqual(image.dli_fname, kBroadcastPrivatePath)) {
+            !StringsEqual(image.dli_fname, kBroadcastPrivatePath) ||
+            image.dli_fbase != expected_base) {
         AtomicStore(&g_native_receiver_state, uint32_t{102});
         return false;
     }
-    const uintptr_t resolved_address = reinterpret_cast<uintptr_t>(resolved);
-    if (resolved_address < kBroadcastIntentWithFeatureSymbolOffset ||
-            reinterpret_cast<uintptr_t>(image.dli_fbase) !=
-            resolved_address - kBroadcastIntentWithFeatureSymbolOffset) {
+    if (slot == nullptr) {
         AtomicStore(&g_native_receiver_state, uint32_t{103});
         return false;
     }
-    auto** slot = reinterpret_cast<void**>(
-            static_cast<uint8_t*>(image.dli_fbase) +
-            kBroadcastIntentWithFeatureGotOffset);
     if (AtomicLoad(slot) != resolved) {
         AtomicStore(&g_native_receiver_state, uint32_t{104});
         return false;
@@ -1338,6 +1333,14 @@ bool InstallBroadcastIntentWithFeatureGot(void* resolved) {
     const bool protected_again = SetBroadcastPrivateGotWritable(slot, PROT_READ);
     if (replaced && protected_again) {
         AtomicStore(&g_native_receiver_state, uint32_t{109});
+        const uintptr_t image_base = reinterpret_cast<uintptr_t>(
+                image.dli_fbase);
+        __android_log_print(
+                ANDROID_LOG_INFO, kLogTag,
+                "resolved broadcastIntentWithFeature PLT slot dynamically "
+                "symbol_offset=0x%" PRIxPTR " slot_offset=0x%" PRIxPTR,
+                reinterpret_cast<uintptr_t>(resolved) - image_base,
+                reinterpret_cast<uintptr_t>(slot) - image_base);
         return true;
     }
 
@@ -1932,10 +1935,15 @@ void TryInstallArbiterBridge() {
     void* broadcast_send = resolver == nullptr ? nullptr
             : LookupNativeSymbol(resolver, kBroadcastSendSymbol, false,
                                  &send_size);
-    if (resolver != nullptr) FreeNativeSymbolResolver(resolver);
+    void* broadcast_image_base = resolver == nullptr ? nullptr
+            : GetNativeBaseAddress(resolver);
+    void** broadcast_intent_with_feature_slot = resolver == nullptr ? nullptr
+            : LookupNativePltSlot(resolver,
+                                  kBroadcastIntentWithFeatureSymbol);
     if (receiver_on_receive == nullptr || broadcast_intent_with_feature == nullptr ||
             broadcast_send == nullptr || receiver_size == 0u ||
             broadcast_size == 0u || send_size == 0u) {
+        if (resolver != nullptr) FreeNativeSymbolResolver(resolver);
         // The broadcast dylib is not a guaranteed dependency at launcher
         // entry. HookDlopen/HookDlsym will retry after later native loading.
         AtomicStore(&g_native_receiver_state, uint32_t{98});
@@ -1945,9 +1953,13 @@ void TryInstallArbiterBridge() {
     // Installation is process-local. A normal MiuiHome replacement forked by
     // the same injected spawner must install its own bridge; the atomic state
     // above already prevents duplicate mutation inside one process. Exact
-    // Exact process, resolved image and symbol address, GOT address/value, and
+    // process, resolved image and symbol address, GOT address/value, and
     // the launcher profile's code fingerprints remain the fail-closed guards.
-    if (!InstallBroadcastIntentWithFeatureGot(broadcast_intent_with_feature)) {
+    const bool broadcast_got_installed = InstallBroadcastIntentWithFeatureGot(
+            broadcast_intent_with_feature, broadcast_image_base,
+            broadcast_intent_with_feature_slot);
+    FreeNativeSymbolResolver(resolver);
+    if (!broadcast_got_installed) {
         AtomicStore(&g_arbiter_bridge_hook_state,
                 AtomicLoad(&g_native_receiver_state) == uint32_t{102}
                         ? uint32_t{2} : uint32_t{4});
@@ -2588,8 +2600,16 @@ const miui_home_profiles::LauncherProfile* ResolveDartFeatureProfile(
                 &g_dart_profile_resolve_state,
                 static_cast<uint32_t>(g_dart_profile_diagnostics.stage),
                 __ATOMIC_RELEASE);
-        Log(ANDROID_LOG_WARN,
-            "mapped Dart AOT feature family was absent or ambiguous");
+        __android_log_print(
+                ANDROID_LOG_WARN, kLogTag,
+                "mapped Dart AOT feature family was absent or ambiguous "
+                "stage=%u drawer=%u transition=%u overview=%u/%u editing=%u",
+                static_cast<uint32_t>(g_dart_profile_diagnostics.stage),
+                g_dart_profile_diagnostics.drawer_candidate_count,
+                g_dart_profile_diagnostics.transition_candidate_count,
+                g_dart_profile_diagnostics.overview_enter_candidate_count,
+                g_dart_profile_diagnostics.overview_exit_candidate_count,
+                g_dart_profile_diagnostics.editing_candidate_count);
         return nullptr;
     }
     AtomicStore(&g_resolved_dart_profile,
@@ -2606,8 +2626,22 @@ const miui_home_profiles::LauncherProfile* ResolveDartFeatureProfile(
                      __ATOMIC_RELEASE);
     __atomic_store_n(&g_editing_state_hook_state, uint32_t{1},
                      __ATOMIC_RELEASE);
-    Log(ANDROID_LOG_INFO,
-        "uniquely resolved mapped Dart drawer, Overview, and editing family");
+    __android_log_print(
+            ANDROID_LOG_INFO, kLogTag,
+            "resolved mapped Dart drawer, Overview, and editing family "
+            "candidates=%u/%u/%u/%u/%u offsets=0x%" PRIxPTR
+            "/0x%" PRIxPTR "/0x%" PRIxPTR "/0x%" PRIxPTR
+            "/0x%" PRIxPTR,
+            g_dart_profile_diagnostics.drawer_candidate_count,
+            g_dart_profile_diagnostics.transition_candidate_count,
+            g_dart_profile_diagnostics.overview_enter_candidate_count,
+            g_dart_profile_diagnostics.overview_exit_candidate_count,
+            g_dart_profile_diagnostics.editing_candidate_count,
+            g_dart_profile_diagnostics.drawer_progress_end_offset,
+            g_dart_profile_diagnostics.drawer_transition_complete_offset,
+            g_dart_profile_diagnostics.overview_enter_offset,
+            g_dart_profile_diagnostics.overview_exit_offset,
+            g_dart_profile_diagnostics.editing_query_offset);
     return &g_dart_profile_storage.profile;
 }
 

@@ -186,17 +186,19 @@ def resolve_dart_runtime_profile(
         publish = bl_target(rva + 96, code[24])
         if (
             state is not None and argument is not None and shared is not None
-            and argument + 8 == shared
             and code[7:10] == [0xF9402370, 0x6B10001F, 0x54000061]
             and bl_target(rva + 44, code[11]) == unbox
             and code[14:16] == [0xF90001F0, 0xF9402B64]
             and code[17:19] == [0xAA0003E1, 0xF85F83A2]
-            and code[23] == 0xF9438364
+            and (
+                (argument + 8 == shared and code[23] == 0xF9438364)
+                or code[23] & 0xFFC003FF == 0xF9400364
+            )
             and code[25:29] == [0xAA1603E0, 0xAA1D03EF,
                                 0xA8C179FD, 0xD65F03C0]
             and prepare is not None and publish is not None
         ):
-            enters.append((rva, state, shared, prepare, publish))
+            enters.append((rva, state, argument, shared, prepare, publish))
 
     exits = []
     exit_prefix = (0xA9BF79FD, 0xAA0F03FD, 0xD10041EF)
@@ -208,34 +210,64 @@ def resolve_dart_runtime_profile(
         if (
             code[3:6] == [0xB8413080, 0xB841F081, 0x8B1C8021]
             and state is not None and shared is not None
-            and code[20] == 0xF9403F40
             and code[22:25] == [0xF9402370, 0x6B10001F, 0x54000061]
-            and bl_target(rva + 104, code[26]) == unbox
+            and bl_target(rva + 104, code[26]) in (unbox, unbox - 0x3C)
             and code[29:31] == [0xF90001F0, 0xF9402B64]
-            and code[32:34] == [0xAA0003E1, 0xF85F83A5]
-            and code[38] == 0xF9438364
+            and code[32] == 0xAA0003E1
+            and code[33] & 0xFFFFFFE0 == 0xF85F83A0
+            and code[38] & 0xFFC003FF == 0xF9400364
             and code[40:44] == [0xAA1603E0, 0xAA1D03EF,
                                 0xA8C179FD, 0xD65F03C0]
             and prepare is not None and publish is not None
         ):
             exits.append((rva, state, shared, prepare, publish))
-    if len(enters) != 1 or len(exits) != 1 or enters[0][1:] != exits[0][1:]:
-        raise ValueError(
-            "Dart resolver Overview candidates/relationship: "
-            f"enter={len(enters)} exit={len(exits)}"
+
+    def same_family(enter, exit_):
+        return (
+            enter[1] != 0
+            and enter[1] == exit_[1]
+            and enter[3] != 0
+            and enter[3:] == exit_[2:]
         )
 
+    selected = []
+    if (
+        len(enters) == 1
+        and len(exits) == 1
+        and same_family(enters[0], exits[0])
+    ):
+        selected.append((enters[0], exits[0]))
+    else:
+        for enter in enters:
+            for exit_ in exits:
+                if not same_family(enter, exit_) or enter[2] < 8:
+                    continue
+                lower_siblings = sum(
+                    1
+                    for sibling in enters
+                    if sibling != enter
+                    and same_family(sibling, exit_)
+                    and sibling[2] + 8 == enter[2]
+                )
+                if lower_siblings == 1:
+                    selected.append((enter, exit_))
+    if len(selected) != 1:
+        raise ValueError(
+            "Dart resolver Overview candidates/relationship: "
+            f"enter={len(enters)} exit={len(exits)} selected={len(selected)}"
+        )
+    selected_enter, selected_exit = selected[0]
+
     editing_queries = []
-    query_prefix = (0xA9BF79FD, 0xAA0F03FD, 0xD10041EF, 0xF81F83A1,
-                    0xF9403F40, 0xF95AE800, 0x6B16001F, 0x540001A1,
-                    0xF9403F40, 0xF94D9400, 0xF9402370, 0x6B10001F,
-                    0x54000061)
+    query_prefix = (0xA9BF79FD, 0xAA0F03FD, 0xD10041EF, 0xF81F83A1)
     for query_rva, query_code in candidates(query_prefix, 16):
         if (
-            query_code[13] & 0xFFC003FF == 0xF9400362
-            and
-            bl_target(query_rva + 14 * 4, query_code[14]) is not None
-            and query_code[15] == 0x91403B70
+            query_code[4] & 0xFFC00000 == 0xF9400000
+            and query_code[6:9] == [0x6B16001F, 0x540001A1, 0xF9403F40]
+            and query_code[9] & 0xFFC00000 == 0xF9400000
+            and query_code[10:13]
+            == [0xF9402370, 0x6B10001F, 0x54000061]
+            and bl_target(query_rva + 14 * 4, query_code[14]) is not None
         ):
             editing_queries.append(query_rva)
 
@@ -278,8 +310,8 @@ def resolve_dart_runtime_profile(
         "transition_complete_offset": transition[0],
         "all_apps_state_slot_offset": all_apps,
         "home_state_slot_offset": home,
-        "overview_enter_offset": enters[0][0],
-        "overview_exit_offset": exits[0][0],
+        "overview_enter_offset": selected_enter[0],
+        "overview_exit_offset": selected_exit[0],
         "editing_query_offset": editing_query,
         "editing_query_return_offset_a": editing_return_a,
         "editing_query_return_offset_b": editing_return_b,
@@ -452,9 +484,27 @@ def main() -> None:
         default=[],
         metavar="PROFILE_ID=PATH",
     )
+    parser.add_argument(
+        "--resolve-dart-library",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="PATH",
+        help=(
+            "resolve and print an arbitrary mapped-Dart ELF without a "
+            "manifest binding"
+        ),
+    )
     args = parser.parse_args()
-    if not args.library and not args.dart_library:
-        parser.error("at least one --library or --dart-library binding is required")
+    if (
+        not args.library
+        and not args.dart_library
+        and not args.resolve_dart_library
+    ):
+        parser.error(
+            "at least one --library, --dart-library, or "
+            "--resolve-dart-library input is required"
+        )
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     profiles = {profile["id"]: profile for profile in manifest["profiles"]}
     profile_references = {
@@ -485,6 +535,15 @@ def main() -> None:
             profile_references[profile_id],
             dart_references[profile_id],
             Path(raw_path),
+        )
+    for path in args.resolve_dart_library:
+        image = path.read_bytes()
+        resolved = resolve_dart_runtime_profile(image, load_segments(image))
+        print(
+            json.dumps(
+                {"library": str(path), "resolved": resolved},
+                sort_keys=True,
+            )
         )
 
 

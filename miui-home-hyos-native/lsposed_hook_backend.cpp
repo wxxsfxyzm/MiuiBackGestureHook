@@ -588,6 +588,30 @@ bool SymbolNameEquals(const DynamicView& view, uint32_t symbol_index,
             memcmp(name, expected, length) == 0;
 }
 
+void** FindUniquePltSlot(const Image& image, const DynamicView& view,
+                         const char* symbol) {
+    if (symbol == nullptr || view.plt_rela == nullptr ||
+            view.plt_rela_count == 0u) {
+        return nullptr;
+    }
+    void** matched = nullptr;
+    for (size_t index = 0u; index < view.plt_rela_count; ++index) {
+        const ElfW(Rela)& relocation = view.plt_rela[index];
+        if (ELF64_R_TYPE(relocation.r_info) != R_AARCH64_JUMP_SLOT) {
+            continue;
+        }
+        const uint32_t symbol_index = ELF64_R_SYM(relocation.r_info);
+        if (!SymbolNameEquals(view, symbol_index, symbol)) continue;
+        const uintptr_t address = RuntimeAddress(image, relocation.r_offset);
+        if (matched != nullptr || address == 0u ||
+                !RangeInImage(image, address, sizeof(void*), PF_R | PF_W)) {
+            return nullptr;
+        }
+        matched = reinterpret_cast<void**>(address);
+    }
+    return matched;
+}
+
 int ReadProtection(uintptr_t address) {
     FILE* maps = fopen("/proc/self/maps", "re");
     if (maps == nullptr) return -1;
@@ -772,6 +796,14 @@ void* LookupNativeSymbol(NativeSymbolResolver* resolver, const char* name,
         return reinterpret_cast<void*>(address);
     }
     return nullptr;
+}
+
+void** LookupNativePltSlot(NativeSymbolResolver* resolver, const char* name) {
+    if (resolver == nullptr || name == nullptr) return nullptr;
+    auto* bridge = reinterpret_cast<NativeSymbolResolverImpl*>(resolver);
+    DynamicView view{};
+    if (!BuildDynamicView(bridge->image, &view)) return nullptr;
+    return FindUniquePltSlot(bridge->image, view, name);
 }
 
 bool EnsureLsposedMadviseGuard(const char* runtime_name) {
