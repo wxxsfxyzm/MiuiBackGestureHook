@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "MiuiBackGestureHook"
 include(":app", ":hidden-api")
+include(":AnnotationProcessor")
