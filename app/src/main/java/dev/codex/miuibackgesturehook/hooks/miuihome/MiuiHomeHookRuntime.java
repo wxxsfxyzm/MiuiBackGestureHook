@@ -322,9 +322,18 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     classLoader);
             Class<?> rectFParamsClass = Class.forName(
                     MIUI_HOME_RECTF_PARAMS, false, classLoader);
-            Method config = requireExactDeclaredMethod(
-                    implementorClass, "animTo$lambda$3", "void",
-                    rectFParamsClass.getName(), implementorClass.getName());
+            Method config;
+            try {
+                config = requireExactDeclaredMethod(
+                        implementorClass, "animTo$lambda$3", "void",
+                        rectFParamsClass.getName(),
+                        implementorClass.getName());
+            } catch (NoSuchMethodException oldSignature) {
+                config = requireExactDeclaredMethod(
+                        implementorClass, "animTo$lambda$3", "void",
+                        implementorClass.getName(),
+                        rectFParamsClass.getName());
+            }
             recordHookHandle(hook(config)
                     .setId("miui_home_return_home_anim_to_config")
                     .intercept(this::observeMiuiHomeUnifiedAnimToConfigured));
@@ -905,33 +914,40 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected Object observeMiuiHomeUnifiedAnimToConfigured(
             XposedInterface.Chain chain) throws Throwable {
+        Object firstArg = chain.getArg(0);
+        Object secondArg = chain.getArg(1);
+        boolean paramsFirst = MIUI_HOME_RECTF_PARAMS.equals(
+                firstArg.getClass().getName());
+        Object params = paramsFirst ? firstArg : secondArg;
+        Object implementor = paramsFirst ? secondArg : firstArg;
         MiuiHomeReturnHomeController controller =
                 miuiHomeReturnHomeController;
         Object configLock = controller == null ? null
                 : controller.resolveUnifiedAnimToConfigLock(
-                chain.getArg(0));
+                params);
         if (configLock != null) {
             synchronized (configLock) {
                 return observeMiuiHomeUnifiedAnimToConfiguredLocked(
-                        chain, controller);
+                        chain, controller, implementor, params);
             }
         }
         return observeMiuiHomeUnifiedAnimToConfiguredLocked(
-                chain, controller);
+                chain, controller, implementor, params);
     }
 
     protected Object observeMiuiHomeUnifiedAnimToConfiguredLocked(
             XposedInterface.Chain chain,
-            MiuiHomeReturnHomeController controller) throws Throwable {
+            MiuiHomeReturnHomeController controller,
+            Object implementor, Object params) throws Throwable {
         Object ownerToken = controller == null ? null
                 : controller.beginUnifiedNativeAnimToConfigHook(
-                chain.getArg(0));
+                params);
         Throwable hookFailure = null;
         String completionReason = "beforeOriginal";
         try {
             if (controller != null
                     && controller.shouldSkipInterruptedUnifiedAnimToConfig(
-                    chain.getArg(1), chain.getArg(0))) {
+                    implementor, params)) {
                 completionReason = "skippedInterruptedConfig";
                 return null;
             }
@@ -940,7 +956,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             completionReason = "originalReturned";
             if (controller != null) {
                 controller.onUnifiedNativeAnimToConfigured(
-                        chain.getArg(1), chain.getArg(0));
+                        implementor, params);
                 completionReason = "configuredReturned";
             }
             return result;
@@ -952,11 +968,11 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             if (controller != null) {
                 try {
                     controller.onUnifiedNativeAnimToConfigHookCompleted(
-                            chain.getArg(1), chain.getArg(0),
+                            implementor, params,
                             completionReason, hookFailure);
                 } finally {
                     controller.finishUnifiedNativeAnimToConfigHook(
-                            ownerToken, chain.getArg(0),
+                            ownerToken, params,
                             completionReason, hookFailure);
                 }
             }
