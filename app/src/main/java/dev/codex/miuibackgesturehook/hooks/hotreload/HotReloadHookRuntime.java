@@ -127,6 +127,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         miuiLauncherXiaoAiVisible = false;
         acceptedInputToken.set(null);
         miuiHomeAcceptedInputIdentity.set(null);
+        endedLauncherOpenWallpaperReset.set(null);
         Object[] savedContextualSearchNavigationBars =
                 detachAllContextualSearchInputReceiversForHotReload();
         closeHyperOsBackHapticHelper();

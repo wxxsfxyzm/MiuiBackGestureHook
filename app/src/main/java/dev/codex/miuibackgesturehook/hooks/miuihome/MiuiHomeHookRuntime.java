@@ -660,6 +660,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         miuiHomeOpenBreakGenerationPrepared = true;
         miuiHomeOpenBreakAnimationActive = false;
         miuiHomeOpenBreakCommandPending = false;
+        endedLauncherOpenWallpaperReset.set(null);
         refreshMiuiHomeOpenBreakAvailability(controller, "enable");
         return result;
     }
@@ -676,6 +677,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 animationListener, animationIdentity)) {
             return result;
         }
+        endedLauncherOpenWallpaperReset.set(null);
         invalidateMiuiHomeLauncherOpenSnapshot(null, "animationStart");
         if (!miuiHomeOpenBreakGenerationPrepared
                 || miuiHomeOpenBreakGeneration == 0L) {
@@ -729,6 +731,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 chain.getThisObject(), endedAnimationIdentity)) {
             return result;
         }
+        armEndedLauncherOpenWallpaperReset(
+                chain.getThisObject(), endedAnimationIdentity);
         invalidateMiuiHomeLauncherOpenSnapshot(
                 endedAnimationIdentity, "animationEnd");
         long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
@@ -749,6 +753,149 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     miuiHomeOpenBreakController, "animationEnd");
         });
         return result;
+    }
+
+    protected void armEndedLauncherOpenWallpaperReset(
+            Object animationListener, Object endedAnimationIdentity) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            return;
+        }
+        try {
+            MiuiHomeAcceptedInputToken inputIdentity =
+                    miuiHomeAcceptedInputIdentity.get();
+            long callbackEpoch =
+                    miuiHomeOpenBreakCallbackEpoch.get();
+            Object stateManager = readField(
+                    animationListener, "this$0");
+            if (inputIdentity == null
+                    || stateManager == null
+                    || stateManager != miuiHomeOpenBreakStateManager
+                    || inputIdentity.miuiHomeOpenBreakGenerationAtDown
+                    != miuiHomeOpenBreakGeneration
+                    || inputIdentity.miuiHomeOpenBreakAnimationAtDown
+                    != endedAnimationIdentity
+                    || miuiHomeOpenBreakAnimationIdentity
+                    != endedAnimationIdentity
+                    || !miuiHomeOpenBreakAnimationActive
+                    || miuiHomeOpenBreakGenerationPrepared
+                    || miuiHomeOpenBreakCommandPending) {
+                return;
+            }
+            Object wallpaperElement = readField(
+                    stateManager, "wallpaperElement");
+            if (wallpaperElement == null
+                    || !MIUI_HOME_SYSTEM_WALLPAPER_ELEMENT.equals(
+                    wallpaperElement.getClass().getName())) {
+                return;
+            }
+            Class<?> wallpaperParamsClass = Class.forName(
+                    MIUI_HOME_WALLPAPER_PARAMS, false,
+                    wallpaperElement.getClass().getClassLoader());
+            Object companion = readStaticField(
+                    wallpaperParamsClass, "Companion");
+            Object homeParams = invokeAnyMethod(
+                    companion, "getHomeStateParams", new Object[0]);
+            Object homeZoomValue = invokeAnyMethod(
+                    homeParams, "getZoomOut", new Object[0]);
+            if (!(homeZoomValue instanceof Number)
+                    || miuiHomeAcceptedInputIdentity.get()
+                    != inputIdentity
+                    || miuiHomeOpenBreakCallbackEpoch.get()
+                    != callbackEpoch
+                    || miuiHomeOpenBreakStateManager
+                    != stateManager
+                    || miuiHomeOpenBreakAnimationIdentity
+                    != endedAnimationIdentity) {
+                return;
+            }
+            // ponytail: accepted DOWN is the only launcher-local pre-Shell evidence;
+            // add an authenticated SystemUI claim only if an unclaimed touch exposes this
+            // otherwise hidden wallpaper state.
+            EndedLauncherOpenWallpaperReset marker =
+                    new EndedLauncherOpenWallpaperReset(
+                            inputIdentity, callbackEpoch,
+                            stateManager, endedAnimationIdentity,
+                            wallpaperElement,
+                            ((Number) homeZoomValue).floatValue());
+            endedLauncherOpenWallpaperReset.set(marker);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (endedLauncherOpenWallpaperReset.compareAndSet(
+                        marker, null)) {
+                    moduleLog(Log.WARN, TAG,
+                            "Expired unconsumed launcher OPEN wallpaper reset marker"
+                                    + ", eventId="
+                                    + inputIdentity.eventId
+                                    + ", launcherOpenGeneration="
+                                    + inputIdentity.miuiHomeOpenBreakGenerationAtDown);
+                }
+            });
+            moduleLog(Log.INFO, TAG,
+                    "Armed launcher OPEN wallpaper reset suppression"
+                            + ", eventId=" + inputIdentity.eventId
+                            + ", launcherOpenGeneration="
+                            + inputIdentity.miuiHomeOpenBreakGenerationAtDown
+                            + ", animationIdentity="
+                            + shortObject(endedAnimationIdentity));
+        } catch (Throwable throwable) {
+            endedLauncherOpenWallpaperReset.set(null);
+            moduleLog(Log.WARN, TAG,
+                    "Failed to arm launcher OPEN wallpaper reset suppression; "
+                            + "preserving Xiaomi cleanup",
+                    throwable);
+        }
+    }
+
+    protected boolean consumeEndedLauncherOpenWallpaperReset(
+            Object wallpaperElement, Object params) {
+        EndedLauncherOpenWallpaperReset marker =
+                endedLauncherOpenWallpaperReset.get();
+        if (marker == null || Looper.myLooper()
+                != Looper.getMainLooper()) {
+            return false;
+        }
+        try {
+            MiuiHomeAcceptedInputToken inputIdentity =
+                    marker.inputIdentity;
+            Object zoomValue = invokeAnyMethod(
+                    params, "getZoomOut", new Object[0]);
+            if (!(zoomValue instanceof Number)
+                    || !marker.matchesCommand(
+                    wallpaperElement,
+                    ((Number) zoomValue).floatValue())
+                    || miuiHomeAcceptedInputIdentity.get()
+                    != inputIdentity
+                    || inputIdentity.miuiHomeOpenBreakGenerationAtDown
+                    != miuiHomeOpenBreakGeneration
+                    || marker.callbackEpoch
+                    != miuiHomeOpenBreakCallbackEpoch.get()
+                    || marker.stateManager
+                    != miuiHomeOpenBreakStateManager
+                    || marker.animationIdentity
+                    != miuiHomeOpenBreakAnimationIdentity
+                    || inputIdentity.miuiHomeOpenBreakAnimationAtDown
+                    != marker.animationIdentity
+                    || !miuiHomeOpenBreakAnimationActive
+                    || miuiHomeOpenBreakGenerationPrepared
+                    || miuiHomeOpenBreakCommandPending
+                    || !endedLauncherOpenWallpaperReset.compareAndSet(
+                    marker, null)) {
+                return false;
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Suppressed ended launcher OPEN wallpaper Home reset"
+                            + ", eventId=" + inputIdentity.eventId
+                            + ", launcherOpenGeneration="
+                            + inputIdentity.miuiHomeOpenBreakGenerationAtDown
+                            + ", zoom=" + marker.homeZoom);
+            return true;
+        } catch (Throwable throwable) {
+            endedLauncherOpenWallpaperReset.compareAndSet(marker, null);
+            moduleLog(Log.WARN, TAG,
+                    "Failed to validate launcher OPEN wallpaper reset; "
+                            + "preserving Xiaomi cleanup",
+                    throwable);
+            return false;
+        }
     }
 
     protected Object captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound(
@@ -2703,6 +2850,10 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected Object observeMiuiHomeReturnHomeWallpaperSet(
             XposedInterface.Chain chain) throws Throwable {
+        if (consumeEndedLauncherOpenWallpaperReset(
+                chain.getThisObject(), chain.getArg(0))) {
+            return null;
+        }
         Object result = chain.proceed();
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
         if (controller != null) {
@@ -2980,12 +3131,26 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 acceptedIntent.putExtra(EXTRA_INPUT_EDGE, edge);
                 acceptedIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
                         miuiHomeSystemUiInputArbiterGeneration);
+                long openBreakGeneration = miuiHomeOpenBreakGeneration;
+                Object openBreakAnimation = miuiHomeOpenBreakAnimationIdentity;
+                if (!miuiHomeOpenBreakAnimationActive
+                        || miuiHomeOpenBreakGenerationPrepared
+                        || openBreakGeneration == 0L
+                        || openBreakAnimation == null
+                        || miuiHomeOpenBreakGeneration != openBreakGeneration
+                        || miuiHomeOpenBreakAnimationIdentity
+                        != openBreakAnimation
+                        || !miuiHomeOpenBreakAnimationActive) {
+                    openBreakGeneration = 0L;
+                    openBreakAnimation = null;
+                }
                 MiuiHomeAcceptedInputToken inputIdentity =
                         new MiuiHomeAcceptedInputToken(
                                 eventId, event.getDownTime(),
                                 event.getDeviceId(), event.getSource(),
                                 displayId, edge,
-                                miuiHomeSystemUiInputArbiterGeneration);
+                                miuiHomeSystemUiInputArbiterGeneration,
+                                openBreakGeneration, openBreakAnimation);
                 miuiHomeAcceptedInputIdentity.set(inputIdentity);
                 sendAuthenticatedMiuiHomeState(stub.getContext(), acceptedIntent);
                 moduleLog(Log.INFO, TAG, "Published MiuiHome accepted input token"
@@ -2994,7 +3159,9 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                         + ", displayId=" + displayId
                         + ", edge=" + edge
                         + ", generation="
-                        + miuiHomeSystemUiInputArbiterGeneration);
+                        + miuiHomeSystemUiInputArbiterGeneration
+                        + ", launcherOpenGeneration="
+                        + openBreakGeneration);
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Failed to publish MiuiHome accepted input token; "
                         + "gesture remains fail-closed", throwable);
@@ -3069,6 +3236,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 publishLegacyRuntimeStatusReply(receiverContext, intent, generation);
                 if (newGeneration) {
                     miuiHomeAcceptedInputIdentity.set(null);
+                    endedLauncherOpenWallpaperReset.set(null);
                     miuiHomeEditingStatePublished = false;
                     refreshMiuiHomeEditingState(
                             receiverContext.getClassLoader(), "systemUiArbiterGeneration");
@@ -3190,6 +3358,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         miuiHomeSystemUiInputArbiterReady = false;
         miuiHomeSystemUiInputArbiterGeneration = 0L;
         miuiHomeAcceptedInputIdentity.set(null);
+        endedLauncherOpenWallpaperReset.set(null);
         if (receiver == null || receiverContext == null) {
             return;
         }

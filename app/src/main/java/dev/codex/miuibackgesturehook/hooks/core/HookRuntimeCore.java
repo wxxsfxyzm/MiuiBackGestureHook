@@ -506,6 +506,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             new AtomicReference<>();
     protected final AtomicReference<MiuiHomeAcceptedInputToken>
             miuiHomeAcceptedInputIdentity = new AtomicReference<>();
+    protected final AtomicReference<EndedLauncherOpenWallpaperReset>
+            endedLauncherOpenWallpaperReset = new AtomicReference<>();
     protected final AtomicReference<SystemUiReturnHomeCommitIdentity>
             systemUiReturnHomeCommitIdentity = new AtomicReference<>();
     protected final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
@@ -1215,10 +1217,20 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int edge;
         public final long generation;
         public final long receivedUptime;
+        public final long miuiHomeOpenBreakGenerationAtDown;
+        public final Object miuiHomeOpenBreakAnimationAtDown;
 
         public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
                                           int source, int displayId, int edge,
                                           long generation) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, 0L, null);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation, long openBreakGeneration,
+                                          Object openBreakAnimation) {
             this.eventId = eventId;
             this.downTime = downTime;
             this.deviceId = deviceId;
@@ -1227,6 +1239,8 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.edge = edge;
             this.generation = generation;
             this.receivedUptime = SystemClock.uptimeMillis();
+            this.miuiHomeOpenBreakGenerationAtDown = openBreakGeneration;
+            this.miuiHomeOpenBreakAnimationAtDown = openBreakAnimation;
         }
 
         public boolean isExpired() {
@@ -1235,6 +1249,33 @@ public abstract class HookRuntimeCore extends XposedModule {
             return now - receivedUptime > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS
                     || streamAge < 0L
                     || streamAge > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS;
+        }
+    }
+
+    public static final class EndedLauncherOpenWallpaperReset {
+        public final MiuiHomeAcceptedInputToken inputIdentity;
+        public final long callbackEpoch;
+        public final Object stateManager;
+        public final Object animationIdentity;
+        public final Object wallpaperElement;
+        public final float homeZoom;
+
+        public EndedLauncherOpenWallpaperReset(
+                MiuiHomeAcceptedInputToken inputIdentity,
+                long callbackEpoch, Object stateManager,
+                Object animationIdentity,
+                Object wallpaperElement, float homeZoom) {
+            this.inputIdentity = inputIdentity;
+            this.callbackEpoch = callbackEpoch;
+            this.stateManager = stateManager;
+            this.animationIdentity = animationIdentity;
+            this.wallpaperElement = wallpaperElement;
+            this.homeZoom = homeZoom;
+        }
+
+        public boolean matchesCommand(Object element, float zoom) {
+            return wallpaperElement == element
+                    && Float.compare(homeZoom, zoom) == 0;
         }
     }
 
