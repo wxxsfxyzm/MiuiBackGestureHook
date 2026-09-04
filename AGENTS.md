@@ -544,6 +544,11 @@ Return-to-home rules:
 - Once the exact Xiaomi CLOSE starts, retain the Shell runner and remote targets until its
   matching native end or a verified launcher-interruption boundary. Do not restore or
   release the preview Surface over a captured native animation.
+- Resolve `LocalWindowAnimImplementor.animTo$lambda$3(...)` only through either observed exact
+  parameter order: `(RectFParams, LocalWindowAnimImplementor)` or
+  `(LocalWindowAnimImplementor, RectFParams)`. Normalize both to the existing
+  implementor/params finish-epoch contract; any other signature or argument-role mismatch
+  fails closed.
 - For one animation and `animTo` epoch, preserve the first exact pre-clear finish snapshot.
   A duplicate `StateManager` end callback after element/target cleanup must not overwrite
   that terminal identity or keep the Shell runner alive.
@@ -572,6 +577,15 @@ Return-to-home rules:
   exact generation and object ownership. Commit transfers that state to Xiaomi;
   cancellation restores only unchanged module-owned state after the application preview is
   fullscreen. Never overwrite an unrelated or replacement native spring.
+- When an accepted DOWN waits for its exact launcher OPEN to end before Shell handoff, keep the
+  wallpaper in App state so Xiaomi's following CLOSE retains its native App-to-Home spring.
+  Suppress only the matching OPEN-finish Home `SystemWallpaperElement.setTo(...)` later in the
+  same main-Looper call stack, bound to the accepted input, OPEN generation and animation,
+  callback epoch, StateManager, wallpaper element, and Xiaomi-derived Home zoom. Expire an
+  unconsumed marker on the next main-Looper turn and invalidate it on a new OPEN or arbiter
+  generation, detach, and hot reload; do not apply the accepted-DOWN admission timeout to this
+  identity-bound marker. Preserve accepted native OPEN merges, ordinary OPEN cleanup, and
+  Xiaomi's native CLOSE `animTo(Home)`.
 - A prepared cancellation must continue through the launcher runner and Shell's normal
   restore transition. Clear only a proven stale close-request gate while the exact
   prepare-open token remains owned; never directly finish or clear the prepared animation.
