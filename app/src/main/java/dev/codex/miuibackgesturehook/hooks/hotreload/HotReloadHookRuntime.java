@@ -81,6 +81,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
         boolean savedMiuiFolderVisible = miuiFolderVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
+        long savedMiuiLauncherDartStateOwnerEpoch =
+                miuiLauncherDartStateOwnerEpoch;
         long savedMiuiOverviewDismissDeadline = miuiOverviewDismissPendingUntilUptime;
         Object savedMiuiHomeOpenBreakController = miuiHomeOpenBreakController;
         Context savedMiuiHomeOpenBreakContext = miuiHomeOpenBreakContext;
@@ -165,7 +167,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 savedHeadlessState,
                 Boolean.valueOf(savedMiuiLauncherEditing),
                 Boolean.valueOf(savedMiuiFolderVisible),
-                savedContextualSearchNavigationBars
+                savedContextualSearchNavigationBars,
+                Long.valueOf(savedMiuiLauncherDartStateOwnerEpoch)
         });
         return true;
     }
@@ -1050,6 +1053,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 }
                 if (state.length >= 16 && state[15] instanceof Object[]) {
                     pendingHotReloadContextualSearchNavigationBars = (Object[]) state[15];
+                }
+                if (state.length >= 17 && state[16] instanceof Long) {
+                    miuiLauncherDartStateOwnerEpoch =
+                            ((Long) state[16]).longValue();
                 }
             }
         }

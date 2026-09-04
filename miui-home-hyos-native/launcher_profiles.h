@@ -87,6 +87,16 @@ struct LauncherProfile {
     uintptr_t runtime_pointer_offset;
     uintptr_t runtime_state_offset;
     uint32_t runtime_ready_value;
+
+    // Dynamically resolved Dart AOT observation sites. These point to exact
+    // four-instruction return epilogues; no Dart function entry is replaced.
+    uintptr_t dart_drawer_transition_epilogue_offset;
+    uintptr_t dart_overview_enter_epilogue_offset;
+    uintptr_t dart_overview_exit_epilogue_offset;
+    uintptr_t dart_editing_true_epilogue_offsets[4];
+    size_t dart_editing_true_epilogue_count;
+    uintptr_t dart_editing_false_epilogue_offsets[4];
+    size_t dart_editing_false_epilogue_count;
 };
 
 }  // namespace miui_home_profiles

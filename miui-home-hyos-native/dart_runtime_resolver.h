@@ -43,10 +43,17 @@ struct ResolutionDiagnostics {
     uintptr_t drawer_transition_complete_offset;
     uintptr_t overview_enter_offset;
     uintptr_t overview_exit_offset;
+    uintptr_t drawer_transition_epilogue_offset;
+    uintptr_t overview_enter_epilogue_offset;
+    uintptr_t overview_exit_epilogue_offset;
     uintptr_t editing_refresh_offset;
     uintptr_t editing_query_offset;
     uintptr_t editing_query_return_offset_a;
     uintptr_t editing_query_return_offset_b;
+    uintptr_t editing_true_epilogue_offsets[4];
+    size_t editing_true_epilogue_count;
+    uintptr_t editing_false_epilogue_offsets[4];
+    size_t editing_false_epilogue_count;
     uintptr_t all_apps_state_slot_offset;
     uintptr_t home_state_slot_offset;
 };

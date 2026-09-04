@@ -251,6 +251,14 @@ def generate(manifest: dict) -> str:
                 f"        {hex_literal(abi.get('runtime_pointer_offset'))},",
                 f"        {hex_literal(abi.get('runtime_state_offset'))},",
                 f"        {ready_value}u,",
+                # Runtime Dart resolver fills these exact return epilogues.
+                "        0u,",
+                "        0u,",
+                "        0u,",
+                "        {},",
+                "        0u,",
+                "        {},",
+                "        0u,",
                 "};",
                 "",
             )

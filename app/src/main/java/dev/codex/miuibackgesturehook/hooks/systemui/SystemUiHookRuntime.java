@@ -6279,6 +6279,47 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             "miuiHomeQuery");
                     return;
                 }
+                boolean carriesDartState = intent.hasExtra("drawer_visible")
+                        || intent.hasExtra("overview_visible")
+                        || intent.hasExtra(EXTRA_LAUNCHER_EDITING);
+                if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                        && (carriesDartState
+                        || intent.hasExtra(EXTRA_LAUNCHER_STATE_OWNER_EPOCH))) {
+                    long ownerEpoch = intent.getLongExtra(
+                            EXTRA_LAUNCHER_STATE_OWNER_EPOCH, 0L);
+                    long ownerGeneration = intent.getLongExtra(
+                            EXTRA_INPUT_ARBITER_GENERATION, 0L);
+                    if (ownerEpoch <= 0L
+                            || ownerGeneration != systemUiInputArbiterGeneration) {
+                        moduleLog(Log.WARN, TAG,
+                                "Rejected invalid native launcher-state owner"
+                                        + ", ownerEpoch=" + ownerEpoch
+                                        + ", generation=" + ownerGeneration
+                                        + ", currentGeneration="
+                                        + systemUiInputArbiterGeneration);
+                        return;
+                    }
+                    if (ownerEpoch < miuiLauncherDartStateOwnerEpoch) {
+                        moduleLog(Log.WARN, TAG,
+                                "Ignored retired native launcher-state owner"
+                                        + ", ownerEpoch=" + ownerEpoch
+                                        + ", currentOwnerEpoch="
+                                        + miuiLauncherDartStateOwnerEpoch);
+                        return;
+                    }
+                    if (ownerEpoch > miuiLauncherDartStateOwnerEpoch) {
+                        miuiLauncherDartStateOwnerEpoch = ownerEpoch;
+                        acceptedInputToken.set(null);
+                        miuiDrawerVisible = false;
+                        miuiOverviewVisible = false;
+                        miuiLauncherEditing = false;
+                        miuiOverviewDismissPendingUntilUptime = 0L;
+                        moduleLog(Log.INFO, TAG,
+                                "Adopted native launcher-state owner"
+                                        + ", ownerEpoch=" + ownerEpoch
+                                        + ", generation=" + ownerGeneration);
+                    }
+                }
                 if (intent.getBooleanExtra(EXTRA_INPUT_ACCEPTED, false)) {
                     receiveMiuiHomeAcceptedInput(intent);
                 }
@@ -6751,7 +6792,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 intent.getIntExtra(EXTRA_INPUT_DEVICE_ID, Integer.MIN_VALUE),
                 intent.getIntExtra(EXTRA_INPUT_SOURCE, 0),
                 intent.getIntExtra(EXTRA_INPUT_DISPLAY_ID, Integer.MIN_VALUE),
-                intent.getIntExtra(EXTRA_INPUT_EDGE, -1), generation);
+                intent.getIntExtra(EXTRA_INPUT_EDGE, -1), generation,
+                intent.getLongExtra(EXTRA_LAUNCHER_STATE_OWNER_EPOCH, 0L));
         if (token.downTime == Long.MIN_VALUE
                 || token.deviceId == Integer.MIN_VALUE
                 || token.displayId == Integer.MIN_VALUE

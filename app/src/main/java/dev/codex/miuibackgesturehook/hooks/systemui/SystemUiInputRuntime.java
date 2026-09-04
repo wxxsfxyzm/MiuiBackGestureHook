@@ -861,6 +861,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected float downX;
         protected float downY;
         protected long downTime = Long.MIN_VALUE;
+        protected long downLauncherStateOwnerEpoch;
         protected MotionEvent pendingDownEvent;
         protected MotionEvent pendingMotionEvent;
 
@@ -961,7 +962,18 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         protected boolean handleMotionEvent(MotionEvent event) {
-            switch (event.getActionMasked()) {
+            int action = event.getActionMasked();
+            if (action != MotionEvent.ACTION_DOWN && gestureCandidate
+                    && Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                    && downLauncherStateOwnerEpoch > 0L
+                    && downLauncherStateOwnerEpoch
+                    != miuiLauncherDartStateOwnerEpoch) {
+                boolean handled = pilfered;
+                cancelNativeCandidate(event,
+                        "launcher Dart state owner changed");
+                return handled;
+            }
+            switch (action) {
                 case MotionEvent.ACTION_DOWN:
                     return onNativeDown(event);
                 case MotionEvent.ACTION_MOVE:
@@ -988,6 +1000,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             downTime = event.getDownTime();
             downDeviceId = event.getDeviceId();
             downSource = event.getSource();
+            downLauncherStateOwnerEpoch = miuiLauncherDartStateOwnerEpoch;
             try {
                 downEventId = readMotionEventId(event);
                 downDisplayId = readMotionEventDisplayId(event);
@@ -1139,6 +1152,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && gestureCandidate
                     && !miuiHomeInputAccepted
                     && token.generation == systemUiInputArbiterGeneration
+                    && (Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
+                    || (token.launcherStateOwnerEpoch > 0L
+                    && token.launcherStateOwnerEpoch
+                    == downLauncherStateOwnerEpoch))
                     && token.eventId == downEventId
                     && token.downTime == downTime
                     && token.deviceId == downDeviceId
@@ -1875,6 +1892,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             downX = 0.0f;
             downY = 0.0f;
             downTime = Long.MIN_VALUE;
+            downLauncherStateOwnerEpoch = 0L;
         }
 
         protected boolean isNavigationBarHidden() {
@@ -3346,6 +3364,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && expectedInputMonitorEpoch == inputMonitorEpoch.get()
                     && expectedController == controller
                     && inputIdentity.generation == systemUiInputArbiterGeneration
+                    && (Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
+                    || (inputIdentity.launcherStateOwnerEpoch > 0L
+                    && inputIdentity.launcherStateOwnerEpoch
+                    == miuiLauncherDartStateOwnerEpoch))
                     && inputIdentity.edge == edge;
         }
 
@@ -3658,6 +3680,20 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             Object releaseController = session.controller;
             Object tracker = null;
             try {
+                if (releaseAllowed && !isCurrentAcceptedInputIdentity(
+                        inputIdentity, releaseEdge, releaseController,
+                        session.inputEpoch)) {
+                    releaseAllowed = false;
+                    moduleLog(Log.WARN, TAG,
+                            "Forced Shell release cancellation after launcher "
+                                    + "state owner changed"
+                                    + ", shellSessionId=" + session.id
+                                    + ", inputOwnerEpoch="
+                                    + (inputIdentity == null ? 0L
+                                    : inputIdentity.launcherStateOwnerEpoch)
+                                    + ", currentOwnerEpoch="
+                                    + miuiLauncherDartStateOwnerEpoch);
+                }
                 if (session.moveFailed.get()) {
                     releaseAllowed = false;
                     moduleLog(Log.WARN, TAG,

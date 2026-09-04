@@ -13,8 +13,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sched.h>
+#include <pthread.h>
+#include <poll.h>
 #include <link.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 extern "C" {
@@ -39,40 +44,34 @@ __attribute__((visibility("hidden")))
 void MiuiHomeHyosInputMonitorPilferHook();
 
 __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartDrawerTransitionCompleteHook();
+void MiuiHomeHyosDartDrawerTransitionEpilogueHook();
 
 __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartDrawerStateObserved(uint32_t visible);
+void MiuiHomeHyosDartOverviewEnterEpilogueHook();
 
 __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartOverviewEnterHook();
+void MiuiHomeHyosDartOverviewExitEpilogueHook();
 
 __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartOverviewExitHook();
+void MiuiHomeHyosDartEditingFalseEpilogueHook();
 
 __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartOverviewStateObserved(uint32_t visible);
-
-__attribute__((visibility("hidden")))
-void MiuiHomeHyosDartEditingQueryHook();
-
-__attribute__((visibility("hidden")))
-void MiuiHomeHyosDartEditingStateObserved(uint32_t editing);
+void MiuiHomeHyosDartEditingTrueEpilogueHook();
 
 __attribute__((visibility("hidden")))
 void MiuiHomeHyosInputMonitorPilferImpl(void* monitor, uintptr_t return_pc);
 
 __attribute__((visibility("hidden")))
-void* miui_home_hyos_dart_transition_complete_original = nullptr;
+void* miui_home_hyos_dart_drawer_epilogue_original = nullptr;
 
 __attribute__((visibility("hidden")))
-void* miui_home_hyos_dart_overview_enter_original = nullptr;
+void* miui_home_hyos_dart_overview_enter_epilogue_original = nullptr;
 
 __attribute__((visibility("hidden")))
-void* miui_home_hyos_dart_overview_exit_original = nullptr;
+void* miui_home_hyos_dart_overview_exit_epilogue_original = nullptr;
 
 __attribute__((visibility("hidden")))
-void* miui_home_hyos_dart_editing_query_original = nullptr;
+void* miui_home_hyos_dart_editing_epilogue_original[8] = {};
 
 __attribute__((visibility("hidden")))
 uintptr_t miui_home_hyos_dart_editing_return_a = 0u;
@@ -80,9 +79,72 @@ uintptr_t miui_home_hyos_dart_editing_return_a = 0u;
 __attribute__((visibility("hidden")))
 uintptr_t miui_home_hyos_dart_editing_return_b = 0u;
 
+// Dart AOT hooks update these cells directly in assembly.  Keep the symbols
+// hidden so ADRP/ADD can address them without a GOT lookup, while C++ owns all
+// publication and status-query reads after the Dart frame has returned.
+// Dart observations are packed as (owner epoch << 2) | state, where state is
+// 1=false and 2=true.  Publishing value and owner identity in one release
+// store prevents a retired AOT mapping from being mistaken for the current
+// launcher owner.
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_dart_state_owner_epoch = 1;
+__attribute__((used, visibility("hidden")))
+volatile int32_t g_dart_state_owner_pid = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_drawer_state_observation = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_overview_state_observation = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_overview_dart_enter_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_overview_dart_exit_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_editing_state_observation = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_editing_dart_observe_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_state_publish_pending = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_drawer_active_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_overview_enter_active_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_overview_exit_active_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_editing_active_count = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_drawer_retiring = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_overview_enter_retiring = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_overview_exit_retiring = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_editing_retiring = 0;
+__attribute__((used)) volatile uint32_t g_dart_remap_pending_mask = 0;
+__attribute__((used)) volatile uint32_t g_dart_remap_repair_in_flight = 0;
+__attribute__((used, visibility("hidden")))
+volatile int32_t g_dart_state_publish_event_fd = -1;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_dart_state_publish_callback_epoch = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_dart_state_publish_failure_epoch = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint64_t g_dart_state_owner_published_epoch = 0;
+__attribute__((used, visibility("hidden")))
+volatile int64_t g_dart_state_owner_published_generation = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_state_atfork_state = 0;
+__attribute__((used, visibility("hidden")))
+volatile uint32_t g_dart_state_publish_dispatcher_state = 0;
+
 }
 
 namespace {
+
+constexpr uint32_t kDartDrawerRemapped = uint32_t{1} << 0u;
+constexpr uint32_t kDartOverviewEnterRemapped = uint32_t{1} << 1u;
+constexpr uint32_t kDartOverviewExitRemapped = uint32_t{1} << 2u;
+constexpr uint32_t kDartEditingRemapped = uint32_t{1} << 3u;
 
 constexpr char kLogTag[] = "MiuiHomeHyosLsp";
 // The first 4371 private-broadcast hook confused its 16-byte Rust x8 result
@@ -326,24 +388,21 @@ __attribute__((used)) volatile uint32_t
         g_contextual_motion_snapshot_current_y_bits = 0;
 // Drawer visibility encoding: 0 unknown, 1 Home/not-all-apps, 2 ALL_APPS.
 __attribute__((used)) volatile uint32_t g_drawer_state_hook_state = 0;
-__attribute__((used)) volatile uint32_t g_drawer_state_observed = 0;
 __attribute__((used)) volatile uint32_t g_drawer_published_state = 0;
 __attribute__((used)) volatile int64_t g_drawer_published_generation = 0;
+__attribute__((used)) volatile uint64_t g_drawer_published_owner_epoch = 0;
 __attribute__((used)) volatile uint32_t g_drawer_state_publish_count = 0;
 __attribute__((used)) volatile uint32_t g_overview_state_hook_state = 0;
-__attribute__((used)) volatile uint32_t g_overview_state_observed = 0;
 __attribute__((used)) volatile uint32_t g_overview_published_state = 0;
 __attribute__((used)) volatile int64_t g_overview_published_generation = 0;
+__attribute__((used)) volatile uint64_t g_overview_published_owner_epoch = 0;
 __attribute__((used)) volatile uint32_t g_overview_state_publish_count = 0;
-__attribute__((used)) volatile uint32_t g_overview_dart_enter_count = 0;
-__attribute__((used)) volatile uint32_t g_overview_dart_exit_count = 0;
 // Editing encoding: 0 unknown, 1 idle, 2 editing (including its BottomSheet).
 __attribute__((used)) volatile uint32_t g_editing_state_hook_state = 0;
-__attribute__((used)) volatile uint32_t g_editing_state_observed = 0;
 __attribute__((used)) volatile uint32_t g_editing_published_state = 0;
 __attribute__((used)) volatile int64_t g_editing_published_generation = 0;
+__attribute__((used)) volatile uint64_t g_editing_published_owner_epoch = 0;
 __attribute__((used)) volatile uint32_t g_editing_state_publish_count = 0;
-__attribute__((used)) volatile uint32_t g_editing_dart_observe_count = 0;
 __attribute__((used)) volatile uint32_t g_editing_dart_repair_attempt_count = 0;
 __attribute__((used)) volatile uint32_t g_editing_dart_repair_success_count = 0;
 __attribute__((used)) volatile uint32_t g_editing_dart_repair_failure_count = 0;
@@ -451,6 +510,7 @@ thread_local PendingDownIdentity g_pending_down{};
 thread_local bool g_systemui_owns_back_stream = false;
 thread_local OwnedBackStreamIdentity g_owned_back_stream{};
 thread_local uintptr_t g_last_motion_event = 0u;
+thread_local uintptr_t g_last_dart_maintenance_down = 0u;
 
 template <typename T>
 T AtomicLoad(const T* value) {
@@ -462,9 +522,103 @@ void AtomicStore(T* target, T value) {
     __atomic_store_n(target, value, __ATOMIC_RELEASE);
 }
 
+template <typename T>
+void AtomicStore(volatile T* target, T value) {
+    __atomic_store_n(target, value, __ATOMIC_RELEASE);
+}
+
 uint64_t NextHyosLifecycleSequence() {
     return __atomic_add_fetch(&g_hyos_lifecycle_sequence, uint64_t{1},
                               __ATOMIC_ACQ_REL);
+}
+
+void ResetDartStateOwnerForProcess(int32_t process_pid) {
+    const int32_t inherited_event_fd =
+            AtomicLoad(&g_dart_state_publish_event_fd);
+    if (inherited_event_fd >= 0) close(inherited_event_fd);
+    timespec now{};
+    const uint64_t inherited_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    uint64_t owner_epoch = inherited_epoch + 1u;
+    if (clock_gettime(CLOCK_BOOTTIME, &now) == 0 && now.tv_sec >= 0 &&
+            now.tv_nsec >= 0) {
+        const uint64_t clock_epoch = static_cast<uint64_t>(now.tv_sec) *
+                uint64_t{1000000000} + static_cast<uint64_t>(now.tv_nsec);
+        if (clock_epoch > owner_epoch) owner_epoch = clock_epoch;
+    }
+    if (owner_epoch == 0u) owner_epoch = 1u;
+    __atomic_store_n(&g_dart_state_owner_epoch, owner_epoch,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_drawer_state_observation, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_overview_state_observation, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_editing_state_observation, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_publish_pending, uint32_t{1} << 3u,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_drawer_active_count, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_overview_enter_active_count, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_overview_exit_active_count, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_editing_active_count, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_drawer_retiring, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_overview_enter_retiring, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_overview_exit_retiring, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_editing_retiring, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_remap_pending_mask, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_remap_repair_in_flight, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_publish_event_fd, int32_t{-1},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_publish_callback_epoch, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_publish_failure_epoch, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_owner_published_epoch, uint64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_owner_published_generation, int64_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_publish_dispatcher_state, uint32_t{0},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dart_state_owner_pid, process_pid, __ATOMIC_RELEASE);
+    g_last_dart_maintenance_down = 0u;
+}
+
+void ResetDartStateOwnerAfterFork() {
+    ResetDartStateOwnerForProcess(static_cast<int32_t>(getpid()));
+}
+
+bool EnsureDartStateOwnerForCurrentProcess() {
+    const int32_t process_pid = static_cast<int32_t>(getpid());
+    if (process_pid <= 0) return false;
+    int32_t owner_pid = AtomicLoad(&g_dart_state_owner_pid);
+    if (owner_pid == process_pid) return true;
+
+    for (;;) {
+        if (owner_pid == process_pid) return true;
+        if (owner_pid == -process_pid) {
+            sched_yield();
+            owner_pid = AtomicLoad(&g_dart_state_owner_pid);
+            continue;
+        }
+        int32_t expected = owner_pid;
+        if (__atomic_compare_exchange_n(
+                    &g_dart_state_owner_pid, &expected, -process_pid, false,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+        owner_pid = expected;
+    }
+    ResetDartStateOwnerForProcess(process_pid);
+    return true;
 }
 
 void RecordFirstLifecycleSequence(volatile uint64_t* target,
@@ -645,6 +799,8 @@ constexpr char kRuntimeStatusQueryExtra[] = "status_query";
 constexpr char kRuntimeStatusNonceExtra[] = "status_nonce";
 constexpr char kAcceptedStateAction[] =
         "dev.codex.miuibackgesturehook.action.MIUI_OVERVIEW_STATE_CHANGE";
+constexpr char kLauncherStateOwnerEpochExtra[] =
+        "launcher_state_owner_epoch";
 
 bool MatchesCode(const uint8_t* base, uintptr_t offset,
                  const uint8_t* expected, size_t expected_size) {
@@ -936,6 +1092,9 @@ bool HandleRuntimeStatusQuery(void* intent);
 void PublishDrawerStateForCurrentGeneration();
 void PublishOverviewStateForCurrentGeneration();
 void PublishEditingStateForCurrentGeneration();
+void PublishPendingDartStates(uint64_t owner_epoch);
+bool EnsureDartStatePublisherThread();
+bool WakeDartStatePublisher();
 void PublishXiaoAiStateForCurrentGeneration();
 bool TryInstallDartDrawerStateHook(
         void* dart_handle,
@@ -955,11 +1114,19 @@ const miui_home_profiles::LauncherProfile* ResolveDartFeatureProfile(
         void* dart_handle, bool retry_rejected = false);
 void TryResolveAndInstallLoadedDartProfile(bool retry_rejected = false);
 void RepairDartDrawerStateHookIfRemapped(
-        const miui_home_profiles::LauncherProfile* profile);
+        const miui_home_profiles::LauncherProfile* profile,
+        bool remap_detected);
 void RepairDartOverviewStateHookIfRemapped(
-        const miui_home_profiles::LauncherProfile* profile);
+        const miui_home_profiles::LauncherProfile* profile,
+        uint32_t remap_mask);
 void RepairDartEditingStateHookIfRemapped(
+        const miui_home_profiles::LauncherProfile* profile,
+        bool remap_detected);
+uint32_t DetectDartStateHookRemapMask(
         const miui_home_profiles::LauncherProfile* profile);
+bool PrepareDartStateHookRetirement(uint32_t remap_mask);
+void FinishDartStateHookRetirement(uint32_t remap_mask);
+void InvalidateDartStateOwnerForRemap();
 
 bool IsExactCallbackName(const char* value, size_t length,
                          const char* expected) {
@@ -1151,13 +1318,30 @@ bool HasArbiterStateMarker(void* intent) {
             generation > 0;
 }
 
-void HookBroadcastReceiverOnReceive(void* receiver, void* context, void* intent) {
+__attribute__((noinline))
+bool TryCallOriginalBroadcastReceiverOnReceive(void* receiver, void* context,
+                                               void* intent) {
+    // Reload immediately before the indirect branch.  Hot reload can retire
+    // the trampoline between two callbacks; keeping a function pointer live
+    // across the observer/publisher calls would turn that window into a null
+    // branch in the Release build.
     BroadcastReceiverOnReceiveFn original =
             reinterpret_cast<BroadcastReceiverOnReceiveFn>(
                     AtomicLoad(&g_original_broadcast_receiver_on_receive));
-    if (original == nullptr) return;
+    if (original == nullptr) return false;
+    original(receiver, context, intent);
+    return true;
+}
+
+void HookBroadcastReceiverOnReceive(void* receiver, void* context, void* intent) {
+    if (IsLauncherProcess() &&
+            !EnsureDartStateOwnerForCurrentProcess()) {
+        (void)TryCallOriginalBroadcastReceiverOnReceive(
+                receiver, context, intent);
+        return;
+    }
     if (intent == nullptr) {
-        original(receiver, context, intent);
+        (void)TryCallOriginalBroadcastReceiverOnReceive(receiver, context, intent);
         return;
     }
     const bool arbiter_action = IntentActionEquals(intent, kArbiterStateAction) ||
@@ -1165,27 +1349,39 @@ void HookBroadcastReceiverOnReceive(void* receiver, void* context, void* intent)
     if (arbiter_action && HasArbiterStateMarker(intent)) {
         __atomic_fetch_add(&g_arbiter_state_marked_count, uint32_t{1},
                            __ATOMIC_RELAXED);
-        // A status query deliberately rides the already authenticated
-        // SystemUI arbiter-state action so it reaches Xiaomi's existing
-        // native receiver without adding a second launcher receiver.
         ObserveArbiterStateIntent(intent);
-        HandleRuntimeStatusQuery(intent);
         // Android 17 reuses Xiaomi's protected fsgesture receiver as the
         // carrier. Its native callback owns launcher-side FSG-region refresh;
         // consuming the marked broadcast here leaves later app gestures
         // redirected before GesturesBackTouchProcessor. Authentication only
         // observes module state, then the original receiver must see the exact
         // unchanged intent and keep Xiaomi's native state machine intact.
+        if (!TryCallOriginalBroadcastReceiverOnReceive(receiver, context, intent)) {
+            // The trampoline may be retired between callbacks during hot
+            // reload.  Without the Xiaomi receiver having run, none of the
+            // mirrored or pending Dart state is authenticated for this
+            // broadcast, so fail closed and wait for the next one.
+            return;
+        }
         __atomic_fetch_add(&g_arbiter_state_passthrough_count, uint32_t{1},
                            __ATOMIC_RELAXED);
-        original(receiver, context, intent);
+        EnsureDartStatePublisherThread();
         PublishDrawerStateForCurrentGeneration();
         PublishOverviewStateForCurrentGeneration();
         PublishEditingStateForCurrentGeneration();
         PublishXiaoAiStateForCurrentGeneration();
+        // A MotionEvent getter can still run below Flutter/Rust on 1.ui, so it
+        // is not a safe publication boundary.  Drain Dart's atomic-only
+        // observations only after Xiaomi's authenticated receiver has
+        // returned; this callback is the proven non-Dart reentry boundary.
+        PublishPendingDartStates(AtomicLoad(&g_dart_state_owner_epoch));
+        // A status query deliberately rides this authenticated action. Reply
+        // after the original receiver and publisher setup so readiness covers
+        // the actual safe drain boundary.
+        HandleRuntimeStatusQuery(intent);
         return;
     }
-    original(receiver, context, intent);
+    (void)TryCallOriginalBroadcastReceiverOnReceive(receiver, context, intent);
 }
 
 bool AddBundleBool(void* bundle, const char* key, bool value) {
@@ -1512,12 +1708,30 @@ bool SendNativeBroadcast(const char* action, void* extras) {
     return true;
 }
 
+constexpr uint64_t kDartObservationStateMask = uint64_t{3};
+
+uint64_t PackDartStateObservation(uint64_t owner_epoch, uint32_t state) {
+    return (owner_epoch << 2u) | state;
+}
+
+uint32_t DartStateObservationValue(uint64_t observation) {
+    return static_cast<uint32_t>(observation & kDartObservationStateMask);
+}
+
+uint64_t DartStateObservationEpoch(uint64_t observation) {
+    return observation >> 2u;
+}
+
 void PublishDrawerStateForCurrentGeneration() {
-    const uint32_t observed = AtomicLoad(&g_drawer_state_observed);
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    const uint64_t observation = AtomicLoad(&g_drawer_state_observation);
+    const uint32_t observed = DartStateObservationValue(observation);
     const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
-    if ((observed != 1u && observed != 2u) || generation <= 0 ||
+    if (DartStateObservationEpoch(observation) != owner_epoch ||
+            (observed != 1u && observed != 2u) || generation <= 0 ||
             (AtomicLoad(&g_drawer_published_state) == observed &&
-             AtomicLoad(&g_drawer_published_generation) == generation)) {
+             AtomicLoad(&g_drawer_published_generation) == generation &&
+             AtomicLoad(&g_drawer_published_owner_epoch) == owner_epoch)) {
         return;
     }
     uint32_t expected = 0u;
@@ -1531,13 +1745,18 @@ void PublishDrawerStateForCurrentGeneration() {
     void* extras = bundle_default == nullptr ? nullptr : bundle_default();
     const bool sent = extras != nullptr &&
             AddBundleBool(extras, "drawer_visible", observed == 2u) &&
+            AddBundleI64(extras, kLauncherStateOwnerEpochExtra,
+                         static_cast<int64_t>(owner_epoch)) &&
             AddBundleI64(extras, "input_arbiter_generation", generation) &&
             SendNativeBroadcast(kAcceptedStateAction, extras);
-    if (sent && AtomicLoad(&g_drawer_state_observed) == observed &&
+    if (sent && AtomicLoad(&g_drawer_state_observation) == observation &&
+            AtomicLoad(&g_dart_state_owner_epoch) == owner_epoch &&
             AtomicLoad(&g_systemui_arbiter_generation) == generation) {
         __atomic_store_n(&g_drawer_published_state, observed,
                          __ATOMIC_RELEASE);
         __atomic_store_n(&g_drawer_published_generation, generation,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_drawer_published_owner_epoch, owner_epoch,
                          __ATOMIC_RELEASE);
         __atomic_fetch_add(&g_drawer_state_publish_count, uint32_t{1},
                            __ATOMIC_RELAXED);
@@ -1549,12 +1768,6 @@ void PublishDrawerStateForCurrentGeneration() {
         Log(ANDROID_LOG_WARN, "native drawer state broadcast failed");
     }
     AtomicStore(&g_drawer_state_publish_in_flight, uint32_t{0});
-}
-
-void HandleDartDrawerStateObserved(uint32_t visible) {
-    const uint32_t observed = visible != 0u ? uint32_t{2} : uint32_t{1};
-    __atomic_store_n(&g_drawer_state_observed, observed, __ATOMIC_RELEASE);
-    PublishDrawerStateForCurrentGeneration();
 }
 
 void HookDrawerStateHandler(int64_t port, uint8_t* data, uint32_t length,
@@ -1575,16 +1788,24 @@ void HookDrawerStateHandler(int64_t port, uint8_t* data, uint32_t length,
         Log(ANDROID_LOG_WARN, "ignored malformed native drawer-state bridge call");
         return;
     }
-    __atomic_store_n(&g_drawer_state_observed, observed, __ATOMIC_RELEASE);
+    if (!EnsureDartStateOwnerForCurrentProcess()) return;
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    __atomic_store_n(&g_drawer_state_observation,
+                     PackDartStateObservation(owner_epoch, observed),
+                     __ATOMIC_RELEASE);
     PublishDrawerStateForCurrentGeneration();
 }
 
 void PublishOverviewStateForCurrentGeneration() {
-    const uint32_t observed = AtomicLoad(&g_overview_state_observed);
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    const uint64_t observation = AtomicLoad(&g_overview_state_observation);
+    const uint32_t observed = DartStateObservationValue(observation);
     const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
-    if ((observed != 1u && observed != 2u) || generation <= 0 ||
+    if (DartStateObservationEpoch(observation) != owner_epoch ||
+            (observed != 1u && observed != 2u) || generation <= 0 ||
             (AtomicLoad(&g_overview_published_state) == observed &&
-             AtomicLoad(&g_overview_published_generation) == generation)) {
+             AtomicLoad(&g_overview_published_generation) == generation &&
+             AtomicLoad(&g_overview_published_owner_epoch) == owner_epoch)) {
         return;
     }
     uint32_t expected = 0u;
@@ -1598,13 +1819,18 @@ void PublishOverviewStateForCurrentGeneration() {
     void* extras = bundle_default == nullptr ? nullptr : bundle_default();
     const bool sent = extras != nullptr &&
             AddBundleBool(extras, "overview_visible", observed == 2u) &&
+            AddBundleI64(extras, kLauncherStateOwnerEpochExtra,
+                         static_cast<int64_t>(owner_epoch)) &&
             AddBundleI64(extras, "input_arbiter_generation", generation) &&
             SendNativeBroadcast(kAcceptedStateAction, extras);
-    if (sent && AtomicLoad(&g_overview_state_observed) == observed &&
+    if (sent && AtomicLoad(&g_overview_state_observation) == observation &&
+            AtomicLoad(&g_dart_state_owner_epoch) == owner_epoch &&
             AtomicLoad(&g_systemui_arbiter_generation) == generation) {
         __atomic_store_n(&g_overview_published_state, observed,
                          __ATOMIC_RELEASE);
         __atomic_store_n(&g_overview_published_generation, generation,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_overview_published_owner_epoch, owner_epoch,
                          __ATOMIC_RELEASE);
         __atomic_fetch_add(&g_overview_state_publish_count, uint32_t{1},
                            __ATOMIC_RELAXED);
@@ -1618,19 +1844,16 @@ void PublishOverviewStateForCurrentGeneration() {
     AtomicStore(&g_overview_state_publish_in_flight, uint32_t{0});
 }
 
-void HandleOverviewStateObserved(bool visible) {
-    __atomic_store_n(&g_overview_state_observed,
-                     visible ? uint32_t{2} : uint32_t{1},
-                     __ATOMIC_RELEASE);
-    PublishOverviewStateForCurrentGeneration();
-}
-
 void PublishEditingStateForCurrentGeneration() {
-    const uint32_t observed = AtomicLoad(&g_editing_state_observed);
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    const uint64_t observation = AtomicLoad(&g_editing_state_observation);
+    const uint32_t observed = DartStateObservationValue(observation);
     const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
-    if ((observed != 1u && observed != 2u) || generation <= 0 ||
+    if (DartStateObservationEpoch(observation) != owner_epoch ||
+            (observed != 1u && observed != 2u) || generation <= 0 ||
             (AtomicLoad(&g_editing_published_state) == observed &&
-             AtomicLoad(&g_editing_published_generation) == generation)) {
+             AtomicLoad(&g_editing_published_generation) == generation &&
+             AtomicLoad(&g_editing_published_owner_epoch) == owner_epoch)) {
         return;
     }
     uint32_t expected = 0u;
@@ -1644,13 +1867,18 @@ void PublishEditingStateForCurrentGeneration() {
     void* extras = bundle_default == nullptr ? nullptr : bundle_default();
     const bool sent = extras != nullptr &&
             AddBundleBool(extras, "launcher_editing", observed == 2u) &&
+            AddBundleI64(extras, kLauncherStateOwnerEpochExtra,
+                         static_cast<int64_t>(owner_epoch)) &&
             AddBundleI64(extras, "input_arbiter_generation", generation) &&
             SendNativeBroadcast(kAcceptedStateAction, extras);
-    if (sent && AtomicLoad(&g_editing_state_observed) == observed &&
+    if (sent && AtomicLoad(&g_editing_state_observation) == observation &&
+            AtomicLoad(&g_dart_state_owner_epoch) == owner_epoch &&
             AtomicLoad(&g_systemui_arbiter_generation) == generation) {
         __atomic_store_n(&g_editing_published_state, observed,
                          __ATOMIC_RELEASE);
         __atomic_store_n(&g_editing_published_generation, generation,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_editing_published_owner_epoch, owner_epoch,
                          __ATOMIC_RELEASE);
         __atomic_fetch_add(&g_editing_state_publish_count, uint32_t{1},
                            __ATOMIC_RELAXED);
@@ -1664,13 +1892,299 @@ void PublishEditingStateForCurrentGeneration() {
     AtomicStore(&g_editing_state_publish_in_flight, uint32_t{0});
 }
 
-void HandleEditingStateObserved(bool editing) {
-    __atomic_fetch_add(&g_editing_dart_observe_count, uint32_t{1},
-                       __ATOMIC_RELAXED);
-    __atomic_store_n(&g_editing_state_observed,
-                     editing ? uint32_t{2} : uint32_t{1},
+bool PublishDartStateOwnerForCurrentGeneration(uint64_t owner_epoch) {
+    const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
+    if (owner_epoch == 0u ||
+            AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch ||
+            generation <= 0) {
+        return false;
+    }
+    if (AtomicLoad(&g_dart_state_owner_published_epoch) == owner_epoch &&
+            AtomicLoad(&g_dart_state_owner_published_generation) ==
+                    generation) {
+        return true;
+    }
+    BundleDefaultFn bundle_default = ResolveLauncherSymbol<BundleDefaultFn>(
+            "Bundle_default");
+    void* extras = bundle_default == nullptr ? nullptr : bundle_default();
+    const bool sent = extras != nullptr &&
+            AddBundleI64(extras, kLauncherStateOwnerEpochExtra,
+                         static_cast<int64_t>(owner_epoch)) &&
+            AddBundleI64(extras, "input_arbiter_generation", generation) &&
+            SendNativeBroadcast(kAcceptedStateAction, extras);
+    if (sent && AtomicLoad(&g_dart_state_owner_epoch) == owner_epoch &&
+            AtomicLoad(&g_systemui_arbiter_generation) == generation) {
+        __atomic_store_n(&g_dart_state_owner_published_epoch, owner_epoch,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_dart_state_owner_published_generation, generation,
+                         __ATOMIC_RELEASE);
+        return true;
+    }
+    if (!sent) {
+        Log(ANDROID_LOG_WARN, "native Dart owner reset broadcast failed");
+    }
+    return false;
+}
+
+void PublishPendingDartStates(uint64_t owner_epoch) {
+    constexpr uint32_t kDrawerPending = uint32_t{1} << 0u;
+    constexpr uint32_t kOverviewPending = uint32_t{1} << 1u;
+    constexpr uint32_t kEditingPending = uint32_t{1} << 2u;
+    constexpr uint32_t kOwnerPending = uint32_t{1} << 3u;
+    if (owner_epoch == 0u ||
+            AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch) {
+        return;
+    }
+    const uint32_t pending = __atomic_exchange_n(
+            &g_dart_state_publish_pending, uint32_t{0}, __ATOMIC_ACQ_REL);
+    if (pending == 0u) return;
+
+    if ((pending & kOwnerPending) != 0u) {
+        PublishDartStateOwnerForCurrentGeneration(owner_epoch);
+    }
+    if ((pending & kDrawerPending) != 0u) {
+        PublishDrawerStateForCurrentGeneration();
+    }
+    if ((pending & kOverviewPending) != 0u) {
+        PublishOverviewStateForCurrentGeneration();
+    }
+    if ((pending & kEditingPending) != 0u) {
+        PublishEditingStateForCurrentGeneration();
+    }
+
+    // A concurrent Dart transition, an in-flight publisher, or a failed send
+    // must remain eligible for the next authenticated arbiter receive. Re-arm
+    // only the state whose observed value is still not published for the
+    // current generation.
+    if (AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch) return;
+    const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
+    uint32_t retry = 0u;
+    if ((pending & kOwnerPending) != 0u &&
+            (AtomicLoad(&g_dart_state_owner_published_epoch) != owner_epoch ||
+             AtomicLoad(&g_dart_state_owner_published_generation) !=
+                     generation)) {
+        retry |= kOwnerPending;
+    }
+    const uint64_t drawer = AtomicLoad(&g_drawer_state_observation);
+    if ((pending & kDrawerPending) != 0u &&
+            DartStateObservationEpoch(drawer) == owner_epoch &&
+            (DartStateObservationValue(drawer) !=
+                     AtomicLoad(&g_drawer_published_state) ||
+             AtomicLoad(&g_drawer_published_generation) != generation ||
+             AtomicLoad(&g_drawer_published_owner_epoch) != owner_epoch)) {
+        retry |= kDrawerPending;
+    }
+    const uint64_t overview = AtomicLoad(&g_overview_state_observation);
+    if ((pending & kOverviewPending) != 0u &&
+            DartStateObservationEpoch(overview) == owner_epoch &&
+            (DartStateObservationValue(overview) !=
+                     AtomicLoad(&g_overview_published_state) ||
+             AtomicLoad(&g_overview_published_generation) != generation ||
+             AtomicLoad(&g_overview_published_owner_epoch) != owner_epoch)) {
+        retry |= kOverviewPending;
+    }
+    const uint64_t editing = AtomicLoad(&g_editing_state_observation);
+    if ((pending & kEditingPending) != 0u &&
+            DartStateObservationEpoch(editing) == owner_epoch &&
+            (DartStateObservationValue(editing) !=
+                     AtomicLoad(&g_editing_published_state) ||
+             AtomicLoad(&g_editing_published_generation) != generation ||
+             AtomicLoad(&g_editing_published_owner_epoch) != owner_epoch)) {
+        retry |= kEditingPending;
+    }
+    if (retry != 0u) {
+        __atomic_fetch_or(&g_dart_state_publish_pending, retry,
+                          __ATOMIC_RELEASE);
+    }
+}
+
+void* DartStatePublisherThreadMain(void* data) {
+    const int fd = static_cast<int>(reinterpret_cast<intptr_t>(data));
+    const uint64_t initial_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    if (fd < 0) {
+        __atomic_store_n(&g_dart_state_publish_dispatcher_state,
+                         uint32_t{6}, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_dart_state_publish_failure_epoch, initial_epoch,
+                         __ATOMIC_RELEASE);
+        return nullptr;
+    }
+    __atomic_store_n(&g_dart_state_publish_dispatcher_state, uint32_t{3},
                      __ATOMIC_RELEASE);
-    PublishEditingStateForCurrentGeneration();
+    __atomic_store_n(&g_dart_state_publish_failure_epoch, uint64_t{0},
+                     __ATOMIC_RELEASE);
+
+    pollfd descriptor{fd, POLLIN, 0};
+    for (;;) {
+        descriptor.revents = 0;
+        const int polled = poll(&descriptor, 1u, -1);
+        if (polled < 0 && errno == EINTR) continue;
+        if (polled <= 0 || (descriptor.revents & POLLIN) == 0) {
+            __atomic_store_n(&g_dart_state_publish_failure_epoch,
+                             AtomicLoad(&g_dart_state_owner_epoch),
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&g_dart_state_publish_dispatcher_state,
+                             uint32_t{6}, __ATOMIC_RELEASE);
+            // Keep the terminal fd allocated until process exit. A Dart hook
+            // can have loaded it immediately before this failure; closing it
+            // here could redirect that raw write into a reused descriptor.
+            return nullptr;
+        }
+        uint64_t wake_count = 0u;
+        while (read(fd, &wake_count, sizeof(wake_count)) ==
+                static_cast<ssize_t>(sizeof(wake_count))) {
+        }
+
+        // Keep publication outside the triggering Dart frame. State changes
+        // within one display interval coalesce into the latest immutable
+        // observation, while the thread remains fully asleep when idle.
+        timespec delay{0, 16 * 1000 * 1000};
+        while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {
+        }
+        while (read(fd, &wake_count, sizeof(wake_count)) ==
+                static_cast<ssize_t>(sizeof(wake_count))) {
+        }
+        const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+        PublishPendingDartStates(owner_epoch);
+        if (AtomicLoad(&g_dart_state_publish_pending) != 0u) {
+            timespec retry_delay{0, 16 * 1000 * 1000};
+            while (nanosleep(&retry_delay, &retry_delay) != 0 &&
+                    errno == EINTR) {
+            }
+            PublishPendingDartStates(owner_epoch);
+        }
+        __atomic_store_n(&g_dart_state_publish_callback_epoch, owner_epoch,
+                         __ATOMIC_RELEASE);
+        uint64_t failed_epoch = owner_epoch;
+        __atomic_compare_exchange_n(
+                &g_dart_state_publish_failure_epoch, &failed_epoch,
+                uint64_t{0}, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+}
+
+bool WakeDartStatePublisher() {
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    const int fd = AtomicLoad(&g_dart_state_publish_event_fd);
+    if (fd < 0 ||
+            AtomicLoad(&g_dart_state_publish_dispatcher_state) !=
+                    uint32_t{3}) {
+        __atomic_store_n(&g_dart_state_publish_failure_epoch, owner_epoch,
+                         __ATOMIC_RELEASE);
+        return false;
+    }
+    const uint64_t one = 1u;
+    const ssize_t written = write(fd, &one, sizeof(one));
+    if (written == static_cast<ssize_t>(sizeof(one)) ||
+            (written < 0 && errno == EAGAIN)) {
+        return true;
+    }
+    __atomic_store_n(&g_dart_state_publish_failure_epoch, owner_epoch,
+                     __ATOMIC_RELEASE);
+    return false;
+}
+
+bool WaitForDartStatePublisherReady(uint64_t owner_epoch) {
+    for (uint32_t attempt = 0u; attempt < 50u; ++attempt) {
+        if (AtomicLoad(&g_dart_state_publish_callback_epoch) == owner_epoch) {
+            return true;
+        }
+        if (AtomicLoad(&g_dart_state_publish_dispatcher_state) !=
+                uint32_t{3}) {
+            return false;
+        }
+        timespec delay{0, 1000 * 1000};
+        nanosleep(&delay, nullptr);
+    }
+    __atomic_store_n(&g_dart_state_publish_failure_epoch, owner_epoch,
+                     __ATOMIC_RELEASE);
+    return false;
+}
+
+bool EnsureDartStatePublisherThread() {
+    if (!EnsureDartStateOwnerForCurrentProcess()) return false;
+    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    if (AtomicLoad(&g_dart_state_publish_dispatcher_state) == uint32_t{3} &&
+            AtomicLoad(&g_dart_state_publish_event_fd) >= 0) {
+        return AtomicLoad(&g_dart_state_publish_callback_epoch) ==
+                        owner_epoch ||
+                (WakeDartStatePublisher() &&
+                 WaitForDartStatePublisherReady(owner_epoch));
+    }
+    uint32_t expected = AtomicLoad(&g_dart_state_publish_dispatcher_state);
+    while (expected != uint32_t{1}) {
+        if (expected == uint32_t{3}) {
+            return AtomicLoad(&g_dart_state_publish_event_fd) >= 0 &&
+                    WakeDartStatePublisher() &&
+                    WaitForDartStatePublisherReady(owner_epoch);
+        }
+        if (expected == uint32_t{6}) return false;
+        if (__atomic_compare_exchange_n(
+                    &g_dart_state_publish_dispatcher_state, &expected,
+                    uint32_t{1}, false, __ATOMIC_ACQ_REL,
+                    __ATOMIC_ACQUIRE)) {
+            break;
+        }
+    }
+    if (expected == uint32_t{1}) {
+        for (uint32_t attempt = 0u; attempt < 50u &&
+                AtomicLoad(&g_dart_state_publish_dispatcher_state) ==
+                        uint32_t{1}; ++attempt) {
+            timespec delay{0, 1000 * 1000};
+            nanosleep(&delay, nullptr);
+        }
+        if (AtomicLoad(&g_dart_state_publish_dispatcher_state) !=
+                    uint32_t{3} ||
+                AtomicLoad(&g_dart_state_publish_event_fd) < 0) {
+            return false;
+        }
+        return WakeDartStatePublisher() &&
+                WaitForDartStatePublisherReady(owner_epoch);
+    }
+
+    const int fd = eventfd(0u, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (fd < 0) {
+        __atomic_store_n(&g_dart_state_publish_dispatcher_state, uint32_t{6},
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_dart_state_publish_failure_epoch,
+                         AtomicLoad(&g_dart_state_owner_epoch),
+                         __ATOMIC_RELEASE);
+        return false;
+    }
+    pthread_attr_t attributes{};
+    pthread_t thread{};
+    const bool attributes_ready = pthread_attr_init(&attributes) == 0;
+    if (attributes_ready) {
+        pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    }
+    const int created = attributes_ready
+            ? pthread_create(&thread, &attributes,
+                             DartStatePublisherThreadMain,
+                             reinterpret_cast<void*>(
+                                     static_cast<intptr_t>(fd)))
+            : EINVAL;
+    if (attributes_ready) pthread_attr_destroy(&attributes);
+    if (created != 0) {
+        close(fd);
+        __atomic_store_n(&g_dart_state_publish_dispatcher_state, uint32_t{6},
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&g_dart_state_publish_failure_epoch,
+                         AtomicLoad(&g_dart_state_owner_epoch),
+                         __ATOMIC_RELEASE);
+        return false;
+    }
+    // Publish only after pthread_create succeeds; a failed setup must never
+    // expose an fd that can be closed and reused under a raw Dart write.
+    __atomic_store_n(&g_dart_state_publish_event_fd, fd, __ATOMIC_RELEASE);
+    for (uint32_t attempt = 0u; attempt < 50u &&
+            AtomicLoad(&g_dart_state_publish_dispatcher_state) ==
+                    uint32_t{1}; ++attempt) {
+        timespec delay{0, 1000 * 1000};
+        nanosleep(&delay, nullptr);
+    }
+    if (AtomicLoad(&g_dart_state_publish_dispatcher_state) != uint32_t{3}) {
+        return false;
+    }
+    return WakeDartStatePublisher() &&
+            WaitForDartStatePublisherReady(owner_epoch);
 }
 
 void PublishXiaoAiStateForCurrentGeneration() {
@@ -1789,16 +2303,44 @@ bool HandleRuntimeStatusQuery(void* intent) {
     const bool editing_required = profile_resolved &&
             (dart_features_required ||
              feature_profile->dart_editing_query_offset != 0u);
+    const bool dart_scheduler_required = profile_resolved &&
+            (dart_features_required ||
+             feature_profile->dart_drawer_transition_complete_offset != 0u ||
+             feature_profile->dart_overview_enter_offset != 0u ||
+             feature_profile->dart_editing_query_offset != 0u);
+    const uint64_t dart_owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
+    const bool dart_repair_ready =
+            AtomicLoad(&g_dart_remap_pending_mask) == 0u &&
+            AtomicLoad(&g_dart_remap_repair_in_flight) == 0u &&
+            AtomicLoad(&g_dart_drawer_retiring) == 0u &&
+            AtomicLoad(&g_dart_overview_enter_retiring) == 0u &&
+            AtomicLoad(&g_dart_overview_exit_retiring) == 0u &&
+            AtomicLoad(&g_dart_editing_retiring) == 0u;
+    const bool dart_scheduler_ready = !dart_scheduler_required ||
+            (AtomicLoad(&g_dart_state_atfork_state) == uint32_t{3} &&
+             dart_repair_ready &&
+             AtomicLoad(&g_dart_state_publish_dispatcher_state) ==
+                     uint32_t{3} &&
+             AtomicLoad(&g_dart_state_publish_event_fd) >= 0 &&
+             AtomicLoad(&g_dart_state_publish_callback_epoch) ==
+                     dart_owner_epoch &&
+             AtomicLoad(&g_dart_state_publish_failure_epoch) !=
+                     dart_owner_epoch);
     const bool drawer_ready = profile_resolved &&
             (!drawer_required ||
-             AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3});
+             (AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3} &&
+              dart_scheduler_ready));
     const bool overview_ready = profile_resolved &&
             (!overview_required ||
-             AtomicLoad(&g_overview_state_hook_state) == uint32_t{3});
+             (AtomicLoad(&g_overview_state_hook_state) == uint32_t{3} &&
+              dart_scheduler_ready));
     const bool editing_ready = profile_resolved &&
             (!editing_required ||
-             AtomicLoad(&g_editing_state_hook_state) == uint32_t{3});
-    const bool native_ready = profile_resolved && business_state == 3u &&
+             (AtomicLoad(&g_editing_state_hook_state) == uint32_t{3} &&
+              dart_scheduler_ready));
+    const bool native_ready = profile_resolved &&
+            AtomicLoad(&g_dart_state_atfork_state) == uint32_t{3} &&
+            business_state == 3u &&
             bridge_state == 3u && drawer_ready && overview_ready &&
             editing_ready;
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
@@ -2016,6 +2558,7 @@ void TryInstallArbiterBridge() {
 }
 
 bool PublishAcceptedDown(uint32_t edge) {
+    if (!EnsureDartStateOwnerForCurrentProcess()) return false;
     const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
     if (!g_pending_down.valid || edge > 1u || generation <= 0 ||
             AtomicLoad(&g_systemui_arbiter_ready) == 0u) {
@@ -2033,6 +2576,9 @@ bool PublishAcceptedDown(uint32_t edge) {
             !AddBundleI32(extras, "input_source", g_pending_down.source) ||
             !AddBundleI32(extras, "input_display_id", 0) ||
             !AddBundleI32(extras, "input_edge", static_cast<int32_t>(edge)) ||
+            !AddBundleI64(extras, kLauncherStateOwnerEpochExtra,
+                          static_cast<int64_t>(AtomicLoad(
+                                  &g_dart_state_owner_epoch))) ||
             !AddBundleI64(extras, "input_arbiter_generation", generation)) {
         return false;
     }
@@ -2717,16 +3263,55 @@ void* HookLauncherDlopen3(const char* filename, int flags) {
     return HookLauncherDlopenForSlot(filename, flags, 3u);
 }
 
+void MaintainLauncherHooksOnActionDown(uint32_t slot_index) {
+    RepairBusinessHooksIfRemapped(slot_index);
+    EnsureDartStatePublisherThread();
+    const auto* profile = CurrentDartFeatureProfile();
+    if (profile == nullptr &&
+            NeedsDartFeatureResolution(CurrentLauncherProfile()) &&
+            AtomicLoad(&g_dart_profile_resolve_state) == uint32_t{0}) {
+        // libflutter may own the AOT load rather than calling through
+        // libapp_launcher's PLT. Acquire only the already-loaded image.
+        TryResolveAndInstallLoadedDartProfile();
+        profile = CurrentDartFeatureProfile();
+    }
+    const uint32_t remap_mask = DetectDartStateHookRemapMask(profile);
+    uint32_t expected = 0u;
+    if (remap_mask != 0u && __atomic_compare_exchange_n(
+                &g_dart_remap_repair_in_flight, &expected, uint32_t{1},
+                false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_or(&g_dart_remap_pending_mask, remap_mask,
+                          __ATOMIC_ACQ_REL);
+        if (PrepareDartStateHookRetirement(remap_mask)) {
+            InvalidateDartStateOwnerForRemap();
+            RepairDartDrawerStateHookIfRemapped(
+                    profile,
+                    (remap_mask & kDartDrawerRemapped) != 0u);
+            RepairDartOverviewStateHookIfRemapped(profile, remap_mask);
+            RepairDartEditingStateHookIfRemapped(
+                    profile,
+                    (remap_mask & kDartEditingRemapped) != 0u);
+            FinishDartStateHookRetirement(remap_mask);
+            __atomic_store_n(&g_dart_remap_pending_mask,
+                             DetectDartStateHookRemapMask(profile),
+                             __ATOMIC_RELEASE);
+        }
+        __atomic_store_n(&g_dart_remap_repair_in_flight, uint32_t{0},
+                         __ATOMIC_RELEASE);
+    }
+    TryInstallLoadedDartDrawerStateHook(profile);
+}
+
 int32_t HookMotionGetActionForSlot(void* event, uint32_t slot_index,
                                    bool masked) {
     if (slot_index >= kLauncherInputSlotCount) return -1;
+    if (!EnsureDartStateOwnerForCurrentProcess()) return -1;
     // hyos_spawner can resolve app_entry_point before the final Launcher child
     // remaps the APK-backed libapp_launcher text.  The PLT hooks survive that
-    // transition, while an inherited inline-hook state and trampoline can
-    // outlive the actual text patch. Repair only the exact three-prologue loss;
+    // transition, while inherited inline-hook state can outlive the actual
+    // text patch. Repair only the exact return-epilogue loss;
     // the triggering stream remains native because its outer handler may
     // already be on the stack.
-    RepairBusinessHooksIfRemapped(slot_index);
     LauncherInputHookSlot& slot = g_launcher_input_slots[slot_index];
     void* target = masked ? slot.original_action_masked
                           : slot.original_action;
@@ -2734,25 +3319,21 @@ int32_t HookMotionGetActionForSlot(void* event, uint32_t slot_index,
             AtomicLoad(&target));
     if (original == nullptr) return -1;
     const int32_t action = original(event);
-    const auto* profile = CurrentDartFeatureProfile();
-    if (profile == nullptr &&
-            NeedsDartFeatureResolution(CurrentLauncherProfile()) &&
-            AtomicLoad(&g_dart_profile_resolve_state) == uint32_t{0}) {
-        // libflutter may own the actual AOT load rather than calling through
-        // libapp_launcher's PLT. The first ordinary launcher input callback
-        // may therefore acquire the already-loaded image, but never loads it.
-        TryResolveAndInstallLoadedDartProfile();
-        profile = CurrentDartFeatureProfile();
-    }
-    RepairDartDrawerStateHookIfRemapped(profile);
-    RepairDartOverviewStateHookIfRemapped(profile);
-    RepairDartEditingStateHookIfRemapped(profile);
-    TryInstallLoadedDartDrawerStateHook(profile);
     g_last_motion_event = reinterpret_cast<uintptr_t>(event);
     PublishContextualMotionSnapshot(event, action);
     if ((action & 0xff) == 0) {
+        const uintptr_t down_identity = reinterpret_cast<uintptr_t>(event);
+        if (g_last_dart_maintenance_down != down_identity) {
+            g_last_dart_maintenance_down = down_identity;
+            MaintainLauncherHooksOnActionDown(slot_index);
+        }
+        // Dart observers only store epoch-bound atomics and wake the sleeping
+        // dispatcher. Do not publish from a MotionEvent getter: its native
+        // caller can still be an active Flutter/Rust 1.ui frame.
         __atomic_fetch_add(&g_motion_down_capture_count, uint32_t{1},
                            __ATOMIC_RELAXED);
+    } else {
+        g_last_dart_maintenance_down = 0u;
     }
     CaptureMotionAction(event, action);
     return action;
@@ -2991,6 +3572,82 @@ bool InstallContextualSearchLongPressHook(
     return true;
 }
 
+
+constexpr uint32_t kDartReturnX22Epilogue[] = {
+        0xaa1603e0u, 0xaa1d03efu, 0xa8c179fdu, 0xd65f03c0u};
+constexpr uint32_t kDartReturnTrueEpilogue[] = {
+        0x910082c0u, 0xaa1d03efu, 0xa8c179fdu, 0xd65f03c0u};
+constexpr uint32_t kDartReturnFalseEpilogue[] = {
+        0x9100c2c0u, 0xaa1d03efu, 0xa8c179fdu, 0xd65f03c0u};
+
+bool MatchesDartEpilogue(
+        uint8_t* dart_base, uintptr_t offset, const uint32_t* words) {
+    return dart_base != nullptr && offset != 0u && words != nullptr &&
+            DartMappedRangeHasFlags(
+                    dart_base, offset, sizeof(uint32_t) * 4u, PF_R | PF_X) &&
+            MatchesCode(dart_base, offset,
+                        reinterpret_cast<const uint8_t*>(words),
+                        sizeof(uint32_t) * 4u);
+}
+
+bool ResolveDartProfileBase(
+        void* dart_handle,
+        const miui_home_profiles::LauncherProfile* profile,
+        uint8_t** dart_base_out) {
+    if (dart_handle == nullptr || profile == nullptr ||
+            dart_base_out == nullptr) {
+        return false;
+    }
+    void* instructions = dlsym(dart_handle, kDartSnapshotInstructionsSymbol);
+    void* build_id = dlsym(dart_handle, kDartSnapshotBuildIdSymbol);
+    Dl_info info{};
+    auto* dart_base =
+            instructions != nullptr && build_id != nullptr &&
+                    dladdr(instructions, &info) != 0 &&
+                    info.dli_fbase != nullptr && IsDartLibraryPath(info.dli_fname)
+            ? static_cast<uint8_t*>(info.dli_fbase)
+            : nullptr;
+    const bool valid = dart_base != nullptr &&
+            instructions == dart_base +
+                    profile->dart_snapshot_instructions_offset &&
+            build_id == dart_base + profile->dart_snapshot_build_id_offset &&
+            profile->dart_snapshot_build_id != nullptr &&
+            profile->dart_snapshot_build_id_size != 0u &&
+            DartMappedRangeHasFlags(
+                    dart_base, profile->dart_snapshot_instructions_offset,
+                    sizeof(uint32_t), PF_R | PF_X) &&
+            DartMappedRangeHasFlags(
+                    dart_base, profile->dart_snapshot_build_id_offset,
+                    profile->dart_snapshot_build_id_size, PF_R) &&
+            memcmp(build_id, profile->dart_snapshot_build_id,
+                   profile->dart_snapshot_build_id_size) == 0;
+    if (valid) *dart_base_out = dart_base;
+    return valid;
+}
+
+bool InstallDartEpilogue(
+        uint8_t* dart_base, uintptr_t offset, const uint32_t* words,
+        void* replacement, void** original) {
+    if (!MatchesDartEpilogue(dart_base, offset, words) ||
+            replacement == nullptr || original == nullptr) {
+        return false;
+    }
+    *original = nullptr;
+    return InstallInlineHook(dart_base + offset, replacement, original) ==
+                    kHookSuccess &&
+            *original != nullptr;
+}
+
+void RemoveDartEpilogueRange(
+        uint8_t* dart_base, const uintptr_t* offsets, size_t count) {
+    if (dart_base == nullptr || offsets == nullptr) return;
+    for (size_t index = 0u; index < count; ++index) {
+        if (offsets[index] != 0u) {
+            RemoveInlineHook(dart_base + offsets[index]);
+        }
+    }
+}
+
 bool TryInstallDartDrawerStateHook(
         void* dart_handle,
         const miui_home_profiles::LauncherProfile* profile) {
@@ -3007,49 +3664,20 @@ bool TryInstallDartDrawerStateHook(
                 false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3};
     }
-    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{1},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_drawer_state_hook_state, uint32_t{1});
 
-    void* instructions = dlsym(dart_handle,
-                               kDartSnapshotInstructionsSymbol);
-    void* build_id = dlsym(dart_handle, kDartSnapshotBuildIdSymbol);
-    Dl_info info{};
-    const bool resolved = instructions != nullptr && build_id != nullptr &&
-            dladdr(instructions, &info) != 0 && info.dli_fbase != nullptr &&
-            IsDartLibraryPath(info.dli_fname);
-    auto* dart_base = resolved
-            ? static_cast<uint8_t*>(info.dli_fbase) : nullptr;
-    const bool valid = resolved &&
-            instructions == dart_base +
-                    profile->dart_snapshot_instructions_offset &&
-            build_id == dart_base + profile->dart_snapshot_build_id_offset &&
-            profile->dart_snapshot_build_id != nullptr &&
-            profile->dart_snapshot_build_id_size != 0u &&
-            memcmp(build_id, profile->dart_snapshot_build_id,
-                   profile->dart_snapshot_build_id_size) == 0 &&
+    uint8_t* dart_base = nullptr;
+    const bool valid = ResolveDartProfileBase(
+                               dart_handle, profile, &dart_base) &&
             profile->dart_drawer_progress_end_offset != 0u &&
             profile->dart_drawer_progress_end_prologue != nullptr &&
             profile->dart_drawer_progress_end_prologue_size != 0u &&
             profile->dart_drawer_transition_complete_offset != 0u &&
             profile->dart_drawer_transition_complete_prologue != nullptr &&
             profile->dart_drawer_transition_complete_prologue_size != 0u &&
+            profile->dart_drawer_transition_epilogue_offset != 0u &&
             profile->dart_all_apps_state_slot_offset != 0u &&
             profile->dart_home_state_slot_offset != 0u &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_snapshot_instructions_offset,
-                    sizeof(uint32_t), PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_snapshot_build_id_offset,
-                    profile->dart_snapshot_build_id_size, PF_R) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_drawer_progress_end_offset,
-                    profile->dart_drawer_progress_end_prologue_size,
-                    PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base,
-                    profile->dart_drawer_transition_complete_offset,
-                    profile->dart_drawer_transition_complete_prologue_size,
-                    PF_R | PF_X) &&
             MatchesCode(dart_base,
                         profile->dart_drawer_progress_end_offset,
                         profile->dart_drawer_progress_end_prologue,
@@ -3058,40 +3686,41 @@ bool TryInstallDartDrawerStateHook(
                     dart_base,
                     profile->dart_drawer_transition_complete_offset,
                     profile->dart_drawer_transition_complete_prologue,
-                    profile->dart_drawer_transition_complete_prologue_size);
+                    profile->dart_drawer_transition_complete_prologue_size) &&
+            MatchesDartEpilogue(
+                    dart_base,
+                    profile->dart_drawer_transition_epilogue_offset,
+                    kDartReturnX22Epilogue);
     if (!valid) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{5},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_drawer_state_hook_state, uint32_t{5});
         AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
         Log(ANDROID_LOG_ERROR,
-            "Dart ALL_APPS route rejected snapshot identity or fingerprint");
+            "Dart ALL_APPS route rejected snapshot graph or return epilogue");
         return false;
     }
 
-    if (InstallInlineHook(
-                dart_base + profile->dart_drawer_transition_complete_offset,
+    AtomicStore(&g_dart_drawer_retiring, uint32_t{1});
+    if (!InstallDartEpilogue(
+                dart_base,
+                profile->dart_drawer_transition_epilogue_offset,
+                kDartReturnX22Epilogue,
                 reinterpret_cast<void*>(
-                        MiuiHomeHyosDartDrawerTransitionCompleteHook),
-                &miui_home_hyos_dart_transition_complete_original) !=
-                    kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_transition_complete_original) ==
-                    nullptr) {
-        AtomicStore(&miui_home_hyos_dart_transition_complete_original,
+                        MiuiHomeHyosDartDrawerTransitionEpilogueHook),
+                &miui_home_hyos_dart_drawer_epilogue_original)) {
+        AtomicStore(&miui_home_hyos_dart_drawer_epilogue_original,
                     static_cast<void*>(nullptr));
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_drawer_state_hook_state, uint32_t{6});
         AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "Dart ALL_APPS visibility-callback hook failed");
+        Log(ANDROID_LOG_ERROR, "Dart ALL_APPS return-epilogue hook failed");
         return false;
     }
     AtomicStore(&g_dart_app_handle, dart_handle);
     AtomicStore(&g_dart_app_base, dart_base);
-    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_drawer_state_hook_state, uint32_t{3});
+    AtomicStore(&g_dart_drawer_retiring, uint32_t{0});
     AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
     Log(ANDROID_LOG_INFO,
-        "installed exact Dart ALL_APPS visibility-callback state bridge");
+        "installed post-publication Dart ALL_APPS state bridge");
     if (AtomicLoad(&g_overview_state_hook_state) == uint32_t{1}) {
         TryInstallDartOverviewStateHook(dart_handle, profile);
     }
@@ -3109,95 +3738,77 @@ bool TryInstallDartOverviewStateHook(
                 false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return AtomicLoad(&g_overview_state_hook_state) == uint32_t{3};
     }
-    __atomic_store_n(&g_overview_state_hook_state, uint32_t{1},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_overview_state_hook_state, uint32_t{1});
 
-    void* instructions = dlsym(dart_handle, kDartSnapshotInstructionsSymbol);
-    void* build_id = dlsym(dart_handle, kDartSnapshotBuildIdSymbol);
-    Dl_info info{};
-    const bool resolved = instructions != nullptr && build_id != nullptr &&
-            dladdr(instructions, &info) != 0 && info.dli_fbase != nullptr &&
-            IsDartLibraryPath(info.dli_fname);
-    auto* dart_base = resolved
-            ? static_cast<uint8_t*>(info.dli_fbase) : nullptr;
-    const bool valid = resolved &&
-            instructions == dart_base +
-                    profile->dart_snapshot_instructions_offset &&
-            build_id == dart_base + profile->dart_snapshot_build_id_offset &&
-            profile->dart_snapshot_build_id != nullptr &&
-            profile->dart_snapshot_build_id_size != 0u &&
-            memcmp(build_id, profile->dart_snapshot_build_id,
-                   profile->dart_snapshot_build_id_size) == 0 &&
+    uint8_t* dart_base = nullptr;
+    const bool valid = ResolveDartProfileBase(
+                               dart_handle, profile, &dart_base) &&
             profile->dart_overview_enter_offset != 0u &&
             profile->dart_overview_enter_prologue != nullptr &&
             profile->dart_overview_enter_prologue_size != 0u &&
             profile->dart_overview_exit_offset != 0u &&
             profile->dart_overview_exit_prologue != nullptr &&
             profile->dart_overview_exit_prologue_size != 0u &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_snapshot_instructions_offset,
-                    sizeof(uint32_t), PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_snapshot_build_id_offset,
-                    profile->dart_snapshot_build_id_size, PF_R) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_overview_enter_offset,
-                    profile->dart_overview_enter_prologue_size,
-                    PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_overview_exit_offset,
-                    profile->dart_overview_exit_prologue_size,
-                    PF_R | PF_X) &&
+            profile->dart_overview_enter_epilogue_offset != 0u &&
+            profile->dart_overview_exit_epilogue_offset != 0u &&
             MatchesCode(dart_base, profile->dart_overview_enter_offset,
                         profile->dart_overview_enter_prologue,
                         profile->dart_overview_enter_prologue_size) &&
             MatchesCode(dart_base, profile->dart_overview_exit_offset,
                         profile->dart_overview_exit_prologue,
-                        profile->dart_overview_exit_prologue_size);
+                        profile->dart_overview_exit_prologue_size) &&
+            MatchesDartEpilogue(
+                    dart_base, profile->dart_overview_enter_epilogue_offset,
+                    kDartReturnX22Epilogue) &&
+            MatchesDartEpilogue(
+                    dart_base, profile->dart_overview_exit_epilogue_offset,
+                    kDartReturnX22Epilogue);
     if (!valid) {
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{5},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_overview_state_hook_state, uint32_t{5});
         AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
         Log(ANDROID_LOG_ERROR,
-            "Dart Overview route rejected snapshot identity or fingerprint");
+            "Dart Overview route rejected snapshot graph or return epilogue");
         return false;
     }
-    if (InstallInlineHook(
-                dart_base + profile->dart_overview_enter_offset,
-                reinterpret_cast<void*>(MiuiHomeHyosDartOverviewEnterHook),
-                &miui_home_hyos_dart_overview_enter_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_overview_enter_original) == nullptr) {
-        AtomicStore(&miui_home_hyos_dart_overview_enter_original,
-                    static_cast<void*>(nullptr));
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
+
+    AtomicStore(&g_dart_overview_enter_retiring, uint32_t{1});
+    AtomicStore(&g_dart_overview_exit_retiring, uint32_t{1});
+    if (!InstallDartEpilogue(
+                dart_base, profile->dart_overview_enter_epilogue_offset,
+                kDartReturnX22Epilogue,
+                reinterpret_cast<void*>(
+                        MiuiHomeHyosDartOverviewEnterEpilogueHook),
+                &miui_home_hyos_dart_overview_enter_epilogue_original)) {
+        AtomicStore(&g_overview_state_hook_state, uint32_t{6});
         AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "Dart Overview enter hook failed");
+        Log(ANDROID_LOG_ERROR, "Dart Overview enter epilogue hook failed");
         return false;
     }
-    if (InstallInlineHook(
-                dart_base + profile->dart_overview_exit_offset,
-                reinterpret_cast<void*>(MiuiHomeHyosDartOverviewExitHook),
-                &miui_home_hyos_dart_overview_exit_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_overview_exit_original) == nullptr) {
-        RemoveInlineHook(dart_base + profile->dart_overview_enter_offset);
-        AtomicStore(&miui_home_hyos_dart_overview_enter_original,
+    if (!InstallDartEpilogue(
+                dart_base, profile->dart_overview_exit_epilogue_offset,
+                kDartReturnX22Epilogue,
+                reinterpret_cast<void*>(
+                        MiuiHomeHyosDartOverviewExitEpilogueHook),
+                &miui_home_hyos_dart_overview_exit_epilogue_original)) {
+        RemoveInlineHook(
+                dart_base + profile->dart_overview_enter_epilogue_offset);
+        AtomicStore(&miui_home_hyos_dart_overview_enter_epilogue_original,
                     static_cast<void*>(nullptr));
-        AtomicStore(&miui_home_hyos_dart_overview_exit_original,
+        AtomicStore(&miui_home_hyos_dart_overview_exit_epilogue_original,
                     static_cast<void*>(nullptr));
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_overview_state_hook_state, uint32_t{6});
         AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "Dart Overview exit hook failed");
+        Log(ANDROID_LOG_ERROR, "Dart Overview exit epilogue hook failed");
         return false;
     }
     AtomicStore(&g_dart_app_handle, dart_handle);
     AtomicStore(&g_dart_app_base, dart_base);
-    __atomic_store_n(&g_overview_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_overview_state_hook_state, uint32_t{3});
+    AtomicStore(&g_dart_overview_enter_retiring, uint32_t{0});
+    AtomicStore(&g_dart_overview_exit_retiring, uint32_t{0});
     AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
     Log(ANDROID_LOG_INFO,
-        "installed exact Dart Overview enter/exit state bridge");
+        "installed post-publication Dart Overview state bridge");
     return true;
 }
 
@@ -3212,398 +3823,386 @@ bool TryInstallDartEditingStateHook(
                 false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return AtomicLoad(&g_editing_state_hook_state) == uint32_t{3};
     }
-    __atomic_store_n(&g_editing_state_hook_state, uint32_t{1},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_editing_state_hook_state, uint32_t{1});
 
-    void* instructions = dlsym(dart_handle, kDartSnapshotInstructionsSymbol);
-    void* build_id = dlsym(dart_handle, kDartSnapshotBuildIdSymbol);
-    Dl_info info{};
-    const bool resolved = instructions != nullptr && build_id != nullptr &&
-            dladdr(instructions, &info) != 0 && info.dli_fbase != nullptr &&
-            IsDartLibraryPath(info.dli_fname);
-    auto* dart_base = resolved
-            ? static_cast<uint8_t*>(info.dli_fbase) : nullptr;
-    const bool valid = resolved &&
-            instructions == dart_base +
-                    profile->dart_snapshot_instructions_offset &&
-            build_id == dart_base + profile->dart_snapshot_build_id_offset &&
-            profile->dart_snapshot_build_id != nullptr &&
-            profile->dart_snapshot_build_id_size != 0u &&
-            memcmp(build_id, profile->dart_snapshot_build_id,
-                   profile->dart_snapshot_build_id_size) == 0 &&
+    uint8_t* dart_base = nullptr;
+    const size_t true_count = profile->dart_editing_true_epilogue_count;
+    const size_t false_count = profile->dart_editing_false_epilogue_count;
+    bool valid = ResolveDartProfileBase(dart_handle, profile, &dart_base) &&
             profile->dart_editing_query_offset != 0u &&
             profile->dart_editing_query_prologue != nullptr &&
             profile->dart_editing_query_prologue_size != 0u &&
             profile->dart_editing_query_return_offset_a >= 4u &&
             profile->dart_editing_query_return_offset_b >= 4u &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_editing_query_offset,
-                    profile->dart_editing_query_prologue_size, PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_editing_query_return_offset_a - 4u,
-                    sizeof(uint32_t), PF_R | PF_X) &&
-            DartMappedRangeHasFlags(
-                    dart_base, profile->dart_editing_query_return_offset_b - 4u,
-                    sizeof(uint32_t), PF_R | PF_X) &&
+            true_count > 0u && true_count <= 4u &&
+            false_count > 0u && false_count <= 4u &&
+            true_count + false_count <= 8u &&
             MatchesCode(dart_base, profile->dart_editing_query_offset,
                         profile->dart_editing_query_prologue,
                         profile->dart_editing_query_prologue_size) &&
             DartBlTargets(dart_base,
-                          profile->dart_editing_query_return_offset_a - 4u,
-                          profile->dart_editing_query_offset) &&
+                    profile->dart_editing_query_return_offset_a - 4u,
+                    profile->dart_editing_query_offset) &&
             DartBlTargets(dart_base,
-                          profile->dart_editing_query_return_offset_b - 4u,
-                          profile->dart_editing_query_offset);
+                    profile->dart_editing_query_return_offset_b - 4u,
+                    profile->dart_editing_query_offset);
+    for (size_t index = 0u; valid && index < true_count; ++index) {
+        valid = MatchesDartEpilogue(
+                dart_base, profile->dart_editing_true_epilogue_offsets[index],
+                kDartReturnTrueEpilogue);
+    }
+    for (size_t index = 0u; valid && index < false_count; ++index) {
+        valid = MatchesDartEpilogue(
+                dart_base, profile->dart_editing_false_epilogue_offsets[index],
+                kDartReturnFalseEpilogue);
+    }
     if (!valid) {
-        __atomic_store_n(&g_editing_state_hook_state, uint32_t{5},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_editing_state_hook_state, uint32_t{5});
         AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
         Log(ANDROID_LOG_ERROR,
-            "Dart editing route rejected snapshot graph or fingerprint");
+            "Dart editing route rejected caller graph or return epilogues");
         return false;
     }
+
     AtomicStore(&miui_home_hyos_dart_editing_return_a,
                 reinterpret_cast<uintptr_t>(dart_base) +
                         profile->dart_editing_query_return_offset_a);
     AtomicStore(&miui_home_hyos_dart_editing_return_b,
                 reinterpret_cast<uintptr_t>(dart_base) +
                         profile->dart_editing_query_return_offset_b);
-    if (InstallInlineHook(
-                dart_base + profile->dart_editing_query_offset,
-                reinterpret_cast<void*>(MiuiHomeHyosDartEditingQueryHook),
-                &miui_home_hyos_dart_editing_query_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_editing_query_original) == nullptr) {
-        AtomicStore(&miui_home_hyos_dart_editing_query_original,
-                    static_cast<void*>(nullptr));
+    AtomicStore(&g_dart_editing_retiring, uint32_t{1});
+    size_t installed = 0u;
+    for (size_t index = 0u; index < true_count; ++index) {
+        if (!InstallDartEpilogue(
+                    dart_base,
+                    profile->dart_editing_true_epilogue_offsets[index],
+                    kDartReturnTrueEpilogue,
+                    reinterpret_cast<void*>(
+                            MiuiHomeHyosDartEditingTrueEpilogueHook),
+                    &miui_home_hyos_dart_editing_epilogue_original[
+                            installed])) {
+            break;
+        }
+        ++installed;
+    }
+    for (size_t index = 0u;
+            installed == true_count && index < false_count; ++index) {
+        if (!InstallDartEpilogue(
+                    dart_base,
+                    profile->dart_editing_false_epilogue_offsets[index],
+                    kDartReturnFalseEpilogue,
+                    reinterpret_cast<void*>(
+                            MiuiHomeHyosDartEditingFalseEpilogueHook),
+                    &miui_home_hyos_dart_editing_epilogue_original[
+                            installed])) {
+            break;
+        }
+        ++installed;
+    }
+    if (installed != true_count + false_count) {
+        RemoveDartEpilogueRange(
+                dart_base, profile->dart_editing_true_epilogue_offsets,
+                true_count);
+        RemoveDartEpilogueRange(
+                dart_base, profile->dart_editing_false_epilogue_offsets,
+                false_count);
+        memset(miui_home_hyos_dart_editing_epilogue_original, 0,
+               sizeof(miui_home_hyos_dart_editing_epilogue_original));
         AtomicStore(&miui_home_hyos_dart_editing_return_a, uintptr_t{0});
         AtomicStore(&miui_home_hyos_dart_editing_return_b, uintptr_t{0});
-        __atomic_store_n(&g_editing_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
+        AtomicStore(&g_editing_state_hook_state, uint32_t{6});
         AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "Dart editing-state query hook failed");
+        Log(ANDROID_LOG_ERROR, "Dart editing return-epilogue hook failed");
         return false;
     }
     AtomicStore(&g_dart_app_handle, dart_handle);
     AtomicStore(&g_dart_app_base, dart_base);
-    __atomic_store_n(&g_editing_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
+    AtomicStore(&g_editing_state_hook_state, uint32_t{3});
+    AtomicStore(&g_dart_editing_retiring, uint32_t{0});
     AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
     Log(ANDROID_LOG_INFO,
-        "installed exact Dart launcher editing-state bridge");
+        "installed caller-filtered Dart editing state bridge");
     return true;
 }
 
-void RepairDartDrawerStateHookIfRemapped(
+uint32_t DetectDartStateHookRemapMask(
         const miui_home_profiles::LauncherProfile* profile) {
-    if (profile == nullptr ||
+    auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
+    if (profile == nullptr || dart_base == nullptr ||
+            profile != CurrentDartFeatureProfile()) {
+        return 0u;
+    }
+    const bool drawer =
+            AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3} &&
+            MatchesDartEpilogue(
+                    dart_base,
+                    profile->dart_drawer_transition_epilogue_offset,
+                    kDartReturnX22Epilogue);
+    const bool overview_installed =
+            AtomicLoad(&g_overview_state_hook_state) == uint32_t{3};
+    const bool enter_original = overview_installed &&
+            MatchesDartEpilogue(
+                    dart_base, profile->dart_overview_enter_epilogue_offset,
+                    kDartReturnX22Epilogue);
+    const bool exit_original = overview_installed &&
+            MatchesDartEpilogue(
+                    dart_base, profile->dart_overview_exit_epilogue_offset,
+                    kDartReturnX22Epilogue);
+    bool editing = false;
+    if (AtomicLoad(&g_editing_state_hook_state) == uint32_t{3}) {
+        for (size_t index = 0u;
+                index < profile->dart_editing_true_epilogue_count; ++index) {
+            editing = editing || MatchesDartEpilogue(
+                    dart_base,
+                    profile->dart_editing_true_epilogue_offsets[index],
+                    kDartReturnTrueEpilogue);
+        }
+        for (size_t index = 0u;
+                index < profile->dart_editing_false_epilogue_count; ++index) {
+            editing = editing || MatchesDartEpilogue(
+                    dart_base,
+                    profile->dart_editing_false_epilogue_offsets[index],
+                    kDartReturnFalseEpilogue);
+        }
+    }
+    return (drawer ? kDartDrawerRemapped : 0u) |
+            (enter_original ? kDartOverviewEnterRemapped : 0u) |
+            (exit_original ? kDartOverviewExitRemapped : 0u) |
+            (editing ? kDartEditingRemapped : 0u);
+}
+
+bool PrepareDartStateHookRetirement(uint32_t remap_mask) {
+    if ((remap_mask & kDartDrawerRemapped) != 0u) {
+        AtomicStore(&g_dart_drawer_retiring, uint32_t{1});
+    }
+    const bool overview_remapped =
+            (remap_mask & (kDartOverviewEnterRemapped |
+                           kDartOverviewExitRemapped)) != 0u;
+    if (overview_remapped) {
+        AtomicStore(&g_dart_overview_enter_retiring, uint32_t{1});
+        AtomicStore(&g_dart_overview_exit_retiring, uint32_t{1});
+    }
+    if ((remap_mask & kDartEditingRemapped) != 0u) {
+        AtomicStore(&g_dart_editing_retiring, uint32_t{1});
+    }
+    auto is_quiet = [remap_mask, overview_remapped]() {
+        return ((remap_mask & kDartDrawerRemapped) == 0u ||
+                AtomicLoad(&g_dart_drawer_active_count) == 0u) &&
+                (!overview_remapped ||
+                 AtomicLoad(&g_dart_overview_enter_active_count) == 0u) &&
+                (!overview_remapped ||
+                 AtomicLoad(&g_dart_overview_exit_active_count) == 0u) &&
+                ((remap_mask & kDartEditingRemapped) == 0u ||
+                 AtomicLoad(&g_dart_editing_active_count) == 0u);
+    };
+    for (uint32_t attempt = 0u; attempt < 8u; ++attempt) {
+        if (is_quiet()) {
+            timespec stable{0, 1000 * 1000};
+            nanosleep(&stable, nullptr);
+            if (is_quiet()) return true;
+        } else {
+            timespec wait{0, 1000 * 1000};
+            nanosleep(&wait, nullptr);
+        }
+    }
+    Log(ANDROID_LOG_WARN,
+        "deferred Dart epilogue repair while an observer is active");
+    return false;
+}
+
+void FinishDartStateHookRetirement(uint32_t remap_mask) {
+    if ((remap_mask & kDartDrawerRemapped) != 0u &&
+            AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3}) {
+        AtomicStore(&g_dart_drawer_retiring, uint32_t{0});
+    }
+    const bool overview_remapped =
+            (remap_mask & (kDartOverviewEnterRemapped |
+                           kDartOverviewExitRemapped)) != 0u;
+    if (overview_remapped &&
+            AtomicLoad(&g_overview_state_hook_state) == uint32_t{3}) {
+        AtomicStore(&g_dart_overview_enter_retiring, uint32_t{0});
+        AtomicStore(&g_dart_overview_exit_retiring, uint32_t{0});
+    }
+    if ((remap_mask & kDartEditingRemapped) != 0u &&
+            AtomicLoad(&g_editing_state_hook_state) == uint32_t{3}) {
+        AtomicStore(&g_dart_editing_retiring, uint32_t{0});
+    }
+}
+
+void ClearRetiredDartObservation(
+        volatile uint64_t* observation, uint64_t owner_epoch) {
+    uint64_t current = AtomicLoad(observation);
+    while (DartStateObservationEpoch(current) < owner_epoch) {
+        if (__atomic_compare_exchange_n(
+                    observation, &current, uint64_t{0}, false,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return;
+        }
+    }
+}
+
+void InvalidateDartStateOwnerForRemap() {
+    const uint64_t owner_epoch = __atomic_add_fetch(
+            &g_dart_state_owner_epoch, uint64_t{1}, __ATOMIC_ACQ_REL);
+    ClearRetiredDartObservation(&g_drawer_state_observation, owner_epoch);
+    ClearRetiredDartObservation(&g_overview_state_observation, owner_epoch);
+    ClearRetiredDartObservation(&g_editing_state_observation, owner_epoch);
+    __atomic_fetch_or(&g_dart_state_publish_pending, uint32_t{1} << 3u,
+                      __ATOMIC_RELEASE);
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                        "invalidated retired Dart state owner epoch=%llu",
+                        static_cast<unsigned long long>(owner_epoch));
+    WakeDartStatePublisher();
+}
+
+bool RetireDartEpilogue(uint8_t* dart_base, uintptr_t offset) {
+    return dart_base != nullptr && offset != 0u &&
+            RemoveInlineHook(dart_base + offset) == kHookSuccess;
+}
+
+void RepairDartDrawerStateHookIfRemapped(
+        const miui_home_profiles::LauncherProfile* profile,
+        bool remap_detected) {
+    if (!remap_detected || profile == nullptr ||
             AtomicLoad(&g_drawer_state_hook_state) != uint32_t{3}) {
         return;
     }
     auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
     void* dart_handle = AtomicLoad(&g_dart_app_handle);
-    if (dart_base == nullptr || dart_handle == nullptr ||
-            profile != CurrentDartFeatureProfile()) {
-        return;
-    }
-    const uintptr_t active_offset =
-            profile->dart_drawer_transition_complete_offset;
-    const uint8_t* active_prologue =
-            profile->dart_drawer_transition_complete_prologue;
-    const size_t active_prologue_size =
-            profile->dart_drawer_transition_complete_prologue_size;
-    if (active_offset == 0u ||
-            active_prologue == nullptr || active_prologue_size == 0u ||
-            !MatchesCode(dart_base, active_offset, active_prologue,
-                         active_prologue_size)) {
-        return;
-    }
     __atomic_fetch_add(&g_dart_drawer_repair_attempt_count, uint32_t{1},
                        __ATOMIC_RELAXED);
-    __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{1},
-                     __ATOMIC_RELEASE);
-    uint32_t install_expected = 0u;
-    if (!__atomic_compare_exchange_n(
-                &g_dart_drawer_install_in_flight, &install_expected,
-                uint32_t{1}, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        return;
-    }
+    AtomicStore(&g_dart_drawer_repair_stage, uint32_t{2});
     uint32_t expected = 3u;
-    if (!__atomic_compare_exchange_n(&g_drawer_state_hook_state, &expected,
-                                     uint32_t{1}, false,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-        return;
-    }
-    __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{2},
-                     __ATOMIC_RELEASE);
-    auto* target = dart_base + profile->dart_drawer_transition_complete_offset;
-    if (RemoveInlineHook(target) != kHookSuccess) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{5},
-                         __ATOMIC_RELEASE);
+    if (dart_base == nullptr || dart_handle == nullptr ||
+            !__atomic_compare_exchange_n(
+                    &g_drawer_state_hook_state, &expected, uint32_t{0},
+                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ||
+            !RetireDartEpilogue(
+                    dart_base,
+                    profile->dart_drawer_transition_epilogue_offset)) {
+        AtomicStore(&g_drawer_state_hook_state, uint32_t{6});
+        AtomicStore(&g_dart_drawer_repair_stage, uint32_t{5});
         __atomic_fetch_add(&g_dart_drawer_repair_failure_count, uint32_t{1},
                            __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "failed to unregister stale Dart ALL_APPS visibility hook");
         return;
     }
-    if (!MatchesCode(
-                dart_base, profile->dart_drawer_transition_complete_offset,
-                profile->dart_drawer_transition_complete_prologue,
-                profile->dart_drawer_transition_complete_prologue_size)) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_dart_drawer_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "Dart ALL_APPS remap repair failed post-unhook fingerprint");
-        return;
-    }
-    AtomicStore(&miui_home_hyos_dart_transition_complete_original,
+    AtomicStore(&miui_home_hyos_dart_drawer_epilogue_original,
                 static_cast<void*>(nullptr));
-    if (InstallInlineHook(
-                target,
-                reinterpret_cast<void*>(
-                        MiuiHomeHyosDartDrawerTransitionCompleteHook),
-                &miui_home_hyos_dart_transition_complete_original) !=
-                    kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_transition_complete_original) ==
-                    nullptr) {
-        AtomicStore(&miui_home_hyos_dart_transition_complete_original,
-                    static_cast<void*>(nullptr));
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{7},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_dart_drawer_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "failed to repair remapped Dart ALL_APPS visibility hook");
-        return;
-    }
-    __atomic_store_n(&g_dart_drawer_repair_stage, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    __atomic_fetch_add(&g_dart_drawer_repair_success_count, uint32_t{1},
-                       __ATOMIC_RELAXED);
-    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    AtomicStore(&g_dart_drawer_install_in_flight, uint32_t{0});
-    Log(ANDROID_LOG_INFO,
-        "repaired remapped Dart ALL_APPS visibility hook");
+    const bool installed =
+            TryInstallDartDrawerStateHook(dart_handle, profile);
+    AtomicStore(&g_dart_drawer_repair_stage,
+                installed ? uint32_t{3} : uint32_t{6});
+    __atomic_fetch_add(
+            installed ? &g_dart_drawer_repair_success_count
+                      : &g_dart_drawer_repair_failure_count,
+            uint32_t{1}, __ATOMIC_RELAXED);
+    Log(installed ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        installed ? "repaired remapped Dart ALL_APPS epilogue"
+                  : "failed to repair remapped Dart ALL_APPS epilogue");
 }
 
 void RepairDartEditingStateHookIfRemapped(
-        const miui_home_profiles::LauncherProfile* profile) {
-    if (profile == nullptr ||
+        const miui_home_profiles::LauncherProfile* profile,
+        bool remap_detected) {
+    if (!remap_detected || profile == nullptr ||
             AtomicLoad(&g_editing_state_hook_state) != uint32_t{3}) {
         return;
     }
     auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
-    if (dart_base == nullptr || profile != CurrentDartFeatureProfile() ||
-            profile->dart_editing_query_offset == 0u ||
-            profile->dart_editing_query_prologue == nullptr ||
-            profile->dart_editing_query_prologue_size == 0u ||
-            !MatchesCode(dart_base, profile->dart_editing_query_offset,
-                         profile->dart_editing_query_prologue,
-                         profile->dart_editing_query_prologue_size)) {
-        return;
-    }
+    void* dart_handle = AtomicLoad(&g_dart_app_handle);
     __atomic_fetch_add(&g_editing_dart_repair_attempt_count, uint32_t{1},
                        __ATOMIC_RELAXED);
-    __atomic_store_n(&g_editing_dart_repair_stage, uint32_t{1},
-                     __ATOMIC_RELEASE);
-    uint32_t install_expected = 0u;
-    if (!__atomic_compare_exchange_n(
-                &g_dart_editing_install_in_flight, &install_expected,
-                uint32_t{1}, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        return;
-    }
+    AtomicStore(&g_editing_dart_repair_stage, uint32_t{2});
     uint32_t expected = 3u;
-    if (!__atomic_compare_exchange_n(&g_editing_state_hook_state, &expected,
-                                     uint32_t{1}, false,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
-        return;
+    bool retired = dart_base != nullptr && dart_handle != nullptr &&
+            __atomic_compare_exchange_n(
+                    &g_editing_state_hook_state, &expected, uint32_t{0},
+                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    for (size_t index = 0u; retired &&
+            index < profile->dart_editing_true_epilogue_count; ++index) {
+        retired = RetireDartEpilogue(
+                dart_base,
+                profile->dart_editing_true_epilogue_offsets[index]);
     }
-    auto* target = dart_base + profile->dart_editing_query_offset;
-    if (RemoveInlineHook(target) != kHookSuccess ||
-            !MatchesCode(dart_base, profile->dart_editing_query_offset,
-                         profile->dart_editing_query_prologue,
-                         profile->dart_editing_query_prologue_size) ||
-            !DartBlTargets(dart_base,
-                    profile->dart_editing_query_return_offset_a - 4u,
-                    profile->dart_editing_query_offset) ||
-            !DartBlTargets(dart_base,
-                    profile->dart_editing_query_return_offset_b - 4u,
-                    profile->dart_editing_query_offset)) {
-        __atomic_store_n(&g_editing_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_editing_dart_repair_stage, uint32_t{5},
-                         __ATOMIC_RELEASE);
+    for (size_t index = 0u; retired &&
+            index < profile->dart_editing_false_epilogue_count; ++index) {
+        retired = RetireDartEpilogue(
+                dart_base,
+                profile->dart_editing_false_epilogue_offsets[index]);
+    }
+    if (!retired) {
+        AtomicStore(&g_editing_state_hook_state, uint32_t{6});
+        AtomicStore(&g_editing_dart_repair_stage, uint32_t{5});
         __atomic_fetch_add(&g_editing_dart_repair_failure_count, uint32_t{1},
                            __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "Dart editing remap repair validation failed");
         return;
     }
-    AtomicStore(&miui_home_hyos_dart_editing_query_original,
-                static_cast<void*>(nullptr));
-    AtomicStore(&miui_home_hyos_dart_editing_return_a,
-                reinterpret_cast<uintptr_t>(dart_base) +
-                        profile->dart_editing_query_return_offset_a);
-    AtomicStore(&miui_home_hyos_dart_editing_return_b,
-                reinterpret_cast<uintptr_t>(dart_base) +
-                        profile->dart_editing_query_return_offset_b);
-    if (InstallInlineHook(
-                target,
-                reinterpret_cast<void*>(MiuiHomeHyosDartEditingQueryHook),
-                &miui_home_hyos_dart_editing_query_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_editing_query_original) == nullptr) {
-        AtomicStore(&miui_home_hyos_dart_editing_return_a, uintptr_t{0});
-        AtomicStore(&miui_home_hyos_dart_editing_return_b, uintptr_t{0});
-        __atomic_store_n(&g_editing_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_editing_dart_repair_stage, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_editing_dart_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "failed to repair Dart editing-state hook");
-        return;
-    }
-    __atomic_store_n(&g_editing_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    __atomic_store_n(&g_editing_dart_repair_stage, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    __atomic_fetch_add(&g_editing_dart_repair_success_count, uint32_t{1},
-                       __ATOMIC_RELAXED);
-    AtomicStore(&g_dart_editing_install_in_flight, uint32_t{0});
-    Log(ANDROID_LOG_INFO, "repaired remapped Dart editing-state hook");
+    memset(miui_home_hyos_dart_editing_epilogue_original, 0,
+           sizeof(miui_home_hyos_dart_editing_epilogue_original));
+    AtomicStore(&miui_home_hyos_dart_editing_return_a, uintptr_t{0});
+    AtomicStore(&miui_home_hyos_dart_editing_return_b, uintptr_t{0});
+    const bool installed =
+            TryInstallDartEditingStateHook(dart_handle, profile);
+    AtomicStore(&g_editing_dart_repair_stage,
+                installed ? uint32_t{3} : uint32_t{6});
+    __atomic_fetch_add(
+            installed ? &g_editing_dart_repair_success_count
+                      : &g_editing_dart_repair_failure_count,
+            uint32_t{1}, __ATOMIC_RELAXED);
+    Log(installed ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+        installed ? "repaired remapped Dart editing epilogues"
+                  : "failed to repair remapped Dart editing epilogues");
 }
 
 void RepairDartOverviewStateHookIfRemapped(
-        const miui_home_profiles::LauncherProfile* profile) {
-    if (profile == nullptr ||
-            AtomicLoad(&g_overview_state_hook_state) != uint32_t{3} ||
-            profile->dart_overview_enter_offset == 0u) {
+        const miui_home_profiles::LauncherProfile* profile,
+        uint32_t remap_mask) {
+    const uint32_t overview_mask = remap_mask &
+            (kDartOverviewEnterRemapped | kDartOverviewExitRemapped);
+    if (overview_mask == 0u || profile == nullptr ||
+            AtomicLoad(&g_overview_state_hook_state) != uint32_t{3}) {
         return;
     }
     auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
-    if (dart_base == nullptr || profile != CurrentDartFeatureProfile()) return;
-    const bool enter_original = MatchesCode(
-            dart_base, profile->dart_overview_enter_offset,
-            profile->dart_overview_enter_prologue,
-            profile->dart_overview_enter_prologue_size);
-    const bool exit_original = MatchesCode(
-            dart_base, profile->dart_overview_exit_offset,
-            profile->dart_overview_exit_prologue,
-            profile->dart_overview_exit_prologue_size);
-    if (!enter_original && !exit_original) return;
+    void* dart_handle = AtomicLoad(&g_dart_app_handle);
     __atomic_fetch_add(&g_overview_dart_repair_attempt_count, uint32_t{1},
                        __ATOMIC_RELAXED);
-    __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{1},
-                     __ATOMIC_RELEASE);
-    uint32_t install_expected = 0u;
-    if (!__atomic_compare_exchange_n(
-                &g_dart_overview_install_in_flight, &install_expected,
-                uint32_t{1}, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        return;
-    }
+    AtomicStore(&g_overview_dart_repair_stage, uint32_t{2});
     uint32_t expected = 3u;
-    if (!__atomic_compare_exchange_n(&g_overview_state_hook_state, &expected,
-                                     uint32_t{1}, false,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        return;
-    }
-    auto* enter_target = dart_base + profile->dart_overview_enter_offset;
-    auto* exit_target = dart_base + profile->dart_overview_exit_offset;
-    const int enter_unhook = RemoveInlineHook(enter_target);
-    const int exit_unhook = RemoveInlineHook(exit_target);
-    if (enter_unhook != kHookSuccess || exit_unhook != kHookSuccess) {
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{4},
-                         __ATOMIC_RELEASE);
+    const bool retired = dart_base != nullptr && dart_handle != nullptr &&
+            __atomic_compare_exchange_n(
+                    &g_overview_state_hook_state, &expected, uint32_t{0},
+                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) &&
+            RetireDartEpilogue(
+                    dart_base,
+                    profile->dart_overview_enter_epilogue_offset) &&
+            RetireDartEpilogue(
+                    dart_base,
+                    profile->dart_overview_exit_epilogue_offset);
+    if (!retired) {
+        AtomicStore(&g_overview_state_hook_state, uint32_t{6});
+        AtomicStore(&g_overview_dart_repair_stage, uint32_t{5});
         __atomic_fetch_add(&g_overview_dart_repair_failure_count, uint32_t{1},
                            __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "failed to unregister stale Dart Overview hooks");
         return;
     }
-    __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{2},
-                     __ATOMIC_RELEASE);
-    if (!MatchesCode(dart_base, profile->dart_overview_enter_offset,
-                     profile->dart_overview_enter_prologue,
-                     profile->dart_overview_enter_prologue_size) ||
-            !MatchesCode(dart_base, profile->dart_overview_exit_offset,
-                         profile->dart_overview_exit_prologue,
-                         profile->dart_overview_exit_prologue_size)) {
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{5},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_overview_dart_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR,
-            "Dart Overview remap repair failed post-unhook fingerprint");
-        return;
-    }
-    AtomicStore(&miui_home_hyos_dart_overview_enter_original,
+    AtomicStore(&miui_home_hyos_dart_overview_enter_epilogue_original,
                 static_cast<void*>(nullptr));
-    AtomicStore(&miui_home_hyos_dart_overview_exit_original,
+    AtomicStore(&miui_home_hyos_dart_overview_exit_epilogue_original,
                 static_cast<void*>(nullptr));
-    if (InstallInlineHook(
-                enter_target,
-                reinterpret_cast<void*>(MiuiHomeHyosDartOverviewEnterHook),
-                &miui_home_hyos_dart_overview_enter_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_overview_enter_original) == nullptr) {
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_overview_dart_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "failed to repair Dart Overview enter hook");
-        return;
-    }
-    if (InstallInlineHook(
-                exit_target,
-                reinterpret_cast<void*>(MiuiHomeHyosDartOverviewExitHook),
-                &miui_home_hyos_dart_overview_exit_original) != kHookSuccess ||
-            AtomicLoad(&miui_home_hyos_dart_overview_exit_original) == nullptr) {
-        RemoveInlineHook(enter_target);
-        AtomicStore(&miui_home_hyos_dart_overview_enter_original,
-                    static_cast<void*>(nullptr));
-        AtomicStore(&miui_home_hyos_dart_overview_exit_original,
-                    static_cast<void*>(nullptr));
-        __atomic_store_n(&g_overview_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{7},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_overview_dart_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-        Log(ANDROID_LOG_ERROR, "failed to repair Dart Overview exit hook");
-        return;
-    }
-    __atomic_store_n(&g_overview_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    __atomic_store_n(&g_overview_dart_repair_stage, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    __atomic_fetch_add(&g_overview_dart_repair_success_count, uint32_t{1},
-                       __ATOMIC_RELAXED);
-    AtomicStore(&g_dart_overview_install_in_flight, uint32_t{0});
-    Log(ANDROID_LOG_INFO, "repaired remapped Dart Overview hooks");
+    const bool installed =
+            TryInstallDartOverviewStateHook(dart_handle, profile);
+    AtomicStore(&g_overview_dart_repair_stage,
+                installed ? uint32_t{3} : uint32_t{6});
+    __atomic_fetch_add(
+            installed ? &g_overview_dart_repair_success_count
+                      : &g_overview_dart_repair_failure_count,
+            uint32_t{1}, __ATOMIC_RELAXED);
+    __android_log_print(installed ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+                        kLogTag, "%s Dart Overview epilogues mask=0x%x",
+                        installed ? "repaired remapped"
+                                  : "failed to repair remapped",
+                        overview_mask);
 }
 
 void TryInstallLoadedDartDrawerStateHook(
@@ -4306,6 +4905,12 @@ void BackfillLoadedLibraries() {
 
 void OnLsposedLibraryLoaded(const char* name, void* handle) {
     if (name == nullptr || handle == nullptr) return;
+    if (IsLauncherProcess() &&
+            !EnsureDartStateOwnerForCurrentProcess()) {
+        Log(ANDROID_LOG_ERROR,
+            "launcher child rejected without a process-local Dart owner");
+        return;
+    }
 
     if (EndsWith(name, kHyperRuntimeName)) {
         EnsureLsposedMadviseGuard(name);
@@ -4344,24 +4949,6 @@ void OnLsposedLibraryLoaded(const char* name, void* handle) {
 }  // namespace
 
 extern "C" __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartDrawerStateObserved(uint32_t visible) {
-    HandleDartDrawerStateObserved(visible);
-}
-
-extern "C" __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartOverviewStateObserved(uint32_t visible) {
-    __atomic_fetch_add(visible != 0u ? &g_overview_dart_enter_count
-                                    : &g_overview_dart_exit_count,
-                       uint32_t{1}, __ATOMIC_RELAXED);
-    HandleOverviewStateObserved(visible != 0u);
-}
-
-extern "C" __attribute__((visibility("hidden")))
-void MiuiHomeHyosDartEditingStateObserved(uint32_t editing) {
-    HandleEditingStateObserved(editing != 0u);
-}
-
-extern "C" __attribute__((visibility("hidden")))
 void MiuiHomeHyosInputMonitorPilferImpl(void* monitor, uintptr_t return_pc) {
     HandleInputMonitorPilfer(monitor, return_pc);
 }
@@ -4387,6 +4974,21 @@ NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
         Log(ANDROID_LOG_WARN,
             "LSPosed native entry rejected a non-launcher HYOS process");
         return nullptr;
+    }
+    uint32_t atfork_expected = 0u;
+    if (__atomic_compare_exchange_n(
+                &g_dart_state_atfork_state, &atfork_expected, uint32_t{1},
+                false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        const int atfork_result = pthread_atfork(
+                nullptr, nullptr, ResetDartStateOwnerAfterFork);
+        __atomic_store_n(&g_dart_state_atfork_state,
+                         atfork_result == 0 ? uint32_t{3} : uint32_t{6},
+                         __ATOMIC_RELEASE);
+        if (atfork_result != 0) {
+            __android_log_print(ANDROID_LOG_WARN, kLogTag,
+                                "Dart owner atfork registration failed: %d",
+                                atfork_result);
+        }
     }
     MarkLsposedLauncherSpecialized();
     Log(ANDROID_LOG_INFO,

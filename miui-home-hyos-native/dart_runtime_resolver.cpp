@@ -252,6 +252,98 @@ bool MatchTransition(const ElfView& view, uintptr_t offset,
             call_target == unbox_target;
 }
 
+constexpr uint32_t kDartRestoreFrame = 0xaa1d03efu;
+constexpr uint32_t kDartPopFrame = 0xa8c179fdu;
+constexpr uint32_t kDartReturn = 0xd65f03c0u;
+constexpr uint32_t kDartReturnX22 = 0xaa1603e0u;
+constexpr uint32_t kDartReturnTrue = 0x910082c0u;
+constexpr uint32_t kDartReturnFalse = 0x9100c2c0u;
+
+bool IsDartReturnEpilogue(const ElfView& view, uintptr_t offset,
+                          uint32_t first) {
+    uint32_t code[4]{};
+    return ReadInstructions(view, offset, code, 4u) && code[0] == first &&
+            code[1] == kDartRestoreFrame && code[2] == kDartPopFrame &&
+            code[3] == kDartReturn;
+}
+
+bool FindUniqueDrawerCallerEpilogue(
+        const ElfView& view, uintptr_t transition, uintptr_t* result) {
+    if (result == nullptr) return false;
+    constexpr uint32_t kCallerPrefix[] = {
+            0xa9bf79fdu, 0xaa0f03fdu, 0xf9400fa0u, 0xb8417001u,
+            0x8b1c8021u, 0xb840f020u, 0x8b1c8000u, 0xaa0003e1u,
+            0xf9400ba2u};
+    size_t direct_call_count = 0u;
+    size_t valid_caller_count = 0u;
+    uintptr_t match = 0u;
+    for (size_t segment_index = 0u; segment_index < view.load_count;
+         ++segment_index) {
+        const LoadSegment& load = view.loads[segment_index];
+        if ((load.flags & (PF_R | PF_X)) != (PF_R | PF_X)) continue;
+        for (uintptr_t cursor = (load.start + 3u) & ~uintptr_t{3u};
+             cursor < load.end && load.end - cursor >= sizeof(uint32_t);
+             cursor += 4u) {
+            uint32_t instruction = 0u;
+            uintptr_t target = 0u;
+            if (!ReadInstruction(view, cursor, &instruction) ||
+                    !DecodeBlTarget(cursor, instruction, &target) ||
+                    target != transition) {
+                continue;
+            }
+            ++direct_call_count;
+            if (cursor < sizeof(kCallerPrefix)) continue;
+            const uintptr_t caller = cursor - sizeof(kCallerPrefix);
+            uint32_t prefix[sizeof(kCallerPrefix) / sizeof(uint32_t)]{};
+            if (!ReadInstructions(
+                        view, caller, prefix,
+                        sizeof(prefix) / sizeof(prefix[0])) ||
+                    memcmp(prefix, kCallerPrefix, sizeof(prefix)) != 0 ||
+                    !IsDartReturnEpilogue(
+                            view, cursor + sizeof(uint32_t),
+                            kDartReturnX22)) {
+                continue;
+            }
+            ++valid_caller_count;
+            match = cursor + sizeof(uint32_t);
+        }
+    }
+    if (direct_call_count != 1u || valid_caller_count != 1u) return false;
+    *result = match;
+    return true;
+}
+
+bool FindUniqueDartReturnEpilogue(
+        const ElfView& view, uintptr_t start, uintptr_t span,
+        uint32_t first, uintptr_t* result) {
+    if (result == nullptr || AddOverflows(start, span)) return false;
+    uintptr_t match = 0u;
+    size_t count = 0u;
+    for (uintptr_t cursor = start; cursor < start + span; cursor += 4u) {
+        if (!IsDartReturnEpilogue(view, cursor, first)) continue;
+        match = cursor;
+        ++count;
+    }
+    if (count != 1u) return false;
+    *result = match;
+    return true;
+}
+
+size_t CollectDartReturnEpilogues(
+        const ElfView& view, uintptr_t start, uintptr_t span, uint32_t first,
+        uintptr_t* results, size_t capacity) {
+    if (results == nullptr || capacity == 0u || AddOverflows(start, span)) {
+        return 0u;
+    }
+    size_t count = 0u;
+    for (uintptr_t cursor = start; cursor < start + span; cursor += 4u) {
+        if (!IsDartReturnEpilogue(view, cursor, first)) continue;
+        if (count >= capacity) return capacity + 1u;
+        results[count++] = cursor;
+    }
+    return count;
+}
+
 bool MatchOverviewEnter(const ElfView& view, uintptr_t offset,
                         uintptr_t unbox_target,
                         OverviewCandidate* candidate) {
@@ -698,6 +790,36 @@ bool ResolveDartFeatureProfile(
         return false;
     }
 
+    uintptr_t drawer_epilogue = 0u;
+    const uintptr_t enter_epilogue = enter.offset + 25u * 4u;
+    const uintptr_t exit_epilogue = exit.offset + 40u * 4u;
+    uintptr_t editing_false_epilogue = 0u;
+    uintptr_t editing_true_epilogues[4]{};
+    uintptr_t editing_false_epilogues[4]{};
+    if (!FindUniqueDrawerCallerEpilogue(
+                view, transition_offset, &drawer_epilogue) ||
+            !FindUniqueDartReturnEpilogue(
+                    view, editing.query_offset, 0x200u,
+                    kDartReturnFalse, &editing_false_epilogue) ||
+            editing_false_epilogue <= editing.query_offset ||
+            !IsDartReturnEpilogue(
+                    view, enter_epilogue, kDartReturnX22) ||
+            !IsDartReturnEpilogue(
+                    view, exit_epilogue, kDartReturnX22)) {
+        diagnostics->stage = ResolveStage::kRejectedEditing;
+        return false;
+    }
+    const size_t editing_true_count = CollectDartReturnEpilogues(
+            view, editing.query_offset,
+            editing_false_epilogue - editing.query_offset,
+            kDartReturnTrue, editing_true_epilogues, 4u);
+    if (editing_true_count == 0u || editing_true_count > 4u) {
+        diagnostics->stage = ResolveStage::kRejectedEditing;
+        return false;
+    }
+    editing_false_epilogues[0] = editing_false_epilogue;
+    constexpr size_t editing_false_count = 1u;
+
     storage->profile = launcher_profile;
     auto& profile = storage->profile;
     profile.dart_snapshot_instructions_offset = instructions_offset;
@@ -743,6 +865,17 @@ bool ResolveDartFeatureProfile(
             sizeof(storage->editing_query_prologue);
     profile.dart_editing_query_return_offset_a = editing.return_offset_a;
     profile.dart_editing_query_return_offset_b = editing.return_offset_b;
+    profile.dart_drawer_transition_epilogue_offset = drawer_epilogue;
+    profile.dart_overview_enter_epilogue_offset = enter_epilogue;
+    profile.dart_overview_exit_epilogue_offset = exit_epilogue;
+    memcpy(profile.dart_editing_true_epilogue_offsets,
+           editing_true_epilogues,
+           editing_true_count * sizeof(editing_true_epilogues[0]));
+    profile.dart_editing_true_epilogue_count = editing_true_count;
+    memcpy(profile.dart_editing_false_epilogue_offsets,
+           editing_false_epilogues,
+           editing_false_count * sizeof(editing_false_epilogues[0]));
+    profile.dart_editing_false_epilogue_count = editing_false_count;
 
     diagnostics->drawer_progress_end_offset = drawer.offset;
     diagnostics->drawer_transition_complete_offset = transition_offset;
@@ -752,6 +885,17 @@ bool ResolveDartFeatureProfile(
     diagnostics->editing_query_offset = editing.query_offset;
     diagnostics->editing_query_return_offset_a = editing.return_offset_a;
     diagnostics->editing_query_return_offset_b = editing.return_offset_b;
+    diagnostics->drawer_transition_epilogue_offset = drawer_epilogue;
+    diagnostics->overview_enter_epilogue_offset = enter_epilogue;
+    diagnostics->overview_exit_epilogue_offset = exit_epilogue;
+    memcpy(diagnostics->editing_true_epilogue_offsets,
+           editing_true_epilogues,
+           editing_true_count * sizeof(editing_true_epilogues[0]));
+    diagnostics->editing_true_epilogue_count = editing_true_count;
+    memcpy(diagnostics->editing_false_epilogue_offsets,
+           editing_false_epilogues,
+           editing_false_count * sizeof(editing_false_epilogues[0]));
+    diagnostics->editing_false_epilogue_count = editing_false_count;
     diagnostics->all_apps_state_slot_offset = drawer.all_apps_slot;
     diagnostics->home_state_slot_offset = drawer.home_slot;
     diagnostics->stage = ResolveStage::kComplete;

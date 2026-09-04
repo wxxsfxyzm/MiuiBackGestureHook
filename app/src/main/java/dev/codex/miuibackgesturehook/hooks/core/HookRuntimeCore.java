@@ -348,6 +348,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final String EXTRA_INPUT_ARBITER_READY = "input_arbiter_ready";
     protected static final String EXTRA_INPUT_ARBITER_GENERATION =
             "input_arbiter_generation";
+    protected static final String EXTRA_LAUNCHER_STATE_OWNER_EPOCH =
+            "launcher_state_owner_epoch";
     protected static final String EXTRA_CONTEXTUAL_SEARCH_ENABLED =
             "contextual_search_enabled";
     protected static final String EXTRA_INPUT_ACCEPTED = "input_accepted";
@@ -525,6 +527,7 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile boolean miuiDrawerVisible;
     protected volatile boolean miuiFolderVisible;
     protected volatile boolean miuiLauncherEditing;
+    protected volatile long miuiLauncherDartStateOwnerEpoch;
     protected volatile boolean miuiLauncherXiaoAiVisible;
     protected volatile boolean miuiHomeEditingStatePublished;
     protected volatile boolean miuiLauncherOpenActive;
@@ -1216,6 +1219,7 @@ public abstract class HookRuntimeCore extends XposedModule {
         public final int displayId;
         public final int edge;
         public final long generation;
+        public final long launcherStateOwnerEpoch;
         public final long receivedUptime;
         public final long miuiHomeOpenBreakGenerationAtDown;
         public final Object miuiHomeOpenBreakAnimationAtDown;
@@ -1224,12 +1228,30 @@ public abstract class HookRuntimeCore extends XposedModule {
                                           int source, int displayId, int edge,
                                           long generation) {
             this(eventId, downTime, deviceId, source, displayId, edge,
-                    generation, 0L, null);
+                    generation, 0L, 0L, null);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation,
+                                          long launcherStateOwnerEpoch) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, launcherStateOwnerEpoch, 0L, null);
         }
 
         public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
                                           int source, int displayId, int edge,
                                           long generation, long openBreakGeneration,
+                                          Object openBreakAnimation) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, 0L, openBreakGeneration, openBreakAnimation);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation,
+                                          long launcherStateOwnerEpoch,
+                                          long openBreakGeneration,
                                           Object openBreakAnimation) {
             this.eventId = eventId;
             this.downTime = downTime;
@@ -1238,6 +1260,7 @@ public abstract class HookRuntimeCore extends XposedModule {
             this.displayId = displayId;
             this.edge = edge;
             this.generation = generation;
+            this.launcherStateOwnerEpoch = launcherStateOwnerEpoch;
             this.receivedUptime = SystemClock.uptimeMillis();
             this.miuiHomeOpenBreakGenerationAtDown = openBreakGeneration;
             this.miuiHomeOpenBreakAnimationAtDown = openBreakAnimation;

@@ -305,6 +305,61 @@ def resolve_dart_runtime_profile(
             f"graph={len(editing)}"
         )
     _editing_refresh, editing_query, editing_return_a, editing_return_b = editing[0]
+
+    return_tail = (0xAA1D03EF, 0xA8C179FD, 0xD65F03C0)
+
+    def return_epilogues(start: int, span: int, first: int) -> list[int]:
+        result = []
+        for rva in range(start, start + span, 4):
+            if words(rva, 4) == [first, *return_tail]:
+                result.append(rva)
+        return result
+
+    drawer_callers = []
+    for start, end in executable_ranges:
+        executable_words = words(start, (end - start) // 4)
+        for index, instruction in enumerate(executable_words):
+            caller = start + index * 4
+            if bl_target(caller, instruction) == transition[0]:
+                drawer_callers.append(caller)
+    drawer_caller_prefix = [
+        0xA9BF79FD, 0xAA0F03FD, 0xF9400FA0,
+        0xB8417001, 0x8B1C8021, 0xB840F020,
+        0x8B1C8000, 0xAA0003E1, 0xF9400BA2,
+    ]
+    drawer_epilogue = (
+        drawer_callers[0] + 4 if len(drawer_callers) == 1 else 0
+    )
+    enter_epilogue = selected_enter[0] + 25 * 4
+    exit_epilogue = selected_exit[0] + 40 * 4
+    editing_false_epilogues = return_epilogues(
+        editing_query, 0x200, 0x9100C2C0
+    )
+    editing_true_epilogues = (
+        return_epilogues(
+            editing_query,
+            editing_false_epilogues[0] - editing_query,
+            0x910082C0,
+        )
+        if len(editing_false_epilogues) == 1
+        else []
+    )
+    if (
+        len(drawer_callers) != 1
+        or words(drawer_callers[0] - len(drawer_caller_prefix) * 4,
+                 len(drawer_caller_prefix)) != drawer_caller_prefix
+        or words(drawer_epilogue, 4) != [0xAA1603E0, *return_tail]
+        or words(enter_epilogue, 4) != [0xAA1603E0, *return_tail]
+        or words(exit_epilogue, 4) != [0xAA1603E0, *return_tail]
+        or not 1 <= len(editing_true_epilogues) <= 4
+        or len(editing_false_epilogues) != 1
+    ):
+        raise ValueError(
+            "Dart resolver return epilogues: "
+            f"drawer_callers={len(drawer_callers)} "
+            f"editing_true={len(editing_true_epilogues)} "
+            f"editing_false={len(editing_false_epilogues)}"
+        )
     return {
         "progress_end_offset": drawer_rva,
         "transition_complete_offset": transition[0],
@@ -315,6 +370,11 @@ def resolve_dart_runtime_profile(
         "editing_query_offset": editing_query,
         "editing_query_return_offset_a": editing_return_a,
         "editing_query_return_offset_b": editing_return_b,
+        "drawer_transition_epilogue_offset": drawer_epilogue,
+        "overview_enter_epilogue_offset": enter_epilogue,
+        "overview_exit_epilogue_offset": exit_epilogue,
+        "editing_true_epilogue_offsets": editing_true_epilogues,
+        "editing_false_epilogue_offsets": editing_false_epilogues,
     }
 
 

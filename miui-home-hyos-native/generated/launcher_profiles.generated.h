@@ -99,6 +99,13 @@ inline constexpr LauncherProfile kProfile6144 = {
         0xe77338u,
         0xe77340u,
         3u,
+        0u,
+        0u,
+        0u,
+        {},
+        0u,
+        {},
+        0u,
 };
 
 inline constexpr uint8_t kIdentity4371AcceptedPilferCall0[] = {
@@ -204,6 +211,13 @@ inline constexpr LauncherProfile kProfile4371 = {
         0x13cd7e8u,
         0x13cd7f0u,
         3u,
+        0u,
+        0u,
+        0u,
+        {},
+        0u,
+        {},
+        0u,
 };
 
 inline constexpr uint8_t kIdentity5334AppEntryPoint0[] = {
@@ -307,6 +321,13 @@ inline constexpr LauncherProfile kProfile5334 = {
         0x132ab78u,
         0x132ab80u,
         0u,
+        0u,
+        0u,
+        0u,
+        {},
+        0u,
+        {},
+        0u,
 };
 
 inline constexpr uint8_t kIdentity5402AppEntryPoint0[] = {
@@ -388,6 +409,13 @@ inline constexpr LauncherProfile kProfile5402 = {
         0x12b8450u,
         0x132fa00u,
         0x132fa08u,
+        0u,
+        0u,
+        0u,
+        0u,
+        {},
+        0u,
+        {},
         0u,
 };
 
