@@ -2,6 +2,7 @@
 .cxx/
 .kotlin/
 .idea/
+.DS_Store
 .tmp-api/
 build/
 local.properties
