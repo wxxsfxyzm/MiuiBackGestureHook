@@ -2923,9 +2923,8 @@ public class SystemUiImpl extends SystemUiInputImpl {
         PreparedBackTransitionHold hold;
         try {
             Object info = chain.getArg(1);
-            Object type = readTransitionInfoType(info);
-            if (!(type instanceof Number)
-                    || ((Number) type).intValue() != TRANSIT_PREDICTIVE_BACK) {
+            Number type = readTransitionInfoType(info);
+            if (type == null || type.intValue() != TRANSIT_PREDICTIVE_BACK) {
                 return chain.proceed();
             }
             if (!(chain.getArg(2) instanceof SurfaceControl.Transaction)

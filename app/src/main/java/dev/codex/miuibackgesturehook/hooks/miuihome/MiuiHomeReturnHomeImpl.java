@@ -3,8 +3,7 @@ package dev.codex.miuibackgesturehook.hooks.miuihome;
 import android.content.Context;
 import android.os.IBinder;
 
-public abstract class MiuiHomeReturnHomeImpl
-        extends MiuiHomeReturnHomeLifecycleImpl {
+public abstract class MiuiHomeReturnHomeImpl extends MiuiHomeReturnHomeLifecycleImpl {
     protected abstract void handleMiuiHomeReturnHomeBinderDeath(
             MiuiHomeReturnHomeController controller);
     protected abstract void finishDeferredMiuiHomeReturnHomeController(

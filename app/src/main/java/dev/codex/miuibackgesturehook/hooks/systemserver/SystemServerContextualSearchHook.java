@@ -34,7 +34,8 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
 
     private final ThreadLocal<Boolean> contextualSearchBridgeInvocation = new ThreadLocal<>();
     private final AtomicInteger contextualSearchBridgeCallsInFlight = new AtomicInteger();
-    private final AtomicInteger contextualSearchBridgeAcceptedCalls = new AtomicInteger();
+    private final AtomicInteger contextualSearchStartAcceptedCalls = new AtomicInteger();
+    private final AtomicInteger contextualSearchProviderAcceptedCalls = new AtomicInteger();
     private volatile PackageManager contextualSearchPackageManager;
     private volatile int contextualSearchPackageResourceId;
     private volatile SharedPreferences contextualSearchPreferences;
@@ -317,8 +318,14 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
         Boolean previous = contextualSearchBridgeInvocation.get();
         contextualSearchBridgeCallsInFlight.incrementAndGet();
         contextualSearchBridgeInvocation.set(Boolean.TRUE);
-        if (contextualSearchBridgeAcceptedCalls.incrementAndGet() == 1) {
-            log(Log.INFO, TAG, "Accepted contextual-search bridge call"
+        AtomicInteger acceptedCalls = GOOGLE_CONTEXTUAL_SEARCH_PACKAGE.equals(requiredPackage)
+                ? contextualSearchProviderAcceptedCalls
+                : contextualSearchStartAcceptedCalls;
+        if (acceptedCalls.incrementAndGet() == 1) {
+            String boundary = GOOGLE_CONTEXTUAL_SEARCH_PACKAGE.equals(requiredPackage)
+                    ? "Accepted contextual-search provider callback"
+                    : "Accepted contextual-search bridge call";
+            log(Log.INFO, TAG, boundary
                     + ", callerPackage=" + requiredPackage
                     + ", method=" + chain.getExecutable());
         }

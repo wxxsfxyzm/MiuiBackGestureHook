@@ -1,5 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.util.Log;
@@ -10,10 +11,7 @@ import dev.codex.miuibackgesturehook.util.Hooker;
 import dev.codex.miuibackgesturehook.util.HookerBridge;
 import io.github.libxposed.api.XposedInterface;
 
-@Hooker.XposedHooker(
-        name = "MiuiHomeGestureInputHook",
-        targets = "com.miui.home",
-        order = 80)
+@Hooker.XposedHooker(name = "MiuiHomeGestureInputHook", targets = "com.miui.home", order = 80)
 public final class MiuiHomeGestureInputHook extends HookerBridge {
     private static final String TAG = "MiuiHomeGestureInputHook";
     private final MiuiHomeImpl implementation = new MiuiHomeImpl();
@@ -38,6 +36,18 @@ public final class MiuiHomeGestureInputHook extends HookerBridge {
     public void onPackageLoad() {
         implementation.start();
         try {
+            // This hooker owns the MiuiHomeImpl instance that handles the accepted-DOWN
+            // boundary. Register its arbiter receiver during cold startup so the initial
+            // SystemUI readiness publication is available before the first gesture.
+            Context launcherContext =
+                    implementation.resolveCurrentApplicationContext(classLoader);
+            if (launcherContext != null) {
+                implementation.ensureMiuiHomeInputArbiterReceiver(launcherContext);
+            } else {
+                log(Log.WARN, TAG,
+                        "MiuiHome application context is not available yet; "
+                                + "input arbiter will retry from GestureStub");
+            }
             Class<?> gestureStubClass = Class.forName(
                     MIUI_HOME_GESTURE_STUB, false, classLoader);
             runOptional("MiuiHome trigger region",

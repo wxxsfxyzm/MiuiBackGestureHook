@@ -20,7 +20,7 @@ public interface Hooker {
     @interface XposedHooker {
         String name();
         String[] targets();
-        int order();
+        int order() default 0;
     }
 
     void onPackageLoad();

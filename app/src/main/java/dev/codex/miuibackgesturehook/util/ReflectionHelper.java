@@ -2,6 +2,7 @@ package dev.codex.miuibackgesturehook.util;
 
 import android.window.TransitionInfo;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -20,8 +21,7 @@ public final class ReflectionHelper {
     private static final Set<MemberKey> MISSING_MEMBERS =
             ConcurrentHashMap.newKeySet();
 
-    private ReflectionHelper() {
-    }
+    private ReflectionHelper() {}
 
     public static Object readField(Object target, String fieldName)
             throws NoSuchFieldException, IllegalAccessException {
@@ -196,6 +196,42 @@ public final class ReflectionHelper {
             }
         }
         return null;
+    }
+
+    public static Class<?> findClass(String className, ClassLoader classLoader) throws ClassNotFoundException {
+        return Class.forName(className, false, classLoader);
+    }
+
+    public static Method findCapabilityMethod(Class<?> actionClass) {
+        Constructor<?> matchingConstructor = null;
+        for (Constructor<?> constructor : actionClass.getDeclaredConstructors()) {
+            if (constructor.getParameterCount() == 3) {
+                if (matchingConstructor != null) {
+                    return null;
+                }
+                matchingConstructor = constructor;
+            }
+        }
+        if (matchingConstructor == null) {
+            return null;
+        }
+        Class<?>[] parameters = matchingConstructor.getParameterTypes();
+        return parameters.length == 3
+                ? findExactBooleanMethod(parameters[1], "a") : null;
+    }
+
+    public static Method findExactBooleanMethod(Class<?> owner, String name) {
+        try {
+            Method method = owner.getDeclaredMethod(name);
+            if (method.getReturnType() != Boolean.TYPE
+                    || method.getParameterCount() != 0) {
+                return null;
+            }
+            method.setAccessible(true);
+            return method;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     public static Object invokeCompatible(Object target, String methodName, Object... args)
