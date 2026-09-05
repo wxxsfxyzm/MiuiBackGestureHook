@@ -33,7 +33,7 @@ public final class HookRegistryProcessor extends AbstractProcessor {
     private static final String GENERATED_PACKAGE = "dev.codex.miuibackgesturehook.util.generated";
     private static final String GENERATED_CLASS = "HookRegistry";
 
-    private record HookEntry(String className, String name, List<String> targets) {}
+    private record HookEntry(String className, String name, int order, List<String> targets) {}
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
@@ -79,7 +79,8 @@ public final class HookRegistryProcessor extends AbstractProcessor {
             return false;
         }
 
-        entries.sort(Comparator.comparing(HookEntry::className));
+        entries.sort(Comparator.comparingInt(HookEntry::order)
+                .thenComparing(HookEntry::className));
 
         Map<String, HookEntry> unique = new LinkedHashMap<>();
 
@@ -111,6 +112,7 @@ public final class HookRegistryProcessor extends AbstractProcessor {
         }
 
         String name = null;
+        int order = 0;
         List<String> targets = new ArrayList<>();
 
         var values = processingEnv.getElementUtils().getElementValuesWithDefaults(annotation);
@@ -140,6 +142,12 @@ public final class HookRegistryProcessor extends AbstractProcessor {
                         }
                     }
                 }
+
+                case "order" -> {
+                    if (value instanceof Integer integer) {
+                        order = integer;
+                    }
+                }
             }
         }
 
@@ -153,7 +161,8 @@ public final class HookRegistryProcessor extends AbstractProcessor {
             return null;
         }
 
-        return new HookEntry(type.getQualifiedName().toString(), name, List.copyOf(targets));
+        return new HookEntry(type.getQualifiedName().toString(), name, order,
+                List.copyOf(targets));
     }
 
     private void generate(List<HookEntry> entries) {

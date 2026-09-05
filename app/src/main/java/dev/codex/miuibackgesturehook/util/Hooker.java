@@ -1,6 +1,6 @@
 package dev.codex.miuibackgesturehook.util;
 
-import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 
 import androidx.annotation.NonNull;
 
@@ -12,7 +12,6 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 import io.github.libxposed.api.XposedInterface;
-import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 public interface Hooker {
@@ -21,9 +20,15 @@ public interface Hooker {
     @interface XposedHooker {
         String name();
         String[] targets();
+        int order();
     }
 
     void onPackageLoad();
+
+    /** Returns whether this hooker applies to the process and platform it was attached to. */
+    default boolean shouldInstallHooker() {
+        return true;
+    }
 
     /**
      * <p>Gets notified when the hooker is about to be reloaded.</p>
@@ -60,5 +65,6 @@ public interface Hooker {
     default void onHotReloaded(@NonNull XposedModuleInterface.HotReloadedParam param) {
     }
 
-    void onAttached(String packageName, ClassLoader classLoader, XposedInterface xposed);
+    @MustBeInvokedByOverriders
+    void onAttached(String packageName, ClassLoader classLoader, XposedInterface xposed, ApplicationInfo applicationInfo);
 }

@@ -1,5 +1,7 @@
 package dev.codex.miuibackgesturehook;
 
+import android.app.ActivityThread;
+import android.content.pm.ApplicationInfo;
 import android.os.Bundle;
 import android.util.Log;
 
@@ -22,12 +24,12 @@ public final class MiuiBackGestureHook extends XposedModule {
     private static final String TAG = "MiuiBackGestureHook";
     @Override
     public void onSystemServerStarting(@NonNull SystemServerStartingParam param) {
-        installFor("system", param.getClassLoader());
+        installFor("system", param.getClassLoader(), null);
     }
 
     @Override
     public void onPackageReady(@NonNull PackageReadyParam param) {
-        installFor(param.getPackageName(), param.getDefaultClassLoader());
+        installFor(param.getPackageName(), param.getDefaultClassLoader(), param.getApplicationInfo());
     }
 
     @Override
@@ -88,8 +90,20 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // First, Let's create hooker instance
                 dev.codex.miuibackgesturehook.util.Hooker hook = HookRegistry.getHooker(entry.id());
 
+                if (!hook.shouldInstallHooker()) {
+                    log(Log.INFO, TAG, "Skipped " + entry.name()
+                            + " for " + param.getProcessName());
+                    continue;
+                }
+
+                Object hookState = state.get(entry.id());
+                if (!(hookState instanceof Map<?, ?> hookStateMap)) {
+                    throw new IllegalStateException("Illegal hookState! "+hookState);
+                }
+                Object savedClassLoader = hookStateMap.get("DEFAULT_CLASS_LOADER");
+
                 // Next, notify hooker for classLoader and currentPackageName
-                hook.onAttached(param.getProcessName(), null, this);
+                hook.onAttached(param.getProcessName(), (ClassLoader) savedClassLoader, this, ActivityThread.currentApplication().getApplicationInfo());
 
                 // Call hooker's onHotReloaded func for hotReload support
                 hook.onHotReloaded(new HotReloadedParam() {
@@ -124,6 +138,9 @@ public final class MiuiBackGestureHook extends XposedModule {
                     }
                 });
 
+                // Next, Reinstall the hook group before restoring its non-hook state.
+                hook.onPackageLoad();
+
                 // Last, add to registeredHooks for future use
                 registeredHooks.put(entry.id(), hook);
                 log(Log.INFO, TAG, "Hook #" + entry.name() + " hotReloaded in " + param.getProcessName());
@@ -133,7 +150,7 @@ public final class MiuiBackGestureHook extends XposedModule {
         }
     }
 
-    private void installFor(String targetPackage, ClassLoader targetClassLoader) {
+    private void installFor(String targetPackage, ClassLoader targetClassLoader, ApplicationInfo applicationInfo) {
         List<HookRegistry.Entry> matchingHooks = new ArrayList<>();
         for (HookRegistry.Entry entry : HookRegistry.entries()) {
             if (entry.targets().contains(targetPackage)) matchingHooks.add(entry);
@@ -145,8 +162,14 @@ public final class MiuiBackGestureHook extends XposedModule {
                 // First, Let's create hooker instance
                 dev.codex.miuibackgesturehook.util.Hooker hook = HookRegistry.getHooker(entry.id());
 
+                if (!hook.shouldInstallHooker()) {
+                    log(Log.INFO, TAG, "Skipped " + entry.name()
+                            + " for " + targetPackage);
+                    continue;
+                }
+
                 // Next, notify hooker for classLoader and currentPackageName
-                hook.onAttached(targetPackage, targetClassLoader, this);
+                hook.onAttached(targetPackage, targetClassLoader, this, applicationInfo);
 
                 // Call hooker's onPackageLoad
                 hook.onPackageLoad();

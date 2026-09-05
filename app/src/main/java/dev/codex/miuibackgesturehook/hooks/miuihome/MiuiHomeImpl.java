@@ -1,5 +1,11 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeGestureInputHook.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeOpenInterruptionHook.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeStateBridgeHook.*;
+
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
 import android.annotation.SuppressLint;
@@ -41,10 +47,112 @@ import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
 
-public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
+public class MiuiHomeImpl extends MiuiHomeReturnHomeImpl {
+    private final AtomicBoolean miuiHomeReloadReleased = new AtomicBoolean();
+
+    @Override
+    public void onPackageLoad() {
+        // Functional MiuiHome hooks are installed by the annotated hook classes.
+    }
+
+    @Override
+    public boolean isHotReloadSafe() {
+        if (!super.isHotReloadSafe()) {
+            return false;
+        }
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        return controller == null || !controller.blocksControllerReplacement();
+    }
+
+    @Override
+    public void releaseForHotReload() {
+        super.releaseForHotReload();
+        if (!miuiHomeReloadReleased.compareAndSet(false, true)) {
+            return;
+        }
+        miuiHomeLocalHandoffToken.set(null);
+        invalidateMiuiHomeLauncherOpenSnapshot(null, "hotReload");
+        detachMiuiHomeReturnHome("hotReload", true);
+        miuiHomePendingNativeGeometry.remove();
+        returnHomeFinishTransferCandidate.remove();
+        miuiHomeOpenBreakCallbackEpoch.incrementAndGet();
+        unregisterMiuiHomeOpenBreakCommandReceiver();
+        unregisterMiuiHomeInputArbiterReceiver();
+        releaseMiuiHomeGestureTriggerPreferenceListener();
+        miuiHomeOpenBreakController = null;
+        miuiHomeOpenBreakStateManager = null;
+        miuiHomeOpenBreakAnimationIdentity = null;
+        miuiHomeOpenBreakAnimationActive = false;
+        miuiHomeOpenBreakGenerationPrepared = false;
+        miuiHomeOpenBreakCommandPending = false;
+        miuiHomeReturnHomeBinder = null;
+    }
+
+    public Object miuiHomeOpenBreakControllerState() {
+        return miuiHomeOpenBreakController;
+    }
+
+    public void miuiHomeOpenBreakControllerState(Object value) {
+        miuiHomeOpenBreakController = value;
+    }
+
+    public Context miuiHomeOpenBreakContextState() {
+        return miuiHomeOpenBreakContext;
+    }
+
+    public void miuiHomeOpenBreakContextState(Context value) {
+        miuiHomeOpenBreakContext = value;
+    }
+
+    public long miuiHomeOpenBreakGenerationState() {
+        return miuiHomeOpenBreakGeneration;
+    }
+
+    public void miuiHomeOpenBreakGenerationState(long value) {
+        miuiHomeOpenBreakGeneration = value;
+        miuiHomeOpenBreakGenerationIds.set(Math.max(
+                miuiHomeOpenBreakGenerationIds.get(), value));
+    }
+
+    public Object miuiHomeOpenBreakAnimationState() {
+        return miuiHomeOpenBreakAnimationIdentity;
+    }
+
+    public void miuiHomeOpenBreakAnimationState(Object value) {
+        miuiHomeOpenBreakAnimationIdentity = value;
+    }
+
+    public boolean miuiHomeOpenBreakPreparedState() {
+        return miuiHomeOpenBreakGenerationPrepared;
+    }
+
+    public void miuiHomeOpenBreakPreparedState(boolean value) {
+        miuiHomeOpenBreakGenerationPrepared = value;
+    }
+
+    public boolean miuiHomeOpenBreakActiveState() {
+        return miuiHomeOpenBreakAnimationActive;
+    }
+
+    public void miuiHomeOpenBreakActiveState(boolean value) {
+        miuiHomeOpenBreakAnimationActive = value;
+    }
+
+    public boolean miuiHomeOpenBreakCommandPendingState() {
+        return miuiHomeOpenBreakCommandPending;
+    }
+
+    public void miuiHomeOpenBreakCommandPendingState(boolean value) {
+        miuiHomeOpenBreakCommandPending = value;
+    }
+
+    public void restoreMiuiHomeReturnHomeBinderState(IBinder binder) {
+        miuiHomeReturnHomeBinder = binder;
+    }
     protected final Object miuiHomeGestureTriggerPreferenceLock = new Object();
     protected final Object miuiHomeGestureTriggerStubLock = new Object();
     protected final Set<View> miuiHomeGestureTriggerStubs =
@@ -66,9 +174,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             throws NoSuchMethodException {
         Method method = gestureStubClass.getDeclaredMethod("getGestureStubWindowParam");
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_gesture_stub_trigger_region")
-                .intercept(this::customizeMiuiHomeGestureStubTriggerRegion));
+        hook(method)
+                .intercept(this::customizeMiuiHomeGestureStubTriggerRegion);
     }
 
     protected void hookMiuiHomeGestureStubTriggerTouchRegion(Class<?> gestureStubClass)
@@ -79,9 +186,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 continue;
             }
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("miui_home_gesture_stub_trigger_touch_region")
-                    .intercept(this::customizeMiuiHomeGestureStubTriggerTouchRegion));
+            hook(method)
+                    .intercept(this::customizeMiuiHomeGestureStubTriggerTouchRegion);
             return;
         }
         throw new NoSuchMethodException(MIUI_HOME_GESTURE_STUB + ".updateTouchRegion/1");
@@ -91,9 +197,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             throws NoSuchMethodException {
         Method method = gestureStubClass.getDeclaredMethod("showGestureStub");
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_gesture_stub_show")
-                .intercept(this::restoreMiuiHomeGestureStubShow));
+        hook(method)
+                .intercept(this::restoreMiuiHomeGestureStubShow);
     }
 
     protected void hookMiuiHomeGestureInputArbiter(Class<?> processorClass,
@@ -102,9 +207,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Method method = processorClass.getDeclaredMethod(
                 "onPointerEvent", MotionEvent.class, gestureStubClass);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_gesture_input_arbiter")
-                .intercept(this::arbitrateMiuiHomeAcceptedInput));
+        hook(method)
+                .intercept(this::arbitrateMiuiHomeAcceptedInput);
     }
 
     protected void hookMiuiHomeRecentsActualState(Class<?> recentsContainerClass)
@@ -112,18 +216,16 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Method method = recentsContainerClass.getDeclaredMethod(
                 "notifyRecentTaskState", Context.class, boolean.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_recents_actual_state_v2")
-                .intercept(this::mirrorMiuiHomeRecentsActualState));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeRecentsActualState);
     }
 
     protected void hookMiuiHomeRecentsTaskLaunch(Class<?> taskViewClass)
             throws NoSuchMethodException {
         Method method = taskViewClass.getDeclaredMethod("onClick", View.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_recents_task_launch")
-                .intercept(this::mirrorMiuiHomeRecentsTaskLaunch));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeRecentsTaskLaunch);
     }
 
     protected void hookMiuiHomeFullscreenState(ClassLoader classLoader)
@@ -133,9 +235,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Method method = stateNotifyClass.getDeclaredMethod("sendStateBroadcast",
                 Context.class, String.class, String.class, String.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_fullscreen_state")
-                .intercept(this::mirrorMiuiHomeFullscreenState));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeFullscreenState);
     }
 
     protected void hookMiuiHomeReturnHomeInitialize(ClassLoader classLoader)
@@ -145,9 +246,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Method method = overviewProxyClass.getDeclaredMethod(
                 "lambda$onInitialize$0", Bundle.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_return_home_initialize")
-                .intercept(this::registerMiuiHomeReturnHome));
+        hook(method)
+                .intercept(this::registerMiuiHomeReturnHome);
     }
 
     protected void hookMiuiHomeReturnHomeLocalHandoff(ClassLoader classLoader)
@@ -158,9 +258,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             if ("getLastAnimParam".equals(method.getName())
                     && method.getParameterCount() == 1) {
                 method.setAccessible(true);
-                recordHookHandle(hook(method)
-                        .setId("miui_home_return_home_local_handoff")
-                        .intercept(this::provideMiuiHomeReturnHomeLocalHandoff));
+                hook(method)
+                        .intercept(this::provideMiuiHomeReturnHomeLocalHandoff);
                 moduleLog(Log.INFO, TAG, "Hooked Xiaomi local return-home handoff");
                 return;
             }
@@ -180,17 +279,15 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             Method setTo = wallpaperElementClass.getDeclaredMethod(
                     "setTo", wallpaperParamsClass);
             setTo.setAccessible(true);
-            recordHookHandle(hook(setTo)
-                    .setId("miui_home_return_home_wallpaper_set")
-                    .intercept(this::observeMiuiHomeReturnHomeWallpaperSet));
+            hook(setTo)
+                    .intercept(this::observeMiuiHomeReturnHomeWallpaperSet);
         }
         if (hookAnim) {
             Method animTo = wallpaperElementClass.getDeclaredMethod(
                     "animTo", wallpaperParamsClass);
             animTo.setAccessible(true);
-            recordHookHandle(hook(animTo)
-                    .setId("miui_home_return_home_wallpaper_anim")
-                    .intercept(this::observeMiuiHomeReturnHomeWallpaperAnim));
+            hook(animTo)
+                    .intercept(this::observeMiuiHomeReturnHomeWallpaperAnim);
         }
         moduleLog(Log.INFO, TAG, "Hooked Xiaomi return-home wallpaper ownership"
                 + ", set=" + hookSet + ", anim=" + hookAnim);
@@ -200,27 +297,24 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             throws NoSuchMethodException {
         Method method = breakControllerClass.getDeclaredMethod("enableBackBreakOpenAnim");
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_open_break_enable")
-                .intercept(this::captureMiuiHomeOpenBreakEnable));
+        hook(method)
+                .intercept(this::captureMiuiHomeOpenBreakEnable);
     }
 
     protected void hookMiuiHomeOpenBreakAnimationStart(Class<?> listenerClass)
             throws NoSuchMethodException {
         Method method = listenerClass.getDeclaredMethod("onAnimationStart", Object.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_open_break_animation_start")
-                .intercept(this::mirrorMiuiHomeOpenBreakAnimationStart));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeOpenBreakAnimationStart);
     }
 
     protected void hookMiuiHomeOpenBreakAnimationEnd(Class<?> listenerClass)
             throws NoSuchMethodException {
         Method method = listenerClass.getDeclaredMethod("onAnimationEnd", Object.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_open_break_animation_end")
-                .intercept(this::mirrorMiuiHomeOpenBreakAnimationEnd));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeOpenBreakAnimationEnd);
     }
 
     protected void hookMiuiHomeLauncherOpenSnapshotTargets(
@@ -240,10 +334,9 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 "refreshTransitionCallbackHelper", remoteTargetArrayClass,
                 helperClass, remoteTargetArrayClass);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_open_snapshot_targets")
+        hook(method)
                 .intercept(
-                        this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound));
+                        this::captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound);
         moduleLog(Log.INFO, TAG,
                 "Hooked Xiaomi launcher OPEN remote-target binding");
     }
@@ -254,9 +347,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 classLoader);
         Method method = stateManagerClass.getDeclaredMethod("animToFullScreen", View.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_reused_close_open")
-                .intercept(this::restoreMiuiHomeReusedCloseOpen));
+        hook(method)
+                .intercept(this::restoreMiuiHomeReusedCloseOpen);
     }
 
     protected void hookMiuiHomeTransitionContinuity(
@@ -271,9 +363,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             Method injectRemoteTransition = windowElementClass.getDeclaredMethod(
                     "injectRemoteTransition", remoteTransitionInfoClass);
             injectRemoteTransition.setAccessible(true);
-            recordHookHandle(hook(injectRemoteTransition)
-                    .setId("miui_home_return_home_element_transition")
-                    .intercept(this::prepareMiuiHomeElementTransitionContinuity));
+            hook(injectRemoteTransition)
+                    .intercept(this::prepareMiuiHomeElementTransitionContinuity);
         }
         if (hookElementLeashRearm) {
             Class<?> helperClass = Class.forName(
@@ -282,9 +373,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             Method clearOpenLeash = helperClass.getDeclaredMethod(
                     "clearTempSaveOpenLeash");
             clearOpenLeash.setAccessible(true);
-            recordHookHandle(hook(clearOpenLeash)
-                    .setId("miui_home_return_home_element_leash_rearm")
-                    .intercept(this::rearmMiuiHomeElementLeashAfterNativeClear));
+            hook(clearOpenLeash)
+                    .intercept(this::rearmMiuiHomeElementLeashAfterNativeClear);
         }
         if (hookElementAnimType) {
             Method animTo = null;
@@ -300,9 +390,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                         MIUI_HOME_WINDOW_ELEMENT + ".animTo(T)");
             }
             animTo.setAccessible(true);
-            recordHookHandle(hook(animTo)
-                    .setId("miui_home_return_home_element_anim_type")
-                    .intercept(this::observeMiuiHomeElementAnimType));
+            hook(animTo)
+                    .intercept(this::observeMiuiHomeElementAnimType);
         }
         moduleLog(Log.INFO, TAG, "Hooked MiuiHome transition continuity"
                 + ", elementTransition=" + hookElementTransition
@@ -322,37 +411,25 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     classLoader);
             Class<?> rectFParamsClass = Class.forName(
                     MIUI_HOME_RECTF_PARAMS, false, classLoader);
-            Method config;
-            try {
-                config = requireExactDeclaredMethod(
-                        implementorClass, "animTo$lambda$3", "void",
-                        rectFParamsClass.getName(),
-                        implementorClass.getName());
-            } catch (NoSuchMethodException oldSignature) {
-                config = requireExactDeclaredMethod(
-                        implementorClass, "animTo$lambda$3", "void",
-                        implementorClass.getName(),
-                        rectFParamsClass.getName());
-            }
-            recordHookHandle(hook(config)
-                    .setId("miui_home_return_home_anim_to_config")
-                    .intercept(this::observeMiuiHomeUnifiedAnimToConfigured));
+            Method config = requireExactDeclaredMethod(
+                    implementorClass, "animTo$lambda$3", "void",
+                    rectFParamsClass.getName(), implementorClass.getName());
+            hook(config)
+                    .intercept(this::observeMiuiHomeUnifiedAnimToConfigured);
         }
         if (hookFinishSource) {
             Method source = requireExactDeclaredMethod(
                     windowElementClass, "onFinishCompleted", "void");
-            recordHookHandle(hook(source)
-                    .setId("miui_home_return_home_finish_dispatch_source")
-                    .intercept(this::captureMiuiHomeUnifiedFinishDispatch));
+            hook(source)
+                    .intercept(this::captureMiuiHomeUnifiedFinishDispatch);
         }
         if (hookFinishApply) {
             Method apply = requireExactDeclaredMethod(
                     windowElementClass,
                     "onFinishCompleted$lambda$39", "void",
                     windowElementClass.getName());
-            recordHookHandle(hook(apply)
-                    .setId("miui_home_return_home_finish_dispatch_apply")
-                    .intercept(this::guardMiuiHomeUnifiedFinishDispatch));
+            hook(apply)
+                    .intercept(this::guardMiuiHomeUnifiedFinishDispatch);
         }
         moduleLog(Log.INFO, TAG, "Hooked MiuiHome unified finish epochs"
                 + ", animToConfig=" + hookAnimToConfig
@@ -387,39 +464,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                             + ".handleTransitionForHandlerType");
         }
         handlerMethod.setAccessible(true);
-        recordHookHandle(hook(handlerMethod)
-                .setId("miui_home_permission_activity_merge")
-                .intercept(this::preserveMiuiHomeOpenAcrossPermissionMerge));
-    }
-
-    protected Method requireExactDeclaredMethod(
-            Class<?> owner, String methodName, String returnTypeName,
-            String... parameterTypeNames) throws NoSuchMethodException {
-        for (Method method : owner.getDeclaredMethods()) {
-            if (!methodName.equals(method.getName())
-                    || !returnTypeName.equals(method.getReturnType().getName())) {
-                continue;
-            }
-            Class<?>[] parameterTypes = method.getParameterTypes();
-            if (parameterTypes.length != parameterTypeNames.length) {
-                continue;
-            }
-            boolean exact = true;
-            for (int index = 0; index < parameterTypes.length; index++) {
-                if (!parameterTypeNames[index].equals(
-                        parameterTypes[index].getName())) {
-                    exact = false;
-                    break;
-                }
-            }
-            if (exact) {
-                method.setAccessible(true);
-                return method;
-            }
-        }
-        throw new NoSuchMethodException(owner.getName() + "." + methodName
-                + "(" + String.join(",", parameterTypeNames) + "):"
-                + returnTypeName);
+        hook(handlerMethod)
+                .intercept(this::preserveMiuiHomeOpenAcrossPermissionMerge);
     }
 
     protected void hookMiuiHomeNativeGeometryUpdate(ClassLoader classLoader)
@@ -429,9 +475,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Method method = requireExactDeclaredMethod(owner, "onAnimUpdate", "void",
                 RectF.class.getName(), "float", "float",
                 MIUI_HOME_CORNER_RADII, MIUI_HOME_VALUE_CALLBACK);
-        recordHookHandle(hook(method)
-                .setId("miui_home_trace_on_anim_update")
-                .intercept(this::captureMiuiHomeNativeGeometry));
+        hook(method)
+                .intercept(this::captureMiuiHomeNativeGeometry);
     }
 
     protected void hookMiuiHomeNativeGeometryApply(ClassLoader classLoader)
@@ -443,9 +488,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 MIUI_HOME_SYNC_RT_SURFACE_APPLIER,
                 MIUI_HOME_SURFACE_PARAMS_ARRAY,
                 MIUI_HOME_TRANSACTION_COMPAT);
-        recordHookHandle(hook(method)
-                .setId("miui_home_trace_apply_surface_params")
-                .intercept(this::applyMiuiHomeNativeSurfaceParams));
+        hook(method)
+                .intercept(this::applyMiuiHomeNativeSurfaceParams);
     }
 
     protected void hookMiuiHomeGeometryFrames(
@@ -491,28 +535,20 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     MIUI_HOME_TRANSITION_UTIL + ".setupLeash");
         }
         setupLeash.setAccessible(true);
-        recordHookHandle(hook(setupLeash)
-                .setId("miui_home_trace_transition_setup_leash")
-                .intercept(this::armMiuiHomeTransitionStartGeometry));
+        hook(setupLeash)
+                .intercept(this::armMiuiHomeTransitionStartGeometry);
         moduleLog(Log.INFO, TAG,
                 "Installed MiuiHome transition start-geometry hook");
     }
 
     @SuppressLint("SoonBlockedPrivateApi")
-    protected void hookMiuiHomeStartTransactionApply(
-            Set<String> existingHookIds) {
-        String hookPrefix = "miui_home_trace_surface_transaction_";
-        if (existingHookIds != null && existingHookIds.stream()
-                .anyMatch(id -> id.startsWith(hookPrefix))) {
-            return;
-        }
+    protected void hookMiuiHomeStartTransactionApply() {
         try {
             Method method = SurfaceControl.Transaction.class.getDeclaredMethod(
                     "apply", boolean.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId(hookPrefix + "apply_boolean")
-                    .intercept(this::applyMiuiHomeStartGeometry));
+            hook(method)
+                    .intercept(this::applyMiuiHomeStartGeometry);
             moduleLog(Log.INFO, TAG,
                     "Installed MiuiHome start transaction apply hook");
         } catch (Throwable throwable) {
@@ -532,9 +568,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 shellTransitionCallbackClass, Boolean.class,
                 shellTransitionCallbackClass);
         cancelDirect.setAccessible(true);
-        recordHookHandle(hook(cancelDirect)
-                .setId("miui_home_return_home_cancel_direct")
-                .intercept(this::wrapMiuiHomeReturnHomeDirectCancel));
+        hook(cancelDirect)
+                .intercept(this::wrapMiuiHomeReturnHomeDirectCancel);
         moduleLog(Log.INFO, TAG,
                 "Hooked Xiaomi direct same-icon return-home cancellation");
     }
@@ -549,9 +584,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 "cancelAnim", String.class, boolean.class, boolean.class,
                 shellTransitionCallbackClass);
         cancelAnim.setAccessible(true);
-        recordHookHandle(hook(cancelAnim)
-                .setId("miui_home_return_home_same_icon_parallel")
-                .intercept(this::routeMiuiHomeReturnHomeSameIconParallel));
+        hook(cancelAnim)
+                .intercept(this::routeMiuiHomeReturnHomeSameIconParallel);
         moduleLog(Log.INFO, TAG,
                 "Hooked Xiaomi same-icon predictive CLOSE parallel routing");
     }
@@ -566,9 +600,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 "isOldElementReuseful", windowElementClass,
                 Intent.class, View.class);
         isOldElementReuseful.setAccessible(true);
-        recordHookHandle(hook(isOldElementReuseful)
-                .setId("miui_home_return_home_fresh_open")
-                .intercept(this::forceMiuiHomeReturnHomeFreshOpen));
+        hook(isOldElementReuseful)
+                .intercept(this::forceMiuiHomeReturnHomeFreshOpen);
         moduleLog(Log.INFO, TAG,
                 "Hooked Xiaomi non-reusable same-icon fresh OPEN selection");
     }
@@ -580,9 +613,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Class<?> stateClass = Class.forName(MIUI_HOME_LAUNCHER_STATE, false, classLoader);
         Method method = managerClass.getDeclaredMethod("onStateTransitionStart", stateClass);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("miui_home_drawer_state")
-                .intercept(this::mirrorMiuiHomeDrawerState));
+        hook(method)
+                .intercept(this::mirrorMiuiHomeDrawerState);
     }
 
     protected void hookMiuiHomeFolderState(ClassLoader classLoader,
@@ -599,15 +631,13 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     "afterFolderCloseBeforeAnim", boolean.class) : null;
             if (open != null) {
                 open.setAccessible(true);
-                recordHookHandle(hook(open)
-                        .setId("miui_home_folder_open_state")
-                        .intercept(this::mirrorMiuiHomeFolderOpened));
+                hook(open)
+                        .intercept(this::mirrorMiuiHomeFolderOpened);
             }
             if (close != null) {
                 close.setAccessible(true);
-                recordHookHandle(hook(close)
-                        .setId("miui_home_folder_close_state")
-                        .intercept(this::mirrorMiuiHomeFolderClosed));
+                hook(close)
+                        .intercept(this::mirrorMiuiHomeFolderClosed);
             }
             moduleLog(Log.INFO, TAG, "Hooked MiuiHome folder state"
                     + ", open=" + hookOpen + ", close=" + hookClose);
@@ -624,9 +654,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             Method method = launcherClass.getDeclaredMethod(
                     "notifyFsGestureHomeStatus", boolean.class, String.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("miui_home_freeform_back_touchability")
-                    .intercept(this::restoreMiuiHomeFreeformBackTouchability));
+            hook(method)
+                    .intercept(this::restoreMiuiHomeFreeformBackTouchability);
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "MiuiHome small-window back lifecycle unavailable",
                     throwable);
@@ -639,9 +668,8 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     MIUI_HOME_BASE_LAUNCHER, false, classLoader);
             Method method = launcherClass.getDeclaredMethod("notifyBackGestureStatus");
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("miui_home_editing_state")
-                    .intercept(this::mirrorMiuiHomeEditingState));
+            hook(method)
+                    .intercept(this::mirrorMiuiHomeEditingState);
         } catch (Throwable throwable) {
             // Editing callbacks are an additive launcher surface. Preserve all established
             // MiuiHome arbitration and return-home hooks on builds without this lifecycle point.
@@ -660,7 +688,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         miuiHomeOpenBreakGenerationPrepared = true;
         miuiHomeOpenBreakAnimationActive = false;
         miuiHomeOpenBreakCommandPending = false;
-        endedLauncherOpenWallpaperReset.set(null);
         refreshMiuiHomeOpenBreakAvailability(controller, "enable");
         return result;
     }
@@ -677,7 +704,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 animationListener, animationIdentity)) {
             return result;
         }
-        endedLauncherOpenWallpaperReset.set(null);
         invalidateMiuiHomeLauncherOpenSnapshot(null, "animationStart");
         if (!miuiHomeOpenBreakGenerationPrepared
                 || miuiHomeOpenBreakGeneration == 0L) {
@@ -731,8 +757,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 chain.getThisObject(), endedAnimationIdentity)) {
             return result;
         }
-        armEndedLauncherOpenWallpaperReset(
-                chain.getThisObject(), endedAnimationIdentity);
         invalidateMiuiHomeLauncherOpenSnapshot(
                 endedAnimationIdentity, "animationEnd");
         long callbackEpoch = miuiHomeOpenBreakCallbackEpoch.get();
@@ -753,149 +777,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     miuiHomeOpenBreakController, "animationEnd");
         });
         return result;
-    }
-
-    protected void armEndedLauncherOpenWallpaperReset(
-            Object animationListener, Object endedAnimationIdentity) {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            return;
-        }
-        try {
-            MiuiHomeAcceptedInputToken inputIdentity =
-                    miuiHomeAcceptedInputIdentity.get();
-            long callbackEpoch =
-                    miuiHomeOpenBreakCallbackEpoch.get();
-            Object stateManager = readField(
-                    animationListener, "this$0");
-            if (inputIdentity == null
-                    || stateManager == null
-                    || stateManager != miuiHomeOpenBreakStateManager
-                    || inputIdentity.miuiHomeOpenBreakGenerationAtDown
-                    != miuiHomeOpenBreakGeneration
-                    || inputIdentity.miuiHomeOpenBreakAnimationAtDown
-                    != endedAnimationIdentity
-                    || miuiHomeOpenBreakAnimationIdentity
-                    != endedAnimationIdentity
-                    || !miuiHomeOpenBreakAnimationActive
-                    || miuiHomeOpenBreakGenerationPrepared
-                    || miuiHomeOpenBreakCommandPending) {
-                return;
-            }
-            Object wallpaperElement = readField(
-                    stateManager, "wallpaperElement");
-            if (wallpaperElement == null
-                    || !MIUI_HOME_SYSTEM_WALLPAPER_ELEMENT.equals(
-                    wallpaperElement.getClass().getName())) {
-                return;
-            }
-            Class<?> wallpaperParamsClass = Class.forName(
-                    MIUI_HOME_WALLPAPER_PARAMS, false,
-                    wallpaperElement.getClass().getClassLoader());
-            Object companion = readStaticField(
-                    wallpaperParamsClass, "Companion");
-            Object homeParams = invokeAnyMethod(
-                    companion, "getHomeStateParams", new Object[0]);
-            Object homeZoomValue = invokeAnyMethod(
-                    homeParams, "getZoomOut", new Object[0]);
-            if (!(homeZoomValue instanceof Number)
-                    || miuiHomeAcceptedInputIdentity.get()
-                    != inputIdentity
-                    || miuiHomeOpenBreakCallbackEpoch.get()
-                    != callbackEpoch
-                    || miuiHomeOpenBreakStateManager
-                    != stateManager
-                    || miuiHomeOpenBreakAnimationIdentity
-                    != endedAnimationIdentity) {
-                return;
-            }
-            // ponytail: accepted DOWN is the only launcher-local pre-Shell evidence;
-            // add an authenticated SystemUI claim only if an unclaimed touch exposes this
-            // otherwise hidden wallpaper state.
-            EndedLauncherOpenWallpaperReset marker =
-                    new EndedLauncherOpenWallpaperReset(
-                            inputIdentity, callbackEpoch,
-                            stateManager, endedAnimationIdentity,
-                            wallpaperElement,
-                            ((Number) homeZoomValue).floatValue());
-            endedLauncherOpenWallpaperReset.set(marker);
-            new Handler(Looper.getMainLooper()).post(() -> {
-                if (endedLauncherOpenWallpaperReset.compareAndSet(
-                        marker, null)) {
-                    moduleLog(Log.WARN, TAG,
-                            "Expired unconsumed launcher OPEN wallpaper reset marker"
-                                    + ", eventId="
-                                    + inputIdentity.eventId
-                                    + ", launcherOpenGeneration="
-                                    + inputIdentity.miuiHomeOpenBreakGenerationAtDown);
-                }
-            });
-            moduleLog(Log.INFO, TAG,
-                    "Armed launcher OPEN wallpaper reset suppression"
-                            + ", eventId=" + inputIdentity.eventId
-                            + ", launcherOpenGeneration="
-                            + inputIdentity.miuiHomeOpenBreakGenerationAtDown
-                            + ", animationIdentity="
-                            + shortObject(endedAnimationIdentity));
-        } catch (Throwable throwable) {
-            endedLauncherOpenWallpaperReset.set(null);
-            moduleLog(Log.WARN, TAG,
-                    "Failed to arm launcher OPEN wallpaper reset suppression; "
-                            + "preserving Xiaomi cleanup",
-                    throwable);
-        }
-    }
-
-    protected boolean consumeEndedLauncherOpenWallpaperReset(
-            Object wallpaperElement, Object params) {
-        EndedLauncherOpenWallpaperReset marker =
-                endedLauncherOpenWallpaperReset.get();
-        if (marker == null || Looper.myLooper()
-                != Looper.getMainLooper()) {
-            return false;
-        }
-        try {
-            MiuiHomeAcceptedInputToken inputIdentity =
-                    marker.inputIdentity;
-            Object zoomValue = invokeAnyMethod(
-                    params, "getZoomOut", new Object[0]);
-            if (!(zoomValue instanceof Number)
-                    || !marker.matchesCommand(
-                    wallpaperElement,
-                    ((Number) zoomValue).floatValue())
-                    || miuiHomeAcceptedInputIdentity.get()
-                    != inputIdentity
-                    || inputIdentity.miuiHomeOpenBreakGenerationAtDown
-                    != miuiHomeOpenBreakGeneration
-                    || marker.callbackEpoch
-                    != miuiHomeOpenBreakCallbackEpoch.get()
-                    || marker.stateManager
-                    != miuiHomeOpenBreakStateManager
-                    || marker.animationIdentity
-                    != miuiHomeOpenBreakAnimationIdentity
-                    || inputIdentity.miuiHomeOpenBreakAnimationAtDown
-                    != marker.animationIdentity
-                    || !miuiHomeOpenBreakAnimationActive
-                    || miuiHomeOpenBreakGenerationPrepared
-                    || miuiHomeOpenBreakCommandPending
-                    || !endedLauncherOpenWallpaperReset.compareAndSet(
-                    marker, null)) {
-                return false;
-            }
-            moduleLog(Log.INFO, TAG,
-                    "Suppressed ended launcher OPEN wallpaper Home reset"
-                            + ", eventId=" + inputIdentity.eventId
-                            + ", launcherOpenGeneration="
-                            + inputIdentity.miuiHomeOpenBreakGenerationAtDown
-                            + ", zoom=" + marker.homeZoom);
-            return true;
-        } catch (Throwable throwable) {
-            endedLauncherOpenWallpaperReset.compareAndSet(marker, null);
-            moduleLog(Log.WARN, TAG,
-                    "Failed to validate launcher OPEN wallpaper reset; "
-                            + "preserving Xiaomi cleanup",
-                    throwable);
-            return false;
-        }
     }
 
     protected Object captureMiuiHomeLauncherOpenSnapshotAfterTargetsBound(
@@ -1061,40 +942,33 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected Object observeMiuiHomeUnifiedAnimToConfigured(
             XposedInterface.Chain chain) throws Throwable {
-        Object firstArg = chain.getArg(0);
-        Object secondArg = chain.getArg(1);
-        boolean paramsFirst = MIUI_HOME_RECTF_PARAMS.equals(
-                firstArg.getClass().getName());
-        Object params = paramsFirst ? firstArg : secondArg;
-        Object implementor = paramsFirst ? secondArg : firstArg;
         MiuiHomeReturnHomeController controller =
                 miuiHomeReturnHomeController;
         Object configLock = controller == null ? null
                 : controller.resolveUnifiedAnimToConfigLock(
-                params);
+                chain.getArg(0));
         if (configLock != null) {
             synchronized (configLock) {
                 return observeMiuiHomeUnifiedAnimToConfiguredLocked(
-                        chain, controller, implementor, params);
+                        chain, controller);
             }
         }
         return observeMiuiHomeUnifiedAnimToConfiguredLocked(
-                chain, controller, implementor, params);
+                chain, controller);
     }
 
     protected Object observeMiuiHomeUnifiedAnimToConfiguredLocked(
             XposedInterface.Chain chain,
-            MiuiHomeReturnHomeController controller,
-            Object implementor, Object params) throws Throwable {
+            MiuiHomeReturnHomeController controller) throws Throwable {
         Object ownerToken = controller == null ? null
                 : controller.beginUnifiedNativeAnimToConfigHook(
-                params);
+                chain.getArg(0));
         Throwable hookFailure = null;
         String completionReason = "beforeOriginal";
         try {
             if (controller != null
                     && controller.shouldSkipInterruptedUnifiedAnimToConfig(
-                    implementor, params)) {
+                    chain.getArg(1), chain.getArg(0))) {
                 completionReason = "skippedInterruptedConfig";
                 return null;
             }
@@ -1103,7 +977,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             completionReason = "originalReturned";
             if (controller != null) {
                 controller.onUnifiedNativeAnimToConfigured(
-                        implementor, params);
+                        chain.getArg(1), chain.getArg(0));
                 completionReason = "configuredReturned";
             }
             return result;
@@ -1115,11 +989,11 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             if (controller != null) {
                 try {
                     controller.onUnifiedNativeAnimToConfigHookCompleted(
-                            implementor, params,
+                            chain.getArg(1), chain.getArg(0),
                             completionReason, hookFailure);
                 } finally {
                     controller.finishUnifiedNativeAnimToConfigHook(
-                            ownerToken, params,
+                            ownerToken, chain.getArg(0),
                             completionReason, hookFailure);
                 }
             }
@@ -2850,10 +2724,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected Object observeMiuiHomeReturnHomeWallpaperSet(
             XposedInterface.Chain chain) throws Throwable {
-        if (consumeEndedLauncherOpenWallpaperReset(
-                chain.getThisObject(), chain.getArg(0))) {
-            return null;
-        }
         Object result = chain.proceed();
         MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
         if (controller != null) {
@@ -2951,6 +2821,12 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             controller.detach(clearShell, reason);
         }
         return binder;
+    }
+
+    protected synchronized IBinder snapshotMiuiHomeReturnHomeBinder() {
+        MiuiHomeReturnHomeController controller = miuiHomeReturnHomeController;
+        return controller == null
+                ? miuiHomeReturnHomeBinder : controller.shellBackAnimation;
     }
 
     protected synchronized void handleMiuiHomeReturnHomeBinderDeath(
@@ -3131,26 +3007,12 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 acceptedIntent.putExtra(EXTRA_INPUT_EDGE, edge);
                 acceptedIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
                         miuiHomeSystemUiInputArbiterGeneration);
-                long openBreakGeneration = miuiHomeOpenBreakGeneration;
-                Object openBreakAnimation = miuiHomeOpenBreakAnimationIdentity;
-                if (!miuiHomeOpenBreakAnimationActive
-                        || miuiHomeOpenBreakGenerationPrepared
-                        || openBreakGeneration == 0L
-                        || openBreakAnimation == null
-                        || miuiHomeOpenBreakGeneration != openBreakGeneration
-                        || miuiHomeOpenBreakAnimationIdentity
-                        != openBreakAnimation
-                        || !miuiHomeOpenBreakAnimationActive) {
-                    openBreakGeneration = 0L;
-                    openBreakAnimation = null;
-                }
                 MiuiHomeAcceptedInputToken inputIdentity =
                         new MiuiHomeAcceptedInputToken(
                                 eventId, event.getDownTime(),
                                 event.getDeviceId(), event.getSource(),
                                 displayId, edge,
-                                miuiHomeSystemUiInputArbiterGeneration,
-                                openBreakGeneration, openBreakAnimation);
+                                miuiHomeSystemUiInputArbiterGeneration);
                 miuiHomeAcceptedInputIdentity.set(inputIdentity);
                 sendAuthenticatedMiuiHomeState(stub.getContext(), acceptedIntent);
                 moduleLog(Log.INFO, TAG, "Published MiuiHome accepted input token"
@@ -3159,9 +3021,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                         + ", displayId=" + displayId
                         + ", edge=" + edge
                         + ", generation="
-                        + miuiHomeSystemUiInputArbiterGeneration
-                        + ", launcherOpenGeneration="
-                        + openBreakGeneration);
+                        + miuiHomeSystemUiInputArbiterGeneration);
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Failed to publish MiuiHome accepted input token; "
                         + "gesture remains fail-closed", throwable);
@@ -3236,7 +3096,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                 publishLegacyRuntimeStatusReply(receiverContext, intent, generation);
                 if (newGeneration) {
                     miuiHomeAcceptedInputIdentity.set(null);
-                    endedLauncherOpenWallpaperReset.set(null);
                     miuiHomeEditingStatePublished = false;
                     refreshMiuiHomeEditingState(
                             receiverContext.getClassLoader(), "systemUiArbiterGeneration");
@@ -3358,7 +3217,6 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         miuiHomeSystemUiInputArbiterReady = false;
         miuiHomeSystemUiInputArbiterGeneration = 0L;
         miuiHomeAcceptedInputIdentity.set(null);
-        endedLauncherOpenWallpaperReset.set(null);
         if (receiver == null || receiverContext == null) {
             return;
         }
@@ -3427,7 +3285,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         }
         try {
             boolean contextualSearchEnabled =
-                    isContextualSearchLongPressRuntimeEnabled();
+                    isContextualSearchLongPressEnabled();
             Intent stateIntent = new Intent(systemUiInputArbiterStateAction());
             stateIntent.setPackage(MIUI_HOME);
             stateIntent.putExtra(EXTRA_INPUT_ARBITER_READY, ready);

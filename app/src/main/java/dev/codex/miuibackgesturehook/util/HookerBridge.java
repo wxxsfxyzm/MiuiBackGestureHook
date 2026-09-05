@@ -19,7 +19,6 @@ import java.util.Map;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModuleInterface;
 
-
 /**
  * An abstract of Hooker
  * Provide a runtime environment of XposedInterface.
@@ -28,13 +27,15 @@ public abstract class HookerBridge implements Hooker, XposedInterface {
     protected String packageName = null;
     protected ClassLoader classLoader = null;
     protected XposedInterface xposed = null;
+    protected ApplicationInfo applicationInfo = null;
 
     @Override
     @MustBeInvokedByOverriders
-    public void onAttached(String packageName, ClassLoader classLoader, XposedInterface xposed) {
+    public void onAttached(String packageName, ClassLoader classLoader, XposedInterface xposed, ApplicationInfo applicationInfo) {
         this.packageName = packageName;
         this.classLoader = classLoader;
         this.xposed = xposed;
+        this.applicationInfo = applicationInfo;
     }
 
     @Override

@@ -1,5 +1,9 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeOpenInterruptionHook.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+
 import android.content.Context;
 import android.graphics.Rect;
 import android.os.IBinder;
@@ -12,10 +16,10 @@ import android.window.BackMotionEvent;
 
 import java.lang.reflect.Method;
 
-abstract class MiuiHomeReturnHomePreviewRuntime
-        extends MiuiHomeReturnHomeStateRuntime {
+abstract class MiuiHomeReturnHomePreviewImpl
+        extends MiuiHomeReturnHomeStateImpl {
     protected abstract class ReturnHomePreviewController
-            extends MiuiHomeReturnHomeStateRuntime.ReturnHomeStateController {
+        extends MiuiHomeReturnHomeStateImpl.ReturnHomeStateController {
         ReturnHomePreviewController(IBinder shellBackAnimation,
                                      ClassLoader classLoader, Context context) {
             super(shellBackAnimation, classLoader, context);

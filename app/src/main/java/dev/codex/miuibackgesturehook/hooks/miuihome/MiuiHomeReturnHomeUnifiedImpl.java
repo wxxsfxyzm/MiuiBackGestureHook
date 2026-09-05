@@ -1,5 +1,8 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+
 import android.content.Context;
 import android.graphics.Matrix;
 import android.graphics.Rect;
@@ -18,10 +21,10 @@ import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
-abstract class MiuiHomeReturnHomeUnifiedRuntime
-        extends MiuiHomeReturnHomePreviewRuntime {
+abstract class MiuiHomeReturnHomeUnifiedImpl
+        extends MiuiHomeReturnHomePreviewImpl {
     protected abstract class ReturnHomeUnifiedController
-            extends MiuiHomeReturnHomePreviewRuntime.ReturnHomePreviewController {
+        extends MiuiHomeReturnHomePreviewImpl.ReturnHomePreviewController {
         ReturnHomeUnifiedController(IBinder shellBackAnimation,
                                     ClassLoader classLoader, Context context) {
             super(shellBackAnimation, classLoader, context);

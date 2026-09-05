@@ -1,6 +1,9 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
-import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiHookRuntime;
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+
+import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiImpl;
 
 import android.content.Context;
 import android.graphics.Rect;
@@ -29,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
+abstract class MiuiHomeReturnHomeStateImpl extends SystemUiImpl {
     /** Shared state, callback binders, and immutable return-home snapshots. */
     protected abstract class ReturnHomeStateController {
         protected final IBinder shellBackAnimation;

@@ -1,5 +1,7 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+
 import android.content.Context;
 import android.graphics.Rect;
 import android.os.Handler;

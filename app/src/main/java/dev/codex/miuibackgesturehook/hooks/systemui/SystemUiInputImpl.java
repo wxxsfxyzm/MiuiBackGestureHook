@@ -1,8 +1,7 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
-import dev.codex.miuibackgesturehook.hooks.core.HookRuntimeCore;
-
 import android.annotation.SuppressLint;
 import android.animation.Animator;
 import android.app.ActivityManager;
@@ -40,7 +39,6 @@ import android.view.WindowManager;
 import android.window.BackMotionEvent;
 import android.window.BackNavigationInfo;
 import android.window.BackTouchTracker;
-
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -52,12 +50,1351 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
+import android.animation.AnimatorListenerAdapter;
+import android.content.BroadcastReceiver;
+import android.os.SystemClock;
+import android.util.SparseArray;
+import android.view.IRemoteAnimationFinishedCallback;
+import android.view.IRemoteAnimationRunner;
+import android.view.SurfaceControl;
+import android.window.IOnBackInvokedCallback;
+import android.window.TransitionInfo;
+import android.window.WindowOnBackInvokedDispatcher;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import dev.codex.miuibackgesturehook.BuildConfig;
+import dev.codex.miuibackgesturehook.NativeHookStatusProtocol;
+import dev.codex.miuibackgesturehook.util.HookerBridge;
+import io.github.libxposed.api.XposedInterface;
+
+public abstract class SystemUiInputImpl extends HookerBridge {
+    protected abstract void invalidateOpenTransitionSnapshot(
+            OpenTransitionSnapshot snapshot, String reason);
+
+    protected void onOpenTransitionAnimatorEnded(
+            OpenTransitionSnapshot snapshot, boolean isReverse) {
+        invalidateOpenTransitionSnapshot(snapshot,
+                isReverse ? "reverseEnd" : "end");
+    }
+
+    protected abstract int readTransitionDebugId(Object infoOrExpose);
+
+    protected abstract boolean isMiuiHomeLauncherOpenType(String typeName);
+
+    protected abstract int resolveTaskInfoActivityType(Object taskInfo);
+
+    protected abstract int resolveTaskInfoWindowingMode(Object taskInfo);
+
+    protected abstract void publishSystemUiInputArbiterState(
+            Context context, boolean ready, String reason);
+
+    protected abstract void publishStandardReturnHomeCommit(
+            int taskId, int transitionDebugId, Object compositionController,
+            Object exactFinishCallback, boolean elementBoundaryOnly);
+
+    protected abstract void clearLegacyBackGuard(String reason);
+
+    protected abstract boolean clearSystemUiReturnHomeCommitIdentity(
+            Object controller, long attemptId, String reason);
+
+    protected abstract LegacyBackAttempt armLegacyBackGuard(
+            Object controller, Object runningInfo);
+
+    protected abstract void ensureAospBackAnimations(Object controller, String source);
+
+    protected abstract void onSystemUiInputMonitorAttached(Context context);
+
+    protected abstract void onSystemUiInputMonitorDetached(Context context);
+
+    protected abstract int readMotionEventId(MotionEvent event) throws Exception;
+
+    protected abstract int readMotionEventDisplayId(MotionEvent event) throws Exception;
+
+    protected abstract boolean isCurrentHeadlessNavBarLifecycle(
+            Object edgeBackGestureHandler);
 
 
-public abstract class SystemUiInputRuntime extends HookRuntimeCore {
+    protected static final String TAG = "MiuiBackGestureHook";
+    protected static final String BUILD_MARK =
+            BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")";
+    protected static final String SYSTEM_UI = "com.android.systemui";
+    protected static final String MIUI_HOME = "com.miui.home";
+    protected static final String MODULE_PACKAGE = NativeHookStatusProtocol.PACKAGE_NAME;
+    protected static final int ANDROID_17_API_LEVEL = 37;
+    protected static final String WINDOW_ON_BACK_INVOKED_DISPATCHER =
+            WindowOnBackInvokedDispatcher.class.getName();
+    protected static final int APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG = 0x8;
+    protected static final int ACTIVITY_PREDICTIVE_BACK_ENABLE_FLAG = 0x4;
+    protected static final int ACTIVITY_PREDICTIVE_BACK_DISABLE_FLAG = 0x8;
+    protected static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
+    protected static final int UNIFIED_CONFIG_HOOK_RUNNING = 1;
+    protected static final int UNIFIED_CONFIG_HOOK_COMPLETED = 2;
+
+    protected static final int TRANSACTION_MIUI_ON_GESTURE_LINE_PROGRESS = 4;
+    protected static final int TRANSIT_OPEN = 1;
+    protected static final int TRANSIT_CLOSE = 2;
+    protected static final int TRANSIT_PREDICTIVE_BACK = 13;
+    protected static final int TRANSIT_TO_FRONT = 3;
+    protected static final int TRANSIT_TO_BACK = 4;
+    protected static final int TRANSIT_CHANGE = 6;
+    protected static final int FLAG_IS_WALLPAPER = 1 << 1;
+    protected static final int FLAG_TRANSLUCENT = 1 << 2;
+    protected static final int FLAG_FILLS_TASK = 1 << 10;
+    protected static final int FLAG_IS_OCCLUDED = 1 << 15;
+    protected static final int FLAG_BACK_GESTURE_ANIMATED = 1 << 17;
+    protected static final int FLAG_DISPLAY_CHANGE = 1 << 27;
+    protected static final int FLAG_IS_ELEMENT = Integer.MIN_VALUE;
+    protected static final int XIAOMI_PREPARED_HOME_CHANGE_FLAGS = 0x00028001;
+    protected static final int XIAOMI_PREPARED_HOME_NO_WALLPAPER_CHANGE_FLAGS =
+            0x00028000;
+    protected static final int XIAOMI_ELEMENT_HOME_CHANGE_FLAGS = 0x00120001;
+    protected static final int FLAG_ONLY_ACTIVITY_RECORD = 1 << 26;
+    protected static final int EDGE_LEFT = 0;
+    protected static final int EDGE_RIGHT = 1;
+    protected static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
+            "dev.codex.miuibackgesturehook.action.MIUI_OVERVIEW_STATE_CHANGE";
+    protected static final String MODULE_MIUI_HOME_OPEN_BREAK_COMMAND =
+            "dev.codex.miuibackgesturehook.action.MIUI_HOME_OPEN_BREAK";
+    protected static final String MODULE_SYSTEMUI_INPUT_ARBITER_STATE =
+            NativeHookStatusProtocol.ACTION_SYSTEMUI_STATE;
+    protected static final String MODULE_MIUI_HOME_INPUT_ARBITER_QUERY =
+            "dev.codex.miuibackgesturehook.action.MIUI_HOME_INPUT_ARBITER_QUERY";
+    protected static final String MODULE_CONTEXTUAL_SEARCH_TRIGGERED =
+            "dev.codex.miuibackgesturehook.action.CONTEXTUAL_SEARCH_TRIGGERED";
+    protected static final String MODULE_RUNTIME_STATUS_QUERY =
+            NativeHookStatusProtocol.ACTION_QUERY;
+    protected static final String MODULE_RUNTIME_STATUS_REPLY =
+            NativeHookStatusProtocol.ACTION_REPLY;
+    protected static final String EXTRA_STATUS_NONCE = NativeHookStatusProtocol.EXTRA_NONCE;
+    protected static final String EXTRA_STATUS_QUERY = NativeHookStatusProtocol.EXTRA_QUERY;
+    protected static final String EXTRA_STATUS_NATIVE_RESPONSE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_RESPONSE;
+    protected static final String EXTRA_STATUS_LEGACY_MODE =
+            NativeHookStatusProtocol.EXTRA_LEGACY_MODE;
+    protected static final String EXTRA_STATUS_LEGACY_READY =
+            NativeHookStatusProtocol.EXTRA_LEGACY_READY;
+    protected static final String EXTRA_STATUS_NATIVE_READY =
+            NativeHookStatusProtocol.EXTRA_NATIVE_READY;
+    protected static final String EXTRA_STATUS_NATIVE_PROFILE_RESOLVED =
+            NativeHookStatusProtocol.EXTRA_NATIVE_PROFILE_RESOLVED;
+    protected static final String EXTRA_STATUS_NATIVE_PROFILE_DYNAMIC =
+            NativeHookStatusProtocol.EXTRA_NATIVE_PROFILE_DYNAMIC;
+    protected static final String EXTRA_STATUS_NATIVE_PROFILE_ENTRY_OFFSET =
+            NativeHookStatusProtocol.EXTRA_NATIVE_PROFILE_ENTRY_OFFSET;
+    protected static final String EXTRA_STATUS_NATIVE_SIDE_OFFSET =
+            NativeHookStatusProtocol.EXTRA_NATIVE_SIDE_OFFSET;
+    protected static final String EXTRA_STATUS_NATIVE_RUNTIME_PROFILE_STAGE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_RUNTIME_PROFILE_STAGE;
+    protected static final String EXTRA_STATUS_NATIVE_DART_RESOLVER_STAGE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_RESOLVER_STAGE;
+    protected static final String EXTRA_STATUS_NATIVE_DART_DRAWER_CANDIDATES =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_DRAWER_CANDIDATES;
+    protected static final String EXTRA_STATUS_NATIVE_DART_TRANSITION_CANDIDATES =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_TRANSITION_CANDIDATES;
+    protected static final String EXTRA_STATUS_NATIVE_DART_OVERVIEW_ENTER_CANDIDATES =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_OVERVIEW_ENTER_CANDIDATES;
+    protected static final String EXTRA_STATUS_NATIVE_DART_OVERVIEW_EXIT_CANDIDATES =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_OVERVIEW_EXIT_CANDIDATES;
+    protected static final String EXTRA_STATUS_NATIVE_DART_EDITING_CANDIDATES =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DART_EDITING_CANDIDATES;
+    protected static final String EXTRA_STATUS_NATIVE_DRAWER_STATE_READY =
+            NativeHookStatusProtocol.EXTRA_NATIVE_DRAWER_STATE_READY;
+    protected static final String EXTRA_STATUS_NATIVE_OVERVIEW_STATE_READY =
+            NativeHookStatusProtocol.EXTRA_NATIVE_OVERVIEW_STATE_READY;
+    protected static final String EXTRA_STATUS_NATIVE_EDITING_STATE_READY =
+            NativeHookStatusProtocol.EXTRA_NATIVE_EDITING_STATE_READY;
+    protected static final String EXTRA_STATUS_NATIVE_BUSINESS_STATE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_BUSINESS_STATE;
+    protected static final String EXTRA_STATUS_NATIVE_BRIDGE_STATE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_BRIDGE_STATE;
+    protected static final String EXTRA_STATUS_NATIVE_RECEIVER_STATE =
+            NativeHookStatusProtocol.EXTRA_NATIVE_RECEIVER_STATE;
+    protected static final String EXTRA_STATUS_SYSTEMUI_READY =
+            NativeHookStatusProtocol.EXTRA_SYSTEMUI_READY;
+    protected static final String EXTRA_STATUS_SYSTEMUI_GENERATION =
+            NativeHookStatusProtocol.EXTRA_SYSTEMUI_GENERATION;
+    protected static final String EXTRA_STATUS_SYSTEMUI_MONITORS =
+            NativeHookStatusProtocol.EXTRA_SYSTEMUI_MONITORS;
+    protected static final String EXTRA_STATUS_REASON = NativeHookStatusProtocol.EXTRA_REASON;
+    protected static final String EXTRA_INPUT_ARBITER_READY = "input_arbiter_ready";
+    protected static final String EXTRA_INPUT_ARBITER_GENERATION =
+            "input_arbiter_generation";
+    protected static final String EXTRA_LAUNCHER_STATE_OWNER_EPOCH =
+            "launcher_state_owner_epoch";
+    protected static final String EXTRA_CONTEXTUAL_SEARCH_ENABLED =
+            "contextual_search_enabled";
+    protected static final String EXTRA_INPUT_ACCEPTED = "input_accepted";
+    protected static final String EXTRA_INPUT_EVENT_ID = "input_event_id";
+    protected static final String EXTRA_INPUT_DOWN_TIME = "input_down_time";
+    protected static final String EXTRA_INPUT_DEVICE_ID = "input_device_id";
+    protected static final String EXTRA_INPUT_SOURCE = "input_source";
+    protected static final String EXTRA_INPUT_DISPLAY_ID = "input_display_id";
+    protected static final String EXTRA_INPUT_EDGE = "input_edge";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE =
+            "launcher_open_break_available";
+    protected static final String EXTRA_LAUNCHER_OPEN_ACTIVE =
+            "launcher_open_active";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_GENERATION =
+            "launcher_open_break_generation";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
+            "launcher_open_break_attempt";
+    protected static final String EXTRA_LAUNCHER_EDITING = "launcher_editing";
+    protected static final String EXTRA_LAUNCHER_FOLDER_VISIBLE =
+            "launcher_folder_visible";
+    protected static final String EXTRA_LAUNCHER_XIAOAI_VISIBLE =
+            "xiaoai_visible";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_TASK_ID =
+            "return_home_commit_task_id";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_DEBUG_ID =
+            "return_home_commit_debug_id";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_ATTEMPT =
+            "return_home_commit_attempt";
+    protected static final String EXTRA_RETURN_HOME_ELEMENT_BOUNDARY =
+            "return_home_element_boundary";
+    protected static final String EXTRA_RETURN_HOME_FINISH_ATTEMPT =
+            "return_home_finish_attempt";
+    protected static final String EXTRA_RETURN_HOME_RUNNER_SESSION =
+            "return_home_runner_session";
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER = 0;
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_REJECTED = 1;
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
+    protected static final int KEY_ACTION_UP = 1;
+    protected static final int KEY_ACTION_DOWN = 0;
+    protected static final int TYPE_RETURN_TO_HOME = 1;
+    protected static final int TYPE_CROSS_ACTIVITY = 2;
+    protected static final int TYPE_CROSS_TASK = 3;
+    protected static final int TYPE_CALLBACK = 4;
+    protected static final long SYSUI_STATE_NAV_BAR_HIDDEN = 1L << 1;
+    protected static final long SYSUI_STATE_ALLOW_GESTURE_IGNORING_BAR_VISIBILITY =
+            1L << 17;
+    protected static final long SYSUI_STATE_MIUI_QUICK_SETTINGS_EXPANDED = 1L << 60;
+    protected static final long SYSUI_STATE_MIUI_NOTIFICATION_EXPANDED = 1L << 61;
+    protected static final long SYSUI_STATE_MIUI_SHADE_EXPANDED_MASK =
+            SYSUI_STATE_MIUI_QUICK_SETTINGS_EXPANDED
+                    | SYSUI_STATE_MIUI_NOTIFICATION_EXPANDED;
+    protected static final long SYSUI_STATE_LOCKED_OR_PINNED_MASK =
+            1L | (1L << 3) | (1L << 6) | (1L << 9);
+    protected static final int ACTIVITY_TYPE_STANDARD = 1;
+    protected static final int ACTIVITY_TYPE_HOME = 2;
+    protected static final int TOUCH_OCCLUSION_MODE_USE_OPACITY = 1;
+    protected static final int TOUCH_OCCLUSION_MODE_ALLOW = 2;
+    protected static final int WINDOWING_MODE_FULLSCREEN = 1;
+    protected static final int WINDOWING_MODE_FREEFORM = 5;
+    protected static final float EDGE_TOUCH_WIDTH_DP = 24.0f;
+    protected static final float PILFER_THRESHOLD_DP = 8.0f;
+    protected static final float RETURN_HOME_PREVIEW_BLUR_DISTANCE_DP = 48.0f;
+    protected static final float MIUI_STYLE_SWIPE_START_PX = 20.0f;
+    protected static final float MIUI_STYLE_ARROW_SHOW_PX = 180.0f;
+    protected static final float AOSP_PROGRESS_THRESHOLD_DP = 412.0f;
+    protected static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
+    protected static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
+    protected static final float RETURN_HOME_END_CORNER_RADIUS_DP = 28.0f;
+    protected static final String MIUI_SIDEBAR_BOUNDS = "sidebar_bounds";
+    protected static final float MIUI_SIDEBAR_EXCLUSION_PADDING_DP = 8.0f;
+    protected static final long MIUI_OVERVIEW_DISMISS_TIMEOUT_MS = 2500L;
+    protected static final long MIUI_OVERVIEW_EXIT_GUARD_MS = 400L;
+    protected static final long LEGACY_BACK_MERGE_TIMEOUT_MS = 2000L;
+    protected static final long DUPLICATE_BACK_PAIR_TIMEOUT_MS = 700L;
+    protected static final long DUPLICATE_BACK_UP_INTERVAL_MS = 200L;
+    protected static final long INPUT_ACCEPTED_TOKEN_TIMEOUT_MS = 750L;
+    protected static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
+    protected static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
+    protected static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
+    protected static final int RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS = 2;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_MATRIX = 2;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_WINDOW_CROP = 4;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_CORNER_RADIUS = 16;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_SHOW = 512;
+    protected static final String MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON =
+            "Icon click without recent.";
+    protected static final ComponentName PERMISSION_GRANT_ACTIVITY = new ComponentName(
+            "com.android.permissioncontroller",
+            "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity");
+    protected static final String SHELL_BACK_ANIMATION_DESCRIPTOR =
+            "com.android.wm.shell.back.IBackAnimation";
+    protected static final String ON_BACK_INVOKED_CALLBACK_DESCRIPTOR =
+            IOnBackInvokedCallback.class.getName();
+    protected static final String REMOTE_ANIMATION_RUNNER_DESCRIPTOR =
+            IRemoteAnimationRunner.class.getName();
+    protected static final String REMOTE_ANIMATION_FINISHED_DESCRIPTOR =
+            IRemoteAnimationFinishedCallback.class.getName();
+    protected static final int SHELL_BACK_SET_LAUNCHER_CALLBACK_TRANSACTION = 1;
+    protected static final int SHELL_BACK_CLEAR_LAUNCHER_CALLBACK_TRANSACTION = 2;
+    protected static final int RETURN_HOME_TERMINAL_NONE = 0;
+    protected static final int RETURN_HOME_TERMINAL_CANCEL = 1;
+    protected static final int RETURN_HOME_TERMINAL_INVOKE = 2;
+    protected static final int REMOTE_RUNNER_MISSING = 0;
+    protected static final int REMOTE_RUNNER_CANCELLED = 1;
+    protected static final int REMOTE_RUNNER_WAITING = 2;
+    protected static final int REMOTE_RUNNER_READY = 3;
+    protected static final int REMOTE_RUNNER_UNKNOWN = 4;
+    protected static final int BACK_GUARD_IDLE = 0;
+    protected static final int BACK_GUARD_WAIT_MERGE = 1;
+    protected static final int BACK_GUARD_EXPECT_DOWN = 2;
+    protected static final int BACK_GUARD_EXPECT_UP = 3;
+    protected static final int OPEN_SNAPSHOT_PENDING = 0;
+    protected static final int OPEN_SNAPSHOT_ACTIVE = 1;
+    protected static final int OPEN_SNAPSHOT_INVALID = 2;
+
+    protected final ConcurrentHashMap<Object, OpenTransitionSnapshot> runningOpenTransitions =
+            new ConcurrentHashMap<>();
+    protected final Object legacyBackGuardLock = new Object();
+    protected final AtomicLong legacyBackAttemptIds = new AtomicLong();
+    protected final AtomicLong openSnapshotGeneration = new AtomicLong();
+    protected final AtomicLong openSnapshotLifecycleEpoch = new AtomicLong();
+    protected final AtomicLong headlessNavBarLifecycleGeneration = new AtomicLong();
+    protected final AtomicLong launcherOpenBreakAttemptIds = new AtomicLong();
+    protected final AtomicInteger launcherOpenBreakCommandsInFlight = new AtomicInteger();
+    protected final AtomicLong miuiHomeOpenBreakGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeOpenBreakCallbackEpoch = new AtomicLong();
+    protected final AtomicInteger systemUiInputArbiterMonitorCount = new AtomicInteger();
+    protected final AtomicLong pendingModuleStatusNonce = new AtomicLong();
+    protected final AtomicLong miuiHomeReturnHomeGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeLauncherOpenSnapshotIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeNativeGeometryFrameIds = new AtomicLong();
+    protected final AtomicLong systemUiReturnHomeCommitAttemptIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong systemUiShellGestureSessionIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final ThreadLocal<ReturnHomeNativeGeometrySnapshot>
+            miuiHomePendingNativeGeometry = new ThreadLocal<>();
+    protected final ThreadLocal<ReturnHomeFinishTransferCandidate>
+            returnHomeFinishTransferCandidate = new ThreadLocal<>();
+    protected volatile boolean backCommitCompositionHookReady;
+    protected volatile boolean backFinishOpenAtomicHookReady;
+    protected volatile boolean backFinishOpenCallerDeoptimized;
+    protected final AtomicReference<MiuiHomeAcceptedInputToken> acceptedInputToken =
+            new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeAcceptedInputToken>
+            miuiHomeAcceptedInputIdentity = new AtomicReference<>();
+    protected final AtomicReference<SystemUiReturnHomeCommitIdentity>
+            systemUiReturnHomeCommitIdentity = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeLocalHandoffToken> miuiHomeLocalHandoffToken =
+            new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeLauncherOpenSnapshot>
+            miuiHomeLauncherOpenSnapshot = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomePermissionMergeToken>
+            miuiHomePermissionMergeToken = new AtomicReference<>();
+    protected final long systemUiInputArbiterGeneration =
+            Math.max(1L, SystemClock.elapsedRealtimeNanos());
+    protected volatile boolean acceptingOpenSnapshots = true;
+    protected volatile boolean acceptingHeadlessNavBarLifecycle = true;
+    protected volatile boolean acceptingBackInputInstalls = true;
+    protected volatile boolean miuiOverviewVisible;
+    protected volatile boolean miuiDrawerVisible;
+    protected volatile boolean miuiFolderVisible;
+    protected volatile boolean miuiLauncherEditing;
+    protected volatile long miuiLauncherDartStateOwnerEpoch;
+    protected volatile boolean miuiLauncherXiaoAiVisible;
+    protected volatile boolean miuiHomeEditingStatePublished;
+    protected volatile boolean miuiLauncherOpenActive;
+    protected volatile boolean miuiLauncherOpenBreakAvailable;
+    protected volatile long miuiLauncherOpenBreakGeneration;
+    protected volatile long miuiOverviewDismissPendingUntilUptime;
+    protected Context miuiOverviewReceiverContext;
+    protected BroadcastReceiver miuiOverviewReceiver;
+    protected volatile Object miuiHomeOpenBreakController;
+    protected volatile boolean miuiHomeOpenBreakCommandPending;
+    protected volatile long miuiHomeOpenBreakGeneration;
+    protected volatile Object miuiHomeOpenBreakStateManager;
+    protected volatile Object miuiHomeOpenBreakAnimationIdentity;
+    // The exact native Shell cross-task animation object sourced from the registry.
+    // Diagnostic hooks use this identity instead of guessing from color or call stacks.
+    protected volatile Object aospCrossTaskAnimation;
+    protected volatile boolean miuiHomeOpenBreakGenerationPrepared;
+    protected volatile boolean miuiHomeOpenBreakAnimationActive;
+    protected Context miuiHomeOpenBreakContext;
+    protected Context miuiHomeOpenBreakCommandReceiverContext;
+    protected BroadcastReceiver miuiHomeOpenBreakCommandReceiver;
+    protected Context miuiHomeInputArbiterReceiverContext;
+    protected BroadcastReceiver miuiHomeInputArbiterReceiver;
+    protected volatile IBinder miuiHomeReturnHomeBinder;
+    protected volatile IBinder pendingMiuiHomeReturnHomeBinder;
+    protected volatile ClassLoader pendingMiuiHomeReturnHomeClassLoader;
+    protected volatile Context pendingMiuiHomeReturnHomeContext;
+    protected volatile String pendingMiuiHomeReturnHomeReason;
+    protected volatile boolean miuiHomeSystemUiInputArbiterReady;
+    protected volatile long miuiHomeSystemUiInputArbiterGeneration;
+    protected volatile SharedPreferences predictiveBackPreferences;
+    protected volatile boolean predictiveBackPreferencesFailureLogged;
+    protected volatile boolean predictiveBackApplicationMetadataFailureLogged;
+    protected volatile boolean moduleLoggingEnabled =
+            PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+    protected volatile SharedPreferences moduleLoggingPreferences;
+    private final SharedPreferences.OnSharedPreferenceChangeListener
+            moduleLoggingPreferenceListener = (preferences, key) -> {
+                if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)) {
+                    return;
+                }
+                try {
+                    moduleLoggingEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_MODULE_LOGGING,
+                            PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+                } catch (Throwable ignored) {
+                    // Keep the last known logging policy when the remote preference is unreadable.
+                }
+            };
+    /**
+     * Android 17 MiuiHome is protected from every LSPosed hook in this module. The package
+     * remains in the static scope solely so the same APK can continue supporting Android 16;
+     * libxposed does not provide a platform-conditional scope list.
+     */
+    protected static boolean blockMiuiHomeXposedHooks() {
+        return Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL;
+    }
+
+    protected static boolean isMiuiHomeProcess(String candidate) {
+        return MIUI_HOME.equals(candidate)
+                || (candidate != null && candidate.startsWith(MIUI_HOME + ":"));
+    }
+    protected boolean nativePluginDiagnosticsLogged;
+    protected boolean headlessSysUiStateLogged;
+    protected volatile Field defaultTransitionAnimationsField;
+    protected volatile Field defaultTransitionAnimationSizeField;
+    protected volatile Field defaultTransitionAnimExecutorField;
+    protected volatile Method animatorCanReverseMethod;
+    protected LegacyBackAttempt legacyBackAttempt;
+    protected int legacyBackGuardPhase = BACK_GUARD_IDLE;
+    protected long legacyBackGuardDeadlineUptime;
+    protected long suppressedBackDownUptime;
+    protected Thread suppressedBackDownThread;
+    protected final ThreadLocal<Object> moduleLegacyBackInjection = new ThreadLocal<>();
+    protected final Object headlessNavBarLifecycleLock = new Object();
+    protected final Object backInputLifecycleLock = new Object();
+    protected HeadlessNavBarLease headlessNavBarLease;
+    protected volatile Object[][] pendingHotReloadInputState = new Object[0][0];
+    protected volatile Object[][] pendingHotReloadHeadlessState = new Object[0][0];
+
+    public static final class ReturnHomeNativeGeometrySnapshot {
+        public final long generation;
+        public final Object animationIdentity;
+        public final long frameTraceId;
+        public final int sourceKind;
+        public final float[] matrixValues;
+        public final Rect windowCrop;
+        public final float[] surfaceCornerRadii;
+
+        public ReturnHomeNativeGeometrySnapshot(
+                long generation, Object animationIdentity,
+                float[] matrixValues, Rect windowCrop,
+                float[] surfaceCornerRadii, long frameTraceId,
+                int sourceKind) {
+            this.generation = generation;
+            this.animationIdentity = animationIdentity;
+            this.frameTraceId = frameTraceId;
+            this.sourceKind = sourceKind;
+            this.matrixValues = matrixValues.clone();
+            this.windowCrop = new Rect(windowCrop);
+            this.surfaceCornerRadii = surfaceCornerRadii.clone();
+        }
+
+        public float[] copyMatrixValues() {
+            return matrixValues.clone();
+        }
+
+        public Rect copyWindowCrop() {
+            return new Rect(windowCrop);
+        }
+
+        public float[] copySurfaceCornerRadii() {
+            return surfaceCornerRadii.clone();
+        }
+    }
+
+    public static final class HeadlessNavBarLease {
+        public final Object controller;
+        public final Object navBarHelper;
+        public final Object edgeBackGestureHandler;
+        public final Object updaterProxy;
+        public final Class<?> updaterInterface;
+        public final Object backAnimation;
+        public final boolean ready;
+        public int navigationMode;
+
+        public HeadlessNavBarLease(Object controller, Object navBarHelper,
+                                   Object edgeBackGestureHandler, Object updaterProxy,
+                                   Class<?> updaterInterface, Object backAnimation,
+                                   int navigationMode, boolean ready) {
+            this.controller = controller;
+            this.navBarHelper = navBarHelper;
+            this.edgeBackGestureHandler = edgeBackGestureHandler;
+            this.updaterProxy = updaterProxy;
+            this.updaterInterface = updaterInterface;
+            this.backAnimation = backAnimation;
+            this.navigationMode = navigationMode;
+            this.ready = ready;
+        }
+    }
+
+    public static final class OpenTransitionSnapshot {
+        public final Object token;
+        public final Object transitionInfo;
+        public final int originalAnimatorCount;
+        public final Animator[] animators;
+        public final Executor animExecutor;
+        public final long generation;
+        public final boolean miuiSpring;
+        public final Object platformHandler;
+        public final Object animationManager;
+        public final Object[] animationGroups;
+        public final Object[] springAnimations;
+        public final Object miuiShellTransitionInfo;
+        public final Object shellTransitions;
+        public final int transitionDebugId;
+        public final AtomicInteger state = new AtomicInteger(OPEN_SNAPSHOT_PENDING);
+        public final AtomicBoolean endSignalQueued = new AtomicBoolean();
+        public volatile AnimatorListenerAdapter listener;
+        public volatile Object springEndListener;
+
+        public OpenTransitionSnapshot(Object token, Object transitionInfo, Animator[] animators,
+                                      int originalAnimatorCount, Executor animExecutor,
+                                      long generation) {
+            this(token, transitionInfo, animators, originalAnimatorCount,
+                    animExecutor, generation, null);
+        }
+
+        public OpenTransitionSnapshot(Object token, Object transitionInfo, Animator[] animators,
+                                      int originalAnimatorCount, Executor animExecutor,
+                                      long generation, Object shellTransitions) {
+            this.token = token;
+            this.transitionInfo = transitionInfo;
+            this.originalAnimatorCount = originalAnimatorCount;
+            this.animators = animators;
+            this.animExecutor = animExecutor;
+            this.generation = generation;
+            this.miuiSpring = false;
+            this.platformHandler = null;
+            this.animationManager = null;
+            this.animationGroups = new Object[0];
+            this.springAnimations = new Object[0];
+            this.miuiShellTransitionInfo = null;
+            this.shellTransitions = shellTransitions;
+            this.transitionDebugId = -1;
+        }
+
+        public OpenTransitionSnapshot(Object token, Object transitionInfo,
+                                      int springAnimationCount, Executor animExecutor,
+                                      long generation, Object platformHandler,
+                                      Object animationManager, Object[] animationGroups,
+                                      Object[] springAnimations,
+                                      Object miuiShellTransitionInfo,
+                                      int transitionDebugId) {
+            this.token = token;
+            this.transitionInfo = transitionInfo;
+            this.originalAnimatorCount = springAnimationCount;
+            this.animators = new Animator[0];
+            this.animExecutor = animExecutor;
+            this.generation = generation;
+            this.miuiSpring = true;
+            this.platformHandler = platformHandler;
+            this.animationManager = animationManager;
+            this.animationGroups = animationGroups;
+            this.springAnimations = springAnimations;
+            this.miuiShellTransitionInfo = miuiShellTransitionInfo;
+            this.shellTransitions = null;
+            this.transitionDebugId = transitionDebugId;
+        }
+
+        public int animationCount() {
+            return miuiSpring ? originalAnimatorCount : animators.length;
+        }
+    }
+
+    public static final class OpenTransitionInvalidationListener
+            extends AnimatorListenerAdapter {
+        public final WeakReference<SystemUiInputImpl> owner;
+        public final OpenTransitionSnapshot snapshot;
+
+        public OpenTransitionInvalidationListener(SystemUiInputImpl owner,
+                                                  OpenTransitionSnapshot snapshot) {
+            this.owner = new WeakReference<>(owner);
+            this.snapshot = snapshot;
+        }
+
+        @Override
+        public void onAnimationCancel(Animator animation) {
+            SystemUiInputImpl hook = owner.get();
+            if (hook != null) {
+                hook.invalidateOpenTransitionSnapshot(snapshot, "cancel");
+            } else {
+                animation.removeListener(this);
+            }
+        }
+
+        @Override
+        public void onAnimationEnd(Animator animation, boolean isReverse) {
+            SystemUiInputImpl hook = owner.get();
+            if (hook != null) {
+                hook.onOpenTransitionAnimatorEnded(snapshot, isReverse);
+            } else {
+                animation.removeListener(this);
+            }
+        }
+    }
+
+    public static final class LegacyBackAttempt {
+        public final long id;
+        public final Object controller;
+        public final Object runningTransitionInfo;
+        public final long startedUptime;
+
+        public LegacyBackAttempt(long id, Object controller, Object runningTransitionInfo,
+                                 long startedUptime) {
+            this.id = id;
+            this.controller = controller;
+            this.runningTransitionInfo = runningTransitionInfo;
+            this.startedUptime = startedUptime;
+        }
+    }
+
+    public static final class MiuiHomeLocalHandoffToken {
+        public final long generation;
+        public final Object session;
+        public final Object windowElement;
+        public final Object windowAnimContext;
+        public final Object status;
+
+        public MiuiHomeLocalHandoffToken(long generation, Object session,
+                                         Object windowElement, Object windowAnimContext,
+                                         Object status) {
+            this.generation = generation;
+            this.session = session;
+            this.windowElement = windowElement;
+            this.windowAnimContext = windowAnimContext;
+            this.status = status;
+        }
+    }
+
+    public static final class LauncherOpenMainTask {
+        public final int taskId;
+        public final int displayId;
+        public final ComponentName component;
+        public final Rect bounds;
+
+        public LauncherOpenMainTask(int taskId, int displayId,
+                                    ComponentName component, Rect bounds) {
+            this.taskId = taskId;
+            this.displayId = displayId;
+            this.component = component;
+            this.bounds = bounds;
+        }
+    }
+
+    public static final class MiuiHomeLauncherOpenSnapshot {
+        public final long generation;
+        public final long nativeGeneration;
+        public final long callbackEpoch;
+        public final Object stateManager;
+        public final Object windowElement;
+        public final Object animationIdentity;
+        public final String animationType;
+        public final Object windowTransitionCompat;
+        public final Object helper;
+        public final Object mainTransitionToken;
+        public final Object mainTransitionInfo;
+        public final int mainTransitionDebugId;
+        public final LauncherOpenMainTask mainTask;
+
+        public MiuiHomeLauncherOpenSnapshot(
+                long generation, long nativeGeneration, long callbackEpoch,
+                Object stateManager,
+                Object windowElement, Object animationIdentity,
+                String animationType, Object windowTransitionCompat,
+                Object helper, Object mainTransitionToken,
+                Object mainTransitionInfo, int mainTransitionDebugId,
+                LauncherOpenMainTask mainTask) {
+            this.generation = generation;
+            this.nativeGeneration = nativeGeneration;
+            this.callbackEpoch = callbackEpoch;
+            this.stateManager = stateManager;
+            this.windowElement = windowElement;
+            this.animationIdentity = animationIdentity;
+            this.animationType = animationType;
+            this.windowTransitionCompat = windowTransitionCompat;
+            this.helper = helper;
+            this.mainTransitionToken = mainTransitionToken;
+            this.mainTransitionInfo = mainTransitionInfo;
+            this.mainTransitionDebugId = mainTransitionDebugId;
+            this.mainTask = mainTask;
+        }
+    }
+
+    public static final class PermissionActivityTransition {
+        public final Object container;
+        public final Object parent;
+        public final SurfaceControl leash;
+        public final ComponentName component;
+        public final Rect startBounds;
+        public final Rect endBounds;
+        public final int debugId;
+        public final int backgroundColor;
+        public final int startDisplayId;
+        public final int endDisplayId;
+
+        public PermissionActivityTransition(
+                Object container, Object parent, SurfaceControl leash,
+                ComponentName component,
+                Rect startBounds, Rect endBounds, int debugId,
+                int backgroundColor, int startDisplayId, int endDisplayId) {
+            this.container = container;
+            this.parent = parent;
+            this.leash = leash;
+            this.component = component;
+            this.startBounds = startBounds;
+            this.endBounds = endBounds;
+            this.debugId = debugId;
+            this.backgroundColor = backgroundColor;
+            this.startDisplayId = startDisplayId;
+            this.endDisplayId = endDisplayId;
+        }
+    }
+
+    public static final class MiuiHomePermissionMergeToken {
+        public final MiuiHomeLauncherOpenSnapshot launcherOpen;
+        public final PermissionActivityTransition permissionOpen;
+        public final AtomicInteger consumed = new AtomicInteger();
+
+        public MiuiHomePermissionMergeToken(
+                MiuiHomeLauncherOpenSnapshot launcherOpen,
+                PermissionActivityTransition permissionOpen) {
+            this.launcherOpen = launcherOpen;
+            this.permissionOpen = permissionOpen;
+        }
+    }
+
+    public static final class ReturnHomeComposition {
+        public final Object appsIdentity;
+        public final Object closingTarget;
+        public final Object openingTarget;
+        public final SurfaceControl closingLeash;
+        public final SurfaceControl openingLeash;
+        public final int closingTaskId;
+        public final int openingTaskId;
+        public final int displayId;
+
+        public ReturnHomeComposition(Object appsIdentity, Object closingTarget,
+                                     Object openingTarget, SurfaceControl closingLeash,
+                                     SurfaceControl openingLeash, int closingTaskId,
+                                     int openingTaskId, int displayId) {
+            this.appsIdentity = appsIdentity;
+            this.closingTarget = closingTarget;
+            this.openingTarget = openingTarget;
+            this.closingLeash = closingLeash;
+            this.openingLeash = openingLeash;
+            this.closingTaskId = closingTaskId;
+            this.openingTaskId = openingTaskId;
+            this.displayId = displayId;
+        }
+    }
+
+    public static final class ReturnHomeCommitComposition {
+        public final Object handler;
+        public final Object controller;
+        public final ReturnHomeComposition composition;
+        public final SurfaceControl changeLeash;
+        public final Object transitionToken;
+        public final Object transitionInfo;
+        public final Object startTransaction;
+        public final Object finishTransaction;
+        public final Object mergeTarget;
+        public final Object finishCallback;
+        public final Object previousAnimationFinishCallback;
+        public final int transitionType;
+        public final AtomicInteger acceptedBoundaryComposition =
+                new AtomicInteger();
+
+        public ReturnHomeCommitComposition(Object handler, Object controller,
+                                           ReturnHomeComposition composition,
+                                           SurfaceControl changeLeash,
+                                           Object transitionToken,
+                                           Object transitionInfo,
+                                           Object startTransaction,
+                                           Object finishTransaction,
+                                           Object mergeTarget,
+                                           Object finishCallback,
+                                           Object previousAnimationFinishCallback,
+                                           int transitionType) {
+            this.handler = handler;
+            this.controller = controller;
+            this.composition = composition;
+            this.changeLeash = changeLeash;
+            this.transitionToken = transitionToken;
+            this.transitionInfo = transitionInfo;
+            this.startTransaction = startTransaction;
+            this.finishTransaction = finishTransaction;
+            this.mergeTarget = mergeTarget;
+            this.finishCallback = finishCallback;
+            this.previousAnimationFinishCallback =
+                    previousAnimationFinishCallback;
+            this.transitionType = transitionType;
+        }
+    }
+
+    public static final class StandardReturnHomeCommitSignal {
+        public final long attempt;
+        public final long arbiterGeneration;
+        public final int taskId;
+        public final int transitionDebugId;
+        public final int eventId;
+        public final long downTime;
+        public final int deviceId;
+        public final int source;
+        public final int displayId;
+        public final int edge;
+        public final IBinder runnerSession;
+        public final boolean elementBoundaryOnly;
+
+        public StandardReturnHomeCommitSignal(
+                long attempt, long arbiterGeneration,
+                int taskId, int transitionDebugId,
+                int eventId, long downTime,
+                int deviceId, int source, int displayId, int edge,
+                IBinder runnerSession, boolean elementBoundaryOnly) {
+            this.attempt = attempt;
+            this.arbiterGeneration = arbiterGeneration;
+            this.taskId = taskId;
+            this.transitionDebugId = transitionDebugId;
+            this.eventId = eventId;
+            this.downTime = downTime;
+            this.deviceId = deviceId;
+            this.source = source;
+            this.displayId = displayId;
+            this.edge = edge;
+            this.runnerSession = runnerSession;
+            this.elementBoundaryOnly = elementBoundaryOnly;
+        }
+
+        public boolean matchesInput(MiuiHomeAcceptedInputToken token) {
+            return token != null
+                    && token.generation == arbiterGeneration
+                    && token.eventId == eventId
+                    && token.downTime == downTime
+                    && token.deviceId == deviceId
+                    && token.source == source
+                    && token.displayId == displayId
+                    && token.edge == edge;
+        }
+    }
+
+    public static final class SystemUiReturnHomeCommitIdentity {
+        public final Object controller;
+        public final long shellSessionId;
+        public final int taskId;
+        public final MiuiHomeAcceptedInputToken input;
+        public final AtomicReference<StandardReturnHomeCommitSignal>
+                finishSignal = new AtomicReference<>();
+        public final AtomicReference<Object> finishCallback =
+                new AtomicReference<>();
+
+        public SystemUiReturnHomeCommitIdentity(
+                Object controller, long shellSessionId, int taskId,
+                MiuiHomeAcceptedInputToken input) {
+            this.controller = controller;
+            this.shellSessionId = shellSessionId;
+            this.taskId = taskId;
+            this.input = input;
+        }
+    }
+
+    public static final class EdgeWidthSnapshot {
+        public final int leftSensitivity;
+        public final int rightSensitivity;
+        public final int leftTouchWidth;
+        public final int rightTouchWidth;
+
+        public EdgeWidthSnapshot(int leftSensitivity, int rightSensitivity,
+                                 int leftInset, int rightInset) {
+            this.leftSensitivity = leftSensitivity;
+            this.rightSensitivity = rightSensitivity;
+            this.leftTouchWidth = combineTouchWidth(leftSensitivity, leftInset);
+            this.rightTouchWidth = combineTouchWidth(rightSensitivity, rightInset);
+        }
+
+        public static int combineTouchWidth(int sensitivity, int inset) {
+            long width = (long) sensitivity + (long) inset;
+            return (int) Math.max(1L, Math.min(Integer.MAX_VALUE, width));
+        }
+    }
+
+    public static final class ObjectIdentityKey {
+        public final Object object;
+
+        public ObjectIdentityKey(Object object) {
+            this.object = object;
+        }
+
+        @Override
+        public boolean equals(Object candidate) {
+            return candidate instanceof ObjectIdentityKey
+                    && object == ((ObjectIdentityKey) candidate).object;
+        }
+
+        @Override
+        public int hashCode() {
+            return System.identityHashCode(object);
+        }
+    }
+
+    protected final synchronized void initializeModuleLoggingPreference() {
+        try {
+            SharedPreferences preferences = getRemotePreferences(
+                    PredictiveBackPreferences.GROUP);
+            SharedPreferences previous = moduleLoggingPreferences;
+            if (previous != preferences) {
+                if (previous != null) {
+                    previous.unregisterOnSharedPreferenceChangeListener(
+                            moduleLoggingPreferenceListener);
+                }
+                preferences.registerOnSharedPreferenceChangeListener(
+                        moduleLoggingPreferenceListener);
+                moduleLoggingPreferences = preferences;
+            }
+            moduleLoggingEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_MODULE_LOGGING,
+                    PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+        } catch (Throwable ignored) {
+            moduleLoggingEnabled = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+        }
+    }
+
+    protected final synchronized void releaseModuleLoggingPreference() {
+        SharedPreferences current = moduleLoggingPreferences;
+        moduleLoggingPreferences = null;
+        if (current != null) {
+            try {
+                current.unregisterOnSharedPreferenceChangeListener(
+                        moduleLoggingPreferenceListener);
+            } catch (Throwable ignored) {
+                // The process is already retiring this module generation.
+            }
+        }
+    }
+
+    protected final void moduleLog(int priority, String tag, String message) {
+        if (priority < Log.WARN && !moduleLoggingEnabled) {
+            return;
+        }
+        super.log(priority, tag, message);
+    }
+
+    protected final void moduleLog(int priority, String tag, String message,
+                                   Throwable throwable) {
+        if (priority < Log.WARN && !moduleLoggingEnabled) {
+            return;
+        }
+        super.log(priority, tag, message, throwable);
+    }
+
+    public static final class ReturnHomeFinishTransferCandidate {
+        public final Object handler;
+        public final Object controller;
+        public final Thread ownerThread;
+        public final Object transitions;
+        public final Object remoteTransitionHandler;
+        public final ReturnHomeComposition composition;
+        public final Object transitionToken;
+        public final Object transitionInfo;
+        public final Object mergeTarget;
+        public final SurfaceControl.Transaction startTransaction;
+        public final Object preparedOpenInfo;
+        public final SurfaceControl.Transaction preparedFinishTransaction;
+        public final Object preparedFinishCallback;
+        public final Object elementChange;
+        public final Object appChange;
+        public final SurfaceControl homeLeash;
+        public final SurfaceControl elementLeash;
+        public final SurfaceControl appLeash;
+        public final Rect fullscreenBounds;
+        public final Rect elementEndBounds;
+        public final int transitionType;
+        public final int appFlags;
+        public final int elementStartDisplayId;
+        public final int elementEndDisplayId;
+        public final int transitionDebugId;
+        public final int preparedDebugId;
+        public final AtomicInteger transferAttempted = new AtomicInteger();
+
+        public ReturnHomeFinishTransferCandidate(
+                Object handler, Object controller,
+                Thread ownerThread,
+                Object transitions, Object remoteTransitionHandler,
+                ReturnHomeComposition composition,
+                Object transitionToken, Object transitionInfo,
+                Object mergeTarget,
+                SurfaceControl.Transaction startTransaction,
+                Object preparedOpenInfo,
+                SurfaceControl.Transaction preparedFinishTransaction,
+                Object preparedFinishCallback, Object elementChange,
+                Object appChange,
+                SurfaceControl homeLeash, SurfaceControl elementLeash,
+                SurfaceControl appLeash, Rect fullscreenBounds,
+                Rect elementEndBounds, int transitionType, int appFlags,
+                int elementStartDisplayId,
+                int elementEndDisplayId, int transitionDebugId,
+                int preparedDebugId) {
+            this.handler = handler;
+            this.controller = controller;
+            this.ownerThread = ownerThread;
+            this.transitions = transitions;
+            this.remoteTransitionHandler = remoteTransitionHandler;
+            this.composition = composition;
+            this.transitionToken = transitionToken;
+            this.transitionInfo = transitionInfo;
+            this.mergeTarget = mergeTarget;
+            this.startTransaction = startTransaction;
+            this.preparedOpenInfo = preparedOpenInfo;
+            this.preparedFinishTransaction = preparedFinishTransaction;
+            this.preparedFinishCallback = preparedFinishCallback;
+            this.elementChange = elementChange;
+            this.appChange = appChange;
+            this.homeLeash = homeLeash;
+            this.elementLeash = elementLeash;
+            this.appLeash = appLeash;
+            this.fullscreenBounds = new Rect(fullscreenBounds);
+            this.elementEndBounds = new Rect(elementEndBounds);
+            this.transitionType = transitionType;
+            this.appFlags = appFlags;
+            this.elementStartDisplayId = elementStartDisplayId;
+            this.elementEndDisplayId = elementEndDisplayId;
+            this.transitionDebugId = transitionDebugId;
+            this.preparedDebugId = preparedDebugId;
+        }
+    }
+
+    public static final class MiuiHomeAcceptedInputToken {
+        public final int eventId;
+        public final long downTime;
+        public final int deviceId;
+        public final int source;
+        public final int displayId;
+        public final int edge;
+        public final long generation;
+        public final long launcherStateOwnerEpoch;
+        public final long receivedUptime;
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation) {
+            this(eventId, downTime, deviceId, source, displayId, edge,
+                    generation, 0L);
+        }
+
+        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
+                                          int source, int displayId, int edge,
+                                          long generation,
+                                          long launcherStateOwnerEpoch) {
+            this.eventId = eventId;
+            this.downTime = downTime;
+            this.deviceId = deviceId;
+            this.source = source;
+            this.displayId = displayId;
+            this.edge = edge;
+            this.generation = generation;
+            this.launcherStateOwnerEpoch = launcherStateOwnerEpoch;
+            this.receivedUptime = SystemClock.uptimeMillis();
+        }
+
+        public boolean isExpired() {
+            long now = SystemClock.uptimeMillis();
+            long streamAge = now - downTime;
+            return now - receivedUptime > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS
+                    || streamAge < 0L
+                    || streamAge > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS;
+        }
+    }
+
+    protected boolean readWindowFlag(String methodName, ClassLoader preferredLoader,
+                                     boolean defaultValue) {
+        String[] classNames = new String[]{
+                "com.android.window.flags.Flags",
+                "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
+                "android.window.flags.Flags"
+        };
+        for (String className : classNames) {
+            try {
+                Class<?> flagsClass = Class.forName(className, false, preferredLoader);
+                Method method = flagsClass.getDeclaredMethod(methodName);
+                method.setAccessible(true);
+                Object result = method.invoke(null);
+                if (result instanceof Boolean) {
+                    moduleLog(Log.INFO, TAG, "Read " + methodName + " from "
+                            + className + ": " + result);
+                    return ((Boolean) result).booleanValue();
+                }
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG, "Flag lookup failed for " + className
+                        + ": " + throwable.getClass().getSimpleName()
+                        + ": " + throwable.getMessage());
+            }
+        }
+        moduleLog(Log.WARN, TAG, "Unable to read " + methodName
+                + "; defaulting to " + defaultValue);
+        return defaultValue;
+    }
+
+    protected boolean isNativePluginAttached(Object plugin) {
+        try {
+            Object view = readField(plugin, "mView");
+            if (view instanceof View) {
+                return ((View) view).isAttachedToWindow();
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    protected void logNativePluginDiagnostics(Object edgeBackGestureHandler) {
+        if (nativePluginDiagnosticsLogged) {
+            return;
+        }
+        nativePluginDiagnosticsLogged = true;
+        moduleLog(Log.WARN, TAG, "Native BackPanelController plugin unavailable"
+                + ", handler=" + shortObject(edgeBackGestureHandler));
+    }
+
+    protected void ensureAospRegistryDefinitions(Object registry, String source) {
+        if (registry == null) {
+            return;
+        }
+        boolean changed = false;
+        try {
+            Object definitions = readField(registry, "mAnimationDefinition");
+            Object defaultCrossActivity = readField(registry, "mDefaultCrossActivityAnimation");
+            Object crossTask = readField(registry, "mCrossTaskAnimation");
+            if (crossTask != null) {
+                aospCrossTaskAnimation = crossTask;
+            }
+            // Cross-task keeps its own native animation: the cross-activity slide
+            // mishandles its differently shaped close transition.
+            changed |= ensureRegistryRunner(definitions, TYPE_CROSS_ACTIVITY,
+                    defaultCrossActivity, "crossActivity");
+            changed |= ensureRegistryRunner(definitions, TYPE_CROSS_TASK,
+                    crossTask, "crossTask");
+            if (changed) {
+                invokeAnyMethod(registry, "updateSupportedAnimators", new Object[0]);
+                moduleLog(Log.INFO, TAG, "Restored AOSP registry definitions from " + source);
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to restore AOSP registry definitions from " + source,
+                    throwable);
+        }
+    }
+
+    protected boolean ensureRegistryRunner(Object definitions, int type, Object animation,
+                                           String label) {
+        if (definitions == null || animation == null
+                || definitions instanceof SparseArray<?>
+                && ((SparseArray<?>) definitions).indexOfKey(type) >= 0) {
+            return false;
+        }
+        try {
+            Object runner = invokeAnyMethod(animation, "getRunner", new Object[0]);
+            if (runner == null) {
+                return false;
+            }
+            invokeAnyMethod(definitions, "set",
+                    new Object[]{Integer.valueOf(type), runner});
+            moduleLog(Log.INFO, TAG, "Added " + label + " runner to registry, type=" + type
+                    + ", runner=" + shortObject(runner));
+            return true;
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to add " + label + " runner, type=" + type,
+                    throwable);
+            return false;
+        }
+    }
+
+    protected boolean surfacesAreSame(SurfaceControl first, SurfaceControl second)
+            throws Exception {
+        if (first == second) {
+            return true;
+        }
+        if (first == null || second == null) {
+            return false;
+        }
+        Object same = invokeAnyMethod(
+                first, "isSameSurface", new Object[]{second});
+        if (!(same instanceof Boolean)) {
+            throw new IllegalStateException("isSameSurface returned "
+                    + shortObject(same));
+        }
+        return ((Boolean) same).booleanValue();
+    }
+
+    protected EdgeWidthSnapshot readEdgeWidthSnapshot(Object edgeBackGestureHandler,
+                                                      float density) {
+        int fallbackWidth = Math.max(1, Math.round(EDGE_TOUCH_WIDTH_DP * density));
+        int leftSensitivity = readIntFieldOrDefault(edgeBackGestureHandler,
+                "mEdgeWidthLeft", fallbackWidth);
+        int rightSensitivity = readIntFieldOrDefault(edgeBackGestureHandler,
+                "mEdgeWidthRight", fallbackWidth);
+        if (leftSensitivity <= 0) {
+            leftSensitivity = fallbackWidth;
+        }
+        if (rightSensitivity <= 0) {
+            rightSensitivity = fallbackWidth;
+        }
+        int leftInset = readIntFieldOrDefault(edgeBackGestureHandler, "mLeftInset", 0);
+        int rightInset = readIntFieldOrDefault(edgeBackGestureHandler, "mRightInset", 0);
+        return new EdgeWidthSnapshot(leftSensitivity, rightSensitivity,
+                leftInset, rightInset);
+    }
+
+    protected void logBackNavigationInfo(Object info) {
+        if (info == null) {
+            moduleLog(Log.INFO, TAG, "BackNavigationInfo=null");
+            return;
+        }
+        try {
+            BackNavigationInfo navigationInfo = (BackNavigationInfo) info;
+            int type = navigationInfo.getType();
+            boolean prepare = navigationInfo.isPrepareRemoteAnimation();
+            Object callback = navigationInfo.getOnBackInvokedCallback();
+            moduleLog(Log.INFO, TAG, "BackNavigationInfo detail: type=" + type
+                    + ", prepareRemoteAnimation=" + prepare
+                    + ", callback=" + shortObject(callback));
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to inspect BackNavigationInfo", throwable);
+        }
+    }
+
+    protected void forceSystemUiCallbackProgress(Object info) {
+        if (info == null) {
+            return;
+        }
+        try {
+            BackNavigationInfo navigationInfo = (BackNavigationInfo) info;
+            if (navigationInfo.getType() == TYPE_CALLBACK) {
+                navigationInfo.disableAppProgressGenerationAllowed();
+                moduleLog(Log.INFO, TAG,
+                        "Disabled app-generated progress for TYPE_CALLBACK; SystemUI will dispatch progress");
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to force SystemUI callback progress", throwable);
+        }
+    }
+
+    /**
+     * Reads the framework back target without routing a boot-classpath call through reflection.
+     * A non-framework object is deliberately treated as unavailable so wrapper/compatibility
+     * objects still fail closed at their existing callers.
+     */
+    protected Integer readBackNavigationType(Object navigation) {
+        return navigation instanceof BackNavigationInfo
+                ? ((BackNavigationInfo) navigation).getType() : null;
+    }
+
+    /**
+     * Reads a real framework TransitionInfo directly. Xiaomi's expose/wrapper objects are not
+     * accepted here and continue through their own reflective compatibility paths.
+     */
+    protected Integer readTransitionInfoType(Object info) {
+        return info instanceof TransitionInfo ? ((TransitionInfo) info).getType() : null;
+    }
+
+    protected List<?> readTransitionInfoChanges(Object info) {
+        return info instanceof TransitionInfo ? ((TransitionInfo) info).getChanges() : null;
+    }
+
+    protected Integer readTransitionInfoRootCount(Object info) {
+        return info instanceof TransitionInfo ? ((TransitionInfo) info).getRootCount() : null;
+    }
+
+    protected Object readTransitionInfoRoot(Object info, int index) {
+        return info instanceof TransitionInfo
+                ? ((TransitionInfo) info).getRoot(index) : null;
+    }
+
+    protected Object readTransitionRootLeash(Object root) {
+        return root instanceof TransitionInfo.Root
+                ? ((TransitionInfo.Root) root).getLeash() : null;
+    }
+
+    protected Object readTransitionRootOffset(Object root) {
+        return root instanceof TransitionInfo.Root
+                ? ((TransitionInfo.Root) root).getOffset() : null;
+    }
+
+    protected Integer readTransitionChangeMode(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getMode() : null;
+    }
+
+    protected Integer readTransitionChangeFlags(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getFlags() : null;
+    }
+
+    protected Boolean hasTransitionChangeFlags(Object change, int flags) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).hasFlags(flags) : null;
+    }
+
+    protected Object readTransitionChangeTaskInfo(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getTaskInfo() : null;
+    }
+
+    protected Object readTransitionChangeParent(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getParent() : null;
+    }
+
+    protected Object readTransitionChangeLastParent(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getLastParent() : null;
+    }
+
+    protected Object readTransitionChangeActivityComponent(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getActivityComponent() : null;
+    }
+
+    protected Object readTransitionChangeLeash(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getLeash() : null;
+    }
+
+    protected Object readTransitionChangeStartAbsBounds(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getStartAbsBounds() : null;
+    }
+
+    protected Object readTransitionChangeEndAbsBounds(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getEndAbsBounds() : null;
+    }
+
+    protected Integer readTransitionChangeStartDisplayId(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getStartDisplayId() : null;
+    }
+
+    protected Integer readTransitionChangeEndDisplayId(Object change) {
+        return change instanceof TransitionInfo.Change
+                ? ((TransitionInfo.Change) change).getEndDisplayId() : null;
+    }
+
+    protected boolean setTransitionChangeMode(Object change, int mode) {
+        if (!(change instanceof TransitionInfo.Change)) {
+            return false;
+        }
+        ((TransitionInfo.Change) change).setMode(mode);
+        return true;
+    }
+
+    protected String readNativeAnimationType(Object windowElement) throws Exception {
+        return enumName(invokeAnyMethod(
+                windowElement, "getCurrentAnimType", new Object[0]));
+    }
+
     protected abstract void sendAuthenticatedMiuiHomeOpenBreakCommand(
             Context context, long generation, long attemptId,
             SystemUiBackGestureDriver driver, Object releaseController);
@@ -99,7 +1436,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected volatile boolean contextualSearchPreferencesFailureLogged;
     protected volatile boolean contextualSearchServiceUnavailableLogged;
 
-    protected boolean isContextualSearchLongPressEnabled() {
+    protected boolean isContextualSearchPreferenceEnabled() {
         try {
             SharedPreferences preferences = contextualSearchPreferences;
             if (preferences == null) {
@@ -133,8 +1470,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
      * run.  Never publish the requested preference to that native owner until the service really
      * exists.  Android 16 keeps its existing Java path, whose Binder request already fails closed.
      */
-    protected boolean isContextualSearchLongPressRuntimeEnabled() {
-        if (!isContextualSearchLongPressEnabled()) {
+    protected boolean isContextualSearchLongPressEnabled() {
+        if (!isContextualSearchPreferenceEnabled()) {
             contextualSearchServiceUnavailableLogged = false;
             return false;
         }
@@ -647,14 +1984,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_ENHANCED);
     }
 
-    @Override
     protected boolean isHyperOsSlideAnimationEnabled() {
         return readHyperOsBooleanPreference(
                 PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
                 PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
     }
 
-    @Override
     protected boolean isOneUiCrossTaskAnimationEnabled() {
         return readHyperOsBooleanPreference(
                 PredictiveBackPreferences.KEY_ONEUI_CROSS_TASK_ANIMATION,
@@ -1315,7 +2650,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             try {
                 SharedPreferences preferences = gestureTriggerPreferences;
                 if (preferences == null) {
-                    synchronized (SystemUiInputRuntime.this) {
+                    synchronized (SystemUiInputImpl.this) {
                         preferences = gestureTriggerPreferences;
                         if (preferences == null) {
                             preferences = getRemotePreferences(
@@ -4427,7 +5762,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected void prepareNativeBackPanel(Object plugin) {
             try {
-                SystemUiInputRuntime.this.prepareNativeBackPanel(
+                SystemUiInputImpl.this.prepareNativeBackPanel(
                         edgeBackGestureHandler, plugin);
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Failed to prepare native AOSP back panel", throwable);
