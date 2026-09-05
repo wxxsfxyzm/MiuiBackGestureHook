@@ -145,6 +145,12 @@ constexpr uint32_t kDartDrawerRemapped = uint32_t{1} << 0u;
 constexpr uint32_t kDartOverviewEnterRemapped = uint32_t{1} << 1u;
 constexpr uint32_t kDartOverviewExitRemapped = uint32_t{1} << 2u;
 constexpr uint32_t kDartEditingRemapped = uint32_t{1} << 3u;
+constexpr uint32_t kDartDrawerPending = uint32_t{1} << 0u;
+constexpr uint32_t kDartOverviewPending = uint32_t{1} << 1u;
+constexpr uint32_t kDartEditingPending = uint32_t{1} << 2u;
+constexpr uint32_t kDartOwnerPending = uint32_t{1} << 3u;
+constexpr uint32_t kDartAllStatePending = kDartDrawerPending |
+        kDartOverviewPending | kDartEditingPending | kDartOwnerPending;
 
 constexpr char kLogTag[] = "MiuiHomeHyosLsp";
 // The first 4371 private-broadcast hook confused its 16-byte Rust x8 result
@@ -554,7 +560,7 @@ void ResetDartStateOwnerForProcess(int32_t process_pid) {
                      __ATOMIC_RELEASE);
     __atomic_store_n(&g_editing_state_observation, uint64_t{0},
                      __ATOMIC_RELEASE);
-    __atomic_store_n(&g_dart_state_publish_pending, uint32_t{1} << 3u,
+    __atomic_store_n(&g_dart_state_publish_pending, kDartOwnerPending,
                      __ATOMIC_RELEASE);
     __atomic_store_n(&g_dart_drawer_active_count, uint32_t{0},
                      __ATOMIC_RELEASE);
@@ -1365,16 +1371,14 @@ void HookBroadcastReceiverOnReceive(void* receiver, void* context, void* intent)
         }
         __atomic_fetch_add(&g_arbiter_state_passthrough_count, uint32_t{1},
                            __ATOMIC_RELAXED);
+        // Make the dispatcher the sole pending-state consumer. Queue every
+        // generation-bound value so a transient send failure remains owned by
+        // its retry loop instead of depending on another receiver callback.
+        __atomic_fetch_or(&g_dart_state_publish_pending,
+                          kDartAllStatePending,
+                          __ATOMIC_RELEASE);
         EnsureDartStatePublisherThread();
-        PublishDrawerStateForCurrentGeneration();
-        PublishOverviewStateForCurrentGeneration();
-        PublishEditingStateForCurrentGeneration();
         PublishXiaoAiStateForCurrentGeneration();
-        // A MotionEvent getter can still run below Flutter/Rust on 1.ui, so it
-        // is not a safe publication boundary.  Drain Dart's atomic-only
-        // observations only after Xiaomi's authenticated receiver has
-        // returned; this callback is the proven non-Dart reentry boundary.
-        PublishPendingDartStates(AtomicLoad(&g_dart_state_owner_epoch));
         // A status query deliberately rides this authenticated action. Reply
         // after the original receiver and publisher setup so readiness covers
         // the actual safe drain boundary.
@@ -1927,10 +1931,6 @@ bool PublishDartStateOwnerForCurrentGeneration(uint64_t owner_epoch) {
 }
 
 void PublishPendingDartStates(uint64_t owner_epoch) {
-    constexpr uint32_t kDrawerPending = uint32_t{1} << 0u;
-    constexpr uint32_t kOverviewPending = uint32_t{1} << 1u;
-    constexpr uint32_t kEditingPending = uint32_t{1} << 2u;
-    constexpr uint32_t kOwnerPending = uint32_t{1} << 3u;
     if (owner_epoch == 0u ||
             AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch) {
         return;
@@ -1939,16 +1939,16 @@ void PublishPendingDartStates(uint64_t owner_epoch) {
             &g_dart_state_publish_pending, uint32_t{0}, __ATOMIC_ACQ_REL);
     if (pending == 0u) return;
 
-    if ((pending & kOwnerPending) != 0u) {
+    if ((pending & kDartOwnerPending) != 0u) {
         PublishDartStateOwnerForCurrentGeneration(owner_epoch);
     }
-    if ((pending & kDrawerPending) != 0u) {
+    if ((pending & kDartDrawerPending) != 0u) {
         PublishDrawerStateForCurrentGeneration();
     }
-    if ((pending & kOverviewPending) != 0u) {
+    if ((pending & kDartOverviewPending) != 0u) {
         PublishOverviewStateForCurrentGeneration();
     }
-    if ((pending & kEditingPending) != 0u) {
+    if ((pending & kDartEditingPending) != 0u) {
         PublishEditingStateForCurrentGeneration();
     }
 
@@ -1959,38 +1959,38 @@ void PublishPendingDartStates(uint64_t owner_epoch) {
     if (AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch) return;
     const int64_t generation = AtomicLoad(&g_systemui_arbiter_generation);
     uint32_t retry = 0u;
-    if ((pending & kOwnerPending) != 0u &&
+    if ((pending & kDartOwnerPending) != 0u &&
             (AtomicLoad(&g_dart_state_owner_published_epoch) != owner_epoch ||
              AtomicLoad(&g_dart_state_owner_published_generation) !=
                      generation)) {
-        retry |= kOwnerPending;
+        retry |= kDartOwnerPending;
     }
     const uint64_t drawer = AtomicLoad(&g_drawer_state_observation);
-    if ((pending & kDrawerPending) != 0u &&
+    if ((pending & kDartDrawerPending) != 0u &&
             DartStateObservationEpoch(drawer) == owner_epoch &&
             (DartStateObservationValue(drawer) !=
                      AtomicLoad(&g_drawer_published_state) ||
              AtomicLoad(&g_drawer_published_generation) != generation ||
              AtomicLoad(&g_drawer_published_owner_epoch) != owner_epoch)) {
-        retry |= kDrawerPending;
+        retry |= kDartDrawerPending;
     }
     const uint64_t overview = AtomicLoad(&g_overview_state_observation);
-    if ((pending & kOverviewPending) != 0u &&
+    if ((pending & kDartOverviewPending) != 0u &&
             DartStateObservationEpoch(overview) == owner_epoch &&
             (DartStateObservationValue(overview) !=
                      AtomicLoad(&g_overview_published_state) ||
              AtomicLoad(&g_overview_published_generation) != generation ||
              AtomicLoad(&g_overview_published_owner_epoch) != owner_epoch)) {
-        retry |= kOverviewPending;
+        retry |= kDartOverviewPending;
     }
     const uint64_t editing = AtomicLoad(&g_editing_state_observation);
-    if ((pending & kEditingPending) != 0u &&
+    if ((pending & kDartEditingPending) != 0u &&
             DartStateObservationEpoch(editing) == owner_epoch &&
             (DartStateObservationValue(editing) !=
                      AtomicLoad(&g_editing_published_state) ||
              AtomicLoad(&g_editing_published_generation) != generation ||
              AtomicLoad(&g_editing_published_owner_epoch) != owner_epoch)) {
-        retry |= kEditingPending;
+        retry |= kDartEditingPending;
     }
     if (retry != 0u) {
         __atomic_fetch_or(&g_dart_state_publish_pending, retry,
@@ -2043,21 +2043,47 @@ void* DartStatePublisherThreadMain(void* data) {
         while (read(fd, &wake_count, sizeof(wake_count)) ==
                 static_cast<ssize_t>(sizeof(wake_count))) {
         }
-        const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
-        PublishPendingDartStates(owner_epoch);
-        if (AtomicLoad(&g_dart_state_publish_pending) != 0u) {
-            timespec retry_delay{0, 16 * 1000 * 1000};
+        uint32_t retry_delay_ms = 16u;
+        for (;;) {
+            const uint64_t owner_epoch =
+                    AtomicLoad(&g_dart_state_owner_epoch);
+            // Mark this publication cycle unresolved before exchanging the
+            // pending mask. Readiness must not observe a transient zero while
+            // a broadcast attempt owns those bits locally.
+            __atomic_store_n(&g_dart_state_publish_failure_epoch,
+                             owner_epoch, __ATOMIC_RELEASE);
+            PublishPendingDartStates(owner_epoch);
+            if (AtomicLoad(&g_dart_state_owner_epoch) == owner_epoch &&
+                    AtomicLoad(&g_dart_state_publish_pending) == 0u) {
+                __atomic_store_n(&g_dart_state_publish_callback_epoch,
+                                 owner_epoch, __ATOMIC_RELEASE);
+                uint64_t failed_epoch = owner_epoch;
+                __atomic_compare_exchange_n(
+                        &g_dart_state_publish_failure_epoch, &failed_epoch,
+                        uint64_t{0}, false, __ATOMIC_RELEASE,
+                        __ATOMIC_RELAXED);
+                // A new Dart observation racing the success publication owns
+                // a raw eventfd wake. Do not suppress that next cycle.
+                if (AtomicLoad(&g_dart_state_publish_pending) == 0u) break;
+            }
+
+            // A re-armed bit is self-sustaining work. Drain any coalesced
+            // eventfd writes and retry with bounded backoff instead of
+            // returning to an indefinite poll or spinning on a broken
+            // broadcast runtime.
+            while (read(fd, &wake_count, sizeof(wake_count)) ==
+                    static_cast<ssize_t>(sizeof(wake_count))) {
+            }
+            timespec retry_delay{
+                    static_cast<time_t>(retry_delay_ms / 1000u),
+                    static_cast<long>((retry_delay_ms % 1000u) *
+                                      1000u * 1000u)};
             while (nanosleep(&retry_delay, &retry_delay) != 0 &&
                     errno == EINTR) {
             }
-            PublishPendingDartStates(owner_epoch);
+            retry_delay_ms = retry_delay_ms < 128u
+                    ? retry_delay_ms * 2u : 250u;
         }
-        __atomic_store_n(&g_dart_state_publish_callback_epoch, owner_epoch,
-                         __ATOMIC_RELEASE);
-        uint64_t failed_epoch = owner_epoch;
-        __atomic_compare_exchange_n(
-                &g_dart_state_publish_failure_epoch, &failed_epoch,
-                uint64_t{0}, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
 }
 
@@ -2084,7 +2110,13 @@ bool WakeDartStatePublisher() {
 
 bool WaitForDartStatePublisherReady(uint64_t owner_epoch) {
     for (uint32_t attempt = 0u; attempt < 50u; ++attempt) {
-        if (AtomicLoad(&g_dart_state_publish_callback_epoch) == owner_epoch) {
+        if (AtomicLoad(&g_dart_state_owner_epoch) != owner_epoch) {
+            return false;
+        }
+        if (AtomicLoad(&g_dart_state_publish_callback_epoch) == owner_epoch &&
+                AtomicLoad(&g_dart_state_publish_pending) == 0u &&
+                AtomicLoad(&g_dart_state_publish_failure_epoch) !=
+                        owner_epoch) {
             return true;
         }
         if (AtomicLoad(&g_dart_state_publish_dispatcher_state) !=
@@ -2104,8 +2136,11 @@ bool EnsureDartStatePublisherThread() {
     const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
     if (AtomicLoad(&g_dart_state_publish_dispatcher_state) == uint32_t{3} &&
             AtomicLoad(&g_dart_state_publish_event_fd) >= 0) {
-        return AtomicLoad(&g_dart_state_publish_callback_epoch) ==
-                        owner_epoch ||
+        return (AtomicLoad(&g_dart_state_publish_callback_epoch) ==
+                        owner_epoch &&
+                AtomicLoad(&g_dart_state_publish_pending) == 0u &&
+                AtomicLoad(&g_dart_state_publish_failure_epoch) !=
+                        owner_epoch) ||
                 (WakeDartStatePublisher() &&
                  WaitForDartStatePublisherReady(owner_epoch));
     }
@@ -2319,6 +2354,7 @@ bool HandleRuntimeStatusQuery(void* intent) {
     const bool dart_scheduler_ready = !dart_scheduler_required ||
             (AtomicLoad(&g_dart_state_atfork_state) == uint32_t{3} &&
              dart_repair_ready &&
+             AtomicLoad(&g_dart_state_publish_pending) == 0u &&
              AtomicLoad(&g_dart_state_publish_dispatcher_state) ==
                      uint32_t{3} &&
              AtomicLoad(&g_dart_state_publish_event_fd) >= 0 &&
@@ -4047,7 +4083,7 @@ void InvalidateDartStateOwnerForRemap() {
     ClearRetiredDartObservation(&g_drawer_state_observation, owner_epoch);
     ClearRetiredDartObservation(&g_overview_state_observation, owner_epoch);
     ClearRetiredDartObservation(&g_editing_state_observation, owner_epoch);
-    __atomic_fetch_or(&g_dart_state_publish_pending, uint32_t{1} << 3u,
+    __atomic_fetch_or(&g_dart_state_publish_pending, kDartOwnerPending,
                       __ATOMIC_RELEASE);
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
                         "invalidated retired Dart state owner epoch=%llu",
