@@ -132,9 +132,15 @@ android {
         jniLibs.excludes += "**/libandroidx.graphics.path.so"
         resources.merges += "META-INF/xposed/*"
     }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
 }
 
 dependencies {
+    annotationProcessor(project(":AnnotationProcessor"))
     compileOnly(libs.libxposed.api)
     compileOnly(project(":hidden-api"))
 

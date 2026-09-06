@@ -1,5 +1,7 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+
 import android.animation.Animator;
 import android.content.Context;
 import android.content.res.Configuration;
@@ -290,11 +292,6 @@ final class SystemUiAndroid17Impl extends SystemUiPlatformImpl {
         // Keep the versioned name here so Android 16 retains mAnimations and an
         // unknown platform shape continues to fail closed.
         return "mTransitionAnimators";
-    }
-
-    @Override
-    String defaultTransitionOpenCaptureHookId() {
-        return "systemui_a17_transition_player_ready_open_capture";
     }
 
     @Override

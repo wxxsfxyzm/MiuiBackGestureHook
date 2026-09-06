@@ -1,12 +1,19 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
-import android.app.BroadcastOptions;
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
+import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiBackPipelineHook.*;
+import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiGestureInputHook.*;
+import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiNavigationPolicyHook.*;
+
 import android.app.ActivityThread;
+import android.app.BroadcastOptions;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -18,6 +25,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.Process;
@@ -60,7 +68,181 @@ import java.util.concurrent.atomic.AtomicReference;
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import io.github.libxposed.api.XposedInterface;
 
-public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
+public class SystemUiImpl extends SystemUiInputImpl {
+
+    private final AtomicBoolean reloadReleased = new AtomicBoolean();
+
+    @Override
+    public void onPackageLoad() {
+        // The concrete SystemUI hook classes own installation ordering.
+    }
+
+    public synchronized void ensureSystemUiPlatformSelected() throws Exception {
+        if (systemUiPlatformImpl != null) {
+            return;
+        }
+        selectSystemUiPlatformImpl(classLoader);
+    }
+
+    public boolean isHotReloadSafe() {
+        if (preparedBackTransitionHold.get() != null) {
+            return false;
+        }
+        for (NativeBackInputMonitor monitor
+                : new ArrayList<>(nativeInputMonitors.values())) {
+            if (monitor.blocksHotReload()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Release only resources owned by the SystemUI process runtime. */
+    public void releaseForHotReload() {
+        if (!reloadReleased.compareAndSet(false, true)) {
+            return;
+        }
+        cancelOneUiCrossTaskForHotReload();
+        preparedBackTargetArrival.set(null);
+        preparedBackTransitionHold.set(null);
+        freeformColorRootCandidate.set(null);
+        acceptingOpenSnapshots = false;
+        acceptingHeadlessNavBarLifecycle = false;
+        synchronized (backInputLifecycleLock) {
+            acceptingBackInputInstalls = false;
+        }
+        headlessNavBarLifecycleGeneration.incrementAndGet();
+        openSnapshotGeneration.incrementAndGet();
+        invalidateAllOpenTransitionSnapshots("hotReload");
+        clearLegacyBackGuard("hotReload");
+        acceptedInputToken.set(null);
+        miuiHomeAcceptedInputIdentity.set(null);
+        detachAllContextualSearchInputReceiversForHotReload();
+        closeHyperOsBackHapticHelper();
+        clearSystemUiReturnHomeCommitIdentity(null, 0L, "hotReload");
+        unregisterMiuiOverviewStateReceiver();
+        detachHeadlessNavBarLifecycleForHotReload();
+        for (NativeBackInputMonitor monitor
+                : new ArrayList<>(nativeInputMonitors.values())) {
+            monitor.detach();
+        }
+        nativeInputMonitors.clear();
+        destroySystemUiPlatformImpl();
+        releaseModuleLoggingPreference();
+    }
+
+    public Object headlessNavBarControllerState() {
+        synchronized (headlessNavBarLifecycleLock) {
+            return headlessNavBarLease == null ? null : headlessNavBarLease.controller;
+        }
+    }
+
+    public void clearPendingHotReloadHeadlessState() {
+        pendingHotReloadHeadlessState = new Object[0][0];
+    }
+
+    public void pendingHotReloadInputState(Object[][] value) {
+        pendingHotReloadInputState = value;
+    }
+
+    /** Install the input-owned hooks for the concrete SystemUI input hooker. */
+    public void installGestureInputHooks(ClassLoader loader) throws Throwable {
+        Context context = ActivityThread.currentApplication();
+        if (context != null) {
+            ensureMiuiOverviewStateReceiver(context);
+        }
+        hookMiuiOverviewProxy(loader);
+        hookEdgeBackGestureHandler(loader, true, true, true);
+        hookAospBackPanelHaptic(loader);
+        hookAospBackPanelViewHaptic(loader, true, true);
+    }
+
+    public boolean prepareGestureInputHotReload(Map<String, Object> state) {
+        if (!isHotReloadSafe()) {
+            return false;
+        }
+        Object[][] inputState = new Object[nativeInputMonitors.size()][2];
+        int index = 0;
+        for (Map.Entry<Object, NativeBackInputMonitor> entry
+                : new ArrayList<>(nativeInputMonitors.entrySet())) {
+            inputState[index][0] = entry.getKey();
+            inputState[index][1] = entry.getValue().driver.backAnimationImpl;
+            index++;
+        }
+        state.put("inputOwners", inputState);
+        state.put("overview", miuiOverviewVisible);
+        state.put("drawer", miuiDrawerVisible);
+        state.put("folder", miuiFolderVisible);
+        state.put("editing", miuiLauncherEditing);
+        state.put("overviewDismissUntil", miuiOverviewDismissPendingUntilUptime);
+        return true;
+    }
+
+    public void restoreGestureInputHotReload(Map<String, Object> state,
+                                             ClassLoader loader) {
+        try {
+            ensureSystemUiPlatformSelected();
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "SystemUI platform is not available while restoring input state",
+                    throwable);
+        }
+        Object inputOwners = state.get("inputOwners");
+        pendingHotReloadInputState(inputOwners instanceof Object[][]
+                ? (Object[][]) inputOwners : new Object[0][0]);
+        clearPendingHotReloadHeadlessState();
+        miuiOverviewVisible = Boolean.TRUE.equals(state.get("overview"));
+        miuiDrawerVisible = Boolean.TRUE.equals(state.get("drawer"));
+        miuiFolderVisible = Boolean.TRUE.equals(state.get("folder"));
+        miuiLauncherEditing = Boolean.TRUE.equals(state.get("editing"));
+        Object dismiss = state.get("overviewDismissUntil");
+        miuiOverviewDismissPendingUntilUptime =
+                dismiss instanceof Number ? ((Number) dismiss).longValue() : 0L;
+        restoreSystemUiHotReloadLifecycle(loader);
+        restoreMiuiOverviewDismissTimeoutAfterHotReload();
+    }
+
+    public boolean prepareNavigationPolicyHotReload(Map<String, Object> state) {
+        if (!isHotReloadSafe()) {
+            return false;
+        }
+        Object controller = headlessNavBarControllerState();
+        if (controller != null) {
+            state.put("headlessController", controller);
+        }
+        return true;
+    }
+
+    public void restoreNavigationPolicyHotReload(Map<String, Object> state) {
+        Object controller = state.get("headlessController");
+        if (controller != null) {
+            scheduleHeadlessNavBarReconcile(controller, "hotReload:nameKeyedState");
+        }
+    }
+
+    public boolean prepareContextualSearchHotReload(Map<String, Object> state) {
+        if (!isHotReloadSafe()) {
+            return false;
+        }
+        synchronized (contextualSearchNavigationBars) {
+            state.put("navigationBars", contextualSearchNavigationBars.toArray());
+        }
+        return true;
+    }
+
+    public void restoreContextualSearchHotReload(Map<String, Object> state) {
+        try {
+            ensureSystemUiPlatformSelected();
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "SystemUI platform is not available while restoring contextual-search state",
+                    throwable);
+        }
+        Object navigationBars = state.get("navigationBars");
+        restoreContextualSearchInputReceivers(
+                navigationBars instanceof Object[]
+                        ? (Object[]) navigationBars : new Object[0]);
+    }
 
     private volatile SystemUiPlatformImpl systemUiPlatformImpl;
     private volatile SharedPreferences contextualSearchStatePreferences;
@@ -93,41 +275,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             };
 
 
-    protected void installSystemUiHooks(ClassLoader classLoader) {
-        try {
-            selectSystemUiPlatformImpl(classLoader);
-            hookContextualSearchNavigationBar(classLoader, true, true);
-            Context systemUiContext = resolveCurrentApplicationContext(classLoader);
-            if (systemUiContext != null) {
-                ensureMiuiOverviewStateReceiver(systemUiContext);
-            } else {
-                moduleLog(Log.WARN, TAG,
-                        "SystemUI application context is not available yet; "
-                                + "status receiver will retry from the input owner");
-            }
-            hookMiuiOverviewProxy(classLoader);
-            hookNavigationBarTransientAutoHide(classLoader);
-            hookNavigationBarTransientAppearance(classLoader);
-            hookStatusBarTransientAppearance(classLoader);
-            hookNavigationBarGestureInsets(classLoader);
-            hookPlatformBackAnimationStatusBarReset(classLoader);
-            hookEdgeBackGestureHandler(classLoader, true, true, true);
-            hookAospBackPanelHaptic(classLoader);
-            hookAospBackPanelViewHaptic(classLoader);
-            hookNavigationBarControllerCreate(classLoader);
-            hookNavigationBarControllerRemove(classLoader);
-            hookNavigationBarControllerMode(classLoader);
-            hookShellBackAnimation(classLoader);
-            hookBackAnimationSendBackEvent(classLoader);
-            hookDefaultTransitionHandler(classLoader);
-            hookDefaultTransitionImplMerge(classLoader);
-            moduleLog(Log.INFO, TAG, "Installed SystemUI AOSP back restoration hooks, build="
-                    + BUILD_MARK + ", hooks=" + hookHandles.size());
-        } catch (Throwable throwable) {
-            moduleLog(Log.ERROR, TAG, "Failed to install SystemUI hooks", throwable);
-        }
-    }
-
     protected void hookContextualSearchNavigationBar(
             ClassLoader classLoader, boolean hookAttach, boolean hookDetach) {
         try {
@@ -136,16 +283,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             if (hookDetach) {
                 Method detached = navigationBarClass.getDeclaredMethod("onViewDetached");
                 detached.setAccessible(true);
-                recordHookHandle(hook(detached)
-                        .setId("systemui_contextual_search_nav_detach")
-                        .intercept(this::detachContextualSearchBeforeNavigationBarDetached));
+                hook(detached)
+                        .intercept(this::detachContextualSearchBeforeNavigationBarDetached);
             }
             if (hookAttach) {
                 Method attached = navigationBarClass.getDeclaredMethod("onViewAttached");
                 attached.setAccessible(true);
-                recordHookHandle(hook(attached)
-                        .setId("systemui_contextual_search_nav_attach")
-                        .intercept(this::attachContextualSearchAfterNavigationBarAttached));
+                hook(attached)
+                        .intercept(this::attachContextualSearchAfterNavigationBarAttached);
             }
             moduleLog(Log.INFO, TAG,
                     "Installed contextual-search NavigationBar lifecycle hooks"
@@ -245,10 +390,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         return implementation;
     }
 
-    protected String defaultTransitionOpenCaptureHookId() {
-        return requireSystemUiPlatformImpl().defaultTransitionOpenCaptureHookId();
-    }
-
     protected String systemUiInputArbiterStateAction() {
         SystemUiPlatformImpl implementation = systemUiPlatformImpl;
         return implementation == null
@@ -264,9 +405,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             if (reset == null) {
                 return;
             }
-            recordHookHandle(hook(reset)
-                    .setId("systemui_a17_back_background_status_reset")
-                    .intercept(this::neutralizeBrokenBackAnimationStatusBarReset));
+            hook(reset)
+                    .intercept(this::neutralizeBrokenBackAnimationStatusBarReset);
             moduleLog(Log.INFO, TAG,
                     "Neutralized stripped Android 17 BackAnimationBackground status reset");
         } catch (Throwable throwable) {
@@ -328,9 +468,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = proxyClass.getDeclaredMethod("onTransact",
                     int.class, Parcel.class, Parcel.class, int.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_block_miui_gesture_line_progress")
-                    .intercept(this::interceptMiuiOverviewProxyTransact));
+            hook(method)
+                    .intercept(this::interceptMiuiOverviewProxyTransact);
             moduleLog(Log.INFO, TAG, "Hooked MiuiOverviewProxy.onTransact");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG, "Failed to hook MiuiOverviewProxy", throwable);
@@ -351,9 +490,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         "onTransitionReady", IBinder.class, TransitionInfo.class,
                         SurfaceControl.Transaction.class, SurfaceControl.Transaction.class);
                 onTransitionReady.setAccessible(true);
-                recordHookHandle(hook(onTransitionReady)
-                        .setId(implementation.defaultTransitionOpenCaptureHookId())
-                        .intercept(this::capturePostedDefaultOpenTransition));
+                hook(onTransitionReady)
+                        .intercept(this::capturePostedDefaultOpenTransition);
                 moduleLog(Log.INFO, TAG,
                         "Hooked Android 17 TransitionPlayerImpl.onTransitionReady OPEN capture");
                 return;
@@ -365,9 +503,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     IBinder.class, TransitionInfo.class, SurfaceControl.Transaction.class,
                     SurfaceControl.Transaction.class, finishCallbackClass);
             startAnimation.setAccessible(true);
-            recordHookHandle(hook(startAnimation)
-                    .setId(implementation.defaultTransitionOpenCaptureHookId())
-                    .intercept(this::registerDefaultTransitionHandler));
+            hook(startAnimation)
+                    .intercept(this::registerDefaultTransitionHandler);
             moduleLog(Log.INFO, TAG, "Hooked exact DefaultTransitionHandler.startAnimation"
                     + ", impl=" + implementation.name());
         } catch (Throwable throwable) {
@@ -415,7 +552,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         try {
             captureRunningOpenTransition(chain.getThisObject(), chain.getArg(0),
-                    chain.getArg(1));
+                    chain.getArg(1), null);
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to capture Xiaomi OPEN transition snapshot",
                     throwable);
@@ -803,11 +940,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
-    protected void captureRunningOpenTransition(Object handler, Object token, Object info)
-            throws Exception {
-        captureRunningOpenTransition(handler, token, info, null);
-    }
-
     protected void captureRunningOpenTransition(
             Object handler, Object token, Object info, Object shellTransitions)
             throws Exception {
@@ -1093,9 +1225,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     transitionInfoClass, ArrayList.class, transitionInfoClass,
                     int.class, finishCallbackClass);
             mergeAnimation.setAccessible(true);
-            recordHookHandle(hook(mergeAnimation)
-                    .setId("systemui_default_transition_merge")
-                    .intercept(this::trackMiuiOpenCloseMerge));
+            hook(mergeAnimation)
+                    .intercept(this::trackMiuiOpenCloseMerge);
             moduleLog(Log.INFO, TAG, "Hooked exact DefaultTransitionImpl.mergeAnimation");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG, "Failed to hook DefaultTransitionImpl.mergeAnimation",
@@ -1117,9 +1248,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Method sendBackEvent = requireSystemUiPlatformImpl()
                     .backEventGuardMethod(classLoader);
-            recordHookHandle(hook(sendBackEvent)
-                    .setId("systemui_back_send_event_guard")
-                    .intercept(this::guardDuplicateBackEvent));
+            hook(sendBackEvent)
+                    .intercept(this::guardDuplicateBackEvent);
             moduleLog(Log.INFO, TAG, "Hooked BackAnimationController.sendBackEvent guard");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG,
@@ -1318,9 +1448,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = navigationBarClass.getDeclaredMethod(
                     "getBarLayoutParamsForRotation", int.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_gesture_insets")
-                    .intercept(this::restoreNavigationBarGestureInsets));
+            hook(method)
+                    .intercept(this::restoreNavigationBarGestureInsets);
             moduleLog(Log.INFO, TAG,
                     "Hooked NavigationBar application gesture Insets restoration");
         } catch (Throwable throwable) {
@@ -1417,9 +1546,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = navigationBarClass.getDeclaredMethod(
                     "showTransient", int.class, int.class, boolean.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_show_transient")
-                    .intercept(this::preserveTransientBarAutoHide));
+            hook(method)
+                    .intercept(this::preserveTransientBarAutoHide);
             moduleLog(Log.INFO, TAG, "Hooked NavigationBar.showTransient auto-hide preservation");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG,
@@ -1475,9 +1603,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = helperClass.getDeclaredMethod(
                     "transitionMode", int.class, boolean.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_transient_appearance")
-                    .intercept(this::preserveTransientBarAppearance));
+            hook(method)
+                    .intercept(this::preserveTransientBarAppearance);
             moduleLog(Log.INFO, TAG, "Hooked NavBarHelper.transitionMode transient appearance");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG,
@@ -1494,9 +1621,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 throw new NoSuchMethodException(STATUS_BAR_APPEARANCE_LAMBDA + ".invoke/6");
             }
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_status_bar_transient_appearance")
-                    .intercept(this::preserveTransientBarAppearance));
+            hook(method)
+                    .intercept(this::preserveTransientBarAppearance);
             moduleLog(Log.INFO, TAG, "Hooked status-bar transient appearance reducer");
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG,
@@ -1524,9 +1650,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         NAVIGATION_BAR_CONTROLLER_IMPL + ".createNavigationBar/3");
             }
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_controller_create")
-                    .intercept(this::reconcileAfterNavigationBarCreate));
+            hook(method)
+                    .intercept(this::reconcileAfterNavigationBarCreate);
             moduleLog(Log.INFO, TAG, "Hooked NavigationBarControllerImpl.createNavigationBar"
                     + " for headless lifecycle ownership");
         } catch (Throwable throwable) {
@@ -1542,9 +1667,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = controllerClass.getDeclaredMethod(
                     "removeNavigationBar", int.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_controller_remove")
-                    .intercept(this::reconcileAfterNavigationBarRemove));
+            hook(method)
+                    .intercept(this::reconcileAfterNavigationBarRemove);
             moduleLog(Log.INFO, TAG, "Hooked NavigationBarControllerImpl.removeNavigationBar"
                     + " for headless lifecycle ownership");
         } catch (Throwable throwable) {
@@ -1560,9 +1684,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method method = controllerClass.getDeclaredMethod(
                     "onNavigationModeChanged", int.class);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId("systemui_navigation_bar_controller_onNavigationModeChanged")
-                    .intercept(this::reconcileAfterNavigationModeChanged));
+            hook(method)
+                    .intercept(this::reconcileAfterNavigationModeChanged);
             moduleLog(Log.INFO, TAG, "Hooked NavigationBarControllerImpl.onNavigationModeChanged"
                     + " for headless lifecycle ownership");
         } catch (Throwable throwable) {
@@ -1844,7 +1967,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         Object updaterProxy = Proxy.newProxyInstance(
                 updaterInterface.getClassLoader(),
                 new Class<?>[]{updaterInterface},
-                (proxy, method, args) -> headlessUpdaterResult(proxy, method, args));
+                (proxy, method, args) -> proxyDefaultResult(
+                        proxy, method, args,
+                        "MiuiBackGestureHook.HeadlessNavBarUpdater"));
         try {
             navigationModeChanged.invoke(edgeBackGestureHandler,
                     Integer.valueOf(navigationMode));
@@ -1911,55 +2036,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             throw new IllegalStateException("Failed to attach headless NavBar lease",
                     throwable);
         }
-    }
-
-    protected Object headlessUpdaterResult(Object proxy, Method method, Object[] args) {
-        if (method.getDeclaringClass() == Object.class) {
-            switch (method.getName()) {
-                case "equals":
-                    return Boolean.valueOf(args != null && args.length == 1
-                            && proxy == args[0]);
-                case "hashCode":
-                    return Integer.valueOf(System.identityHashCode(proxy));
-                case "toString":
-                    return "MiuiBackGestureHook.HeadlessNavBarUpdater@"
-                            + Integer.toHexString(System.identityHashCode(proxy));
-                default:
-                    return null;
-            }
-        }
-        return primitiveDefaultValue(method.getReturnType());
-    }
-
-    protected static Object primitiveDefaultValue(Class<?> type) {
-        if (type == void.class || !type.isPrimitive()) {
-            return null;
-        }
-        if (type == boolean.class) {
-            return Boolean.FALSE;
-        }
-        if (type == char.class) {
-            return Character.valueOf('\0');
-        }
-        if (type == byte.class) {
-            return Byte.valueOf((byte) 0);
-        }
-        if (type == short.class) {
-            return Short.valueOf((short) 0);
-        }
-        if (type == int.class) {
-            return Integer.valueOf(0);
-        }
-        if (type == long.class) {
-            return Long.valueOf(0L);
-        }
-        if (type == float.class) {
-            return Float.valueOf(0.0f);
-        }
-        if (type == double.class) {
-            return Double.valueOf(0.0d);
-        }
-        return null;
     }
 
     protected static boolean containsIdentity(Object collection, Object target) {
@@ -2120,7 +2196,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     || generation != headlessNavBarLifecycleGeneration.get()) {
                 return;
             }
-            Context systemUiContext = resolveCurrentApplicationContext(classLoader);
+            Context systemUiContext = ActivityThread.currentApplication();
             if (systemUiContext != null) {
                 ensureMiuiOverviewStateReceiver(systemUiContext);
             }
@@ -2203,9 +2279,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             try {
                 Method updateIsEnabled = handlerClass.getDeclaredMethod("updateIsEnabled");
                 updateIsEnabled.setAccessible(true);
-                recordHookHandle(hook(updateIsEnabled)
-                        .setId("systemui_edge_back_updateIsEnabled")
-                        .intercept(this::onEdgeBackUpdateIsEnabled));
+                hook(updateIsEnabled)
+                        .intercept(this::onEdgeBackUpdateIsEnabled);
                 installed++;
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler.updateIsEnabled",
@@ -2217,9 +2292,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 Method navigationModeChanged = handlerClass.getDeclaredMethod(
                         "onNavigationModeChanged", int.class);
                 navigationModeChanged.setAccessible(true);
-                recordHookHandle(hook(navigationModeChanged)
-                        .setId("systemui_edge_back_onNavigationModeChanged")
-                        .intercept(this::onEdgeBackNavigationModeChanged));
+                hook(navigationModeChanged)
+                        .intercept(this::onEdgeBackNavigationModeChanged);
                 installed++;
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG,
@@ -2233,9 +2307,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         requireSystemUiPlatformImpl()
                                 .backAnimationParameterClass(classLoader));
                 setBackAnimation.setAccessible(true);
-                recordHookHandle(hook(setBackAnimation)
-                        .setId("systemui_edge_back_setBackAnimation")
-                        .intercept(this::onEdgeBackSetBackAnimation));
+                hook(setBackAnimation)
+                        .intercept(this::onEdgeBackSetBackAnimation);
                 installed++;
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG, "Failed to hook EdgeBackGestureHandler.setBackAnimation",
@@ -2258,9 +2331,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method performHapticFeedback = vibratorHelperClass.getDeclaredMethod(
                     "performHapticFeedback", View.class, int.class);
             performHapticFeedback.setAccessible(true);
-            recordHookHandle(hook(performHapticFeedback)
-                    .setId("systemui_back_panel_aosp_haptic")
-                    .intercept(this::replaceAospBackPanelHaptic));
+            hook(performHapticFeedback)
+                    .intercept(this::replaceAospBackPanelHaptic);
             moduleLog(Log.INFO, TAG,
                     "Hooked AOSP back-panel threshold haptic replacement");
         } catch (Throwable throwable) {
@@ -2287,10 +2359,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
      * AOSP threshold constants are intercepted; both use the same single HyperOS default
      * effect, without adding another feedback stage.
      */
-    protected void hookAospBackPanelViewHaptic(ClassLoader classLoader) {
-        hookAospBackPanelViewHaptic(classLoader, true, true);
-    }
-
     protected void hookAospBackPanelViewHaptic(ClassLoader classLoader,
                                                boolean hookSingleArgument,
                                                boolean hookFlagsArgument) {
@@ -2301,9 +2369,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 Method performHapticFeedback = viewClass.getDeclaredMethod(
                         "performHapticFeedback", int.class);
                 performHapticFeedback.setAccessible(true);
-                recordHookHandle(hook(performHapticFeedback)
-                        .setId("systemui_back_panel_aosp_view_haptic")
-                        .intercept(this::replaceAospBackPanelViewHaptic));
+                hook(performHapticFeedback)
+                        .intercept(this::replaceAospBackPanelViewHaptic);
                 installed++;
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG,
@@ -2317,9 +2384,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 Method performHapticFeedback = viewClass.getDeclaredMethod(
                         "performHapticFeedback", int.class, int.class);
                 performHapticFeedback.setAccessible(true);
-                recordHookHandle(hook(performHapticFeedback)
-                        .setId("systemui_back_panel_aosp_view_haptic_flags")
-                        .intercept(this::replaceAospBackPanelViewHaptic));
+                hook(performHapticFeedback)
+                        .intercept(this::replaceAospBackPanelViewHaptic);
                 installed++;
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG,
@@ -2385,10 +2451,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Class<?> controllerClass =
                     Class.forName(BACK_ANIMATION_CONTROLLER, false, classLoader);
-            hookShellAnimationFinished(controllerClass, "onBackAnimationFinished",
-                    "shell_back_onBackAnimationFinished", false);
-            hookShellAnimationFinished(controllerClass, "finishBackAnimation",
-                    "shell_back_finishBackAnimation", true);
+            hookShellAnimationFinished(controllerClass, "onBackAnimationFinished", false);
+            hookShellAnimationFinished(controllerClass, "finishBackAnimation", true);
             hookBackNavigationInfoReceived(controllerClass);
             hookPreparedBackTargetArrival(classLoader);
             hookPreparedBackTerminal(controllerClass);
@@ -2482,9 +2546,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         "Back animation adapter onAnimationStart");
             }
             onAnimationStart.setAccessible(true);
-            recordHookHandle(hook(onAnimationStart)
-                    .setId("systemui_back_prepared_target_arrival")
-                    .intercept(this::onPreparedBackTargetArrival));
+            hook(onAnimationStart)
+                    .intercept(this::onPreparedBackTargetArrival);
             preparedBackTargetArrivalHookReady = true;
             moduleLog(Log.INFO, TAG,
                     "Hooked prepared-back remote-target arrival handoff");
@@ -2501,9 +2564,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method finishBackNavigation = controllerClass.getDeclaredMethod(
                     "finishBackNavigation", boolean.class);
             finishBackNavigation.setAccessible(true);
-            recordHookHandle(hook(finishBackNavigation)
-                    .setId("systemui_back_prepared_terminal")
-                    .intercept(this::onPreparedBackTerminal));
+            hook(finishBackNavigation)
+                    .intercept(this::onPreparedBackTerminal);
             preparedBackTerminalHookReady = true;
             moduleLog(Log.INFO, TAG,
                     "Hooked prepared-back terminal handoff");
@@ -2723,9 +2785,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     SurfaceControl.Transaction.class.getName(),
                     "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
             preparePreparedBackStartAnimationInvoker(startAnimation);
-            recordHookHandle(hook(startAnimation)
-                    .setId("systemui_back_prepared_transition_decision")
-                    .intercept(this::holdPreparedBackTransitionUntilTargets));
+            hook(startAnimation)
+                    .intercept(this::holdPreparedBackTransitionUntilTargets);
             moduleLog(Log.INFO, TAG,
                     "Hooked prepared-back transition target ordering");
         } catch (Throwable throwable) {
@@ -2751,9 +2812,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         PreparedBackTransitionHold hold;
         try {
             Object info = chain.getArg(1);
-            Object type = readTransitionInfoType(info);
-            if (!(type instanceof Number)
-                    || ((Number) type).intValue() != TRANSIT_PREDICTIVE_BACK) {
+            Number type = readTransitionInfoType(info);
+            if (type == null || type.intValue() != TRANSIT_PREDICTIVE_BACK) {
                 return chain.proceed();
             }
             if (!(chain.getArg(2) instanceof SurfaceControl.Transaction)
@@ -3020,9 +3080,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Method setHidden = requireExactDeclaredMethod(SurfaceControl.Builder.class,
                     "setHidden", SurfaceControl.Builder.class.getName(), "boolean");
-            recordHookHandle(hook(setHidden)
-                    .setId("systemui_back_color_root_scrim_creation")
-                    .intercept(this::keepFreeformScrimHiddenUntilFirstApply));
+            hook(setHidden)
+                    .intercept(this::keepFreeformScrimHiddenUntilFirstApply);
             moduleLog(Log.INFO, TAG,
                     "Hooked freeform cross-activity scrim creation visibility");
         } catch (Throwable throwable) {
@@ -3057,11 +3116,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         // Xiaomi's build, and a missing one must only degrade its own stage.
         if (installColorRootApply) {
             try {
-                Method apply = resolveSlideMethod(defaultClass, baseClass,
+                Method apply = resolveMethodBySignature(defaultClass, baseClass,
                         "applyTransaction", void.class);
-                recordHookHandle(hook(apply)
-                        .setId("systemui_back_color_root_apply")
-                        .intercept(this::onCrossActivityColorRootApply));
+                hook(apply)
+                        .intercept(this::onCrossActivityColorRootApply);
                 moduleLog(Log.INFO, TAG, "Hooked freeform color-layer root adoption");
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG,
@@ -3070,11 +3128,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         if (installStart) {
             try {
-                Method start = resolveSlideMethod(defaultClass, baseClass,
+                Method start = resolveMethodBySignature(defaultClass, baseClass,
                         "startBackAnimation", void.class, backMotionEventClass);
-                recordHookHandle(hook(start)
-                        .setId("systemui_back_slide_start")
-                        .intercept(this::onCrossActivitySlideStart));
+                hook(start)
+                        .intercept(this::onCrossActivitySlideStart);
                 moduleLog(Log.INFO, TAG, "Hooked slide start as " + start.getName());
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG, "Failed to hook slide start", throwable);
@@ -3090,9 +3147,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         "onBackStarted", BackMotionEvent.class,
                         BackProgressAnimator.ProgressCallback.class);
                 register.setAccessible(true);
-                recordHookHandle(hook(register)
-                        .setId("systemui_back_slide_progress")
-                        .intercept(this::onCrossActivitySlideProgressRegistration));
+                hook(register)
+                        .intercept(this::onCrossActivitySlideProgressRegistration);
                 moduleLog(Log.INFO, TAG,
                         "Hooked slide progress via BackProgressAnimator registration");
             } catch (Throwable throwable) {
@@ -3101,16 +3157,15 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         if (installPostCommit) {
             try {
-                Method postCommit = resolveSlideMethod(defaultClass, baseClass,
+                Method postCommit = resolveMethodBySignature(defaultClass, baseClass,
                         "onPostCommitProgress", void.class, float.class);
                 // Hooked on the base class means this is the super-call position:
                 // the subclass override keeps writing its native geometry after our
                 // interceptor returns, so our frame must be applied afterwards.
                 miuixSlidePostCommitOnBase =
                         postCommit.getDeclaringClass() == baseClass;
-                recordHookHandle(hook(postCommit)
-                        .setId("systemui_back_slide_post_commit")
-                        .intercept(this::onCrossActivitySlidePostCommit));
+                hook(postCommit)
+                        .intercept(this::onCrossActivitySlidePostCommit);
                 moduleLog(Log.INFO, TAG, "Hooked slide post-commit as "
                         + postCommit.getDeclaringClass().getSimpleName()
                         + "." + postCommit.getName()
@@ -3121,11 +3176,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         if (installDuration) {
             try {
-                Method duration = resolveSlideMethod(defaultClass, baseClass,
+                Method duration = resolveMethodBySignature(defaultClass, baseClass,
                         "getPostCommitAnimationDuration", long.class);
-                recordHookHandle(hook(duration)
-                        .setId("systemui_back_slide_duration")
-                        .intercept(this::onCrossActivitySlideDuration));
+                hook(duration)
+                        .intercept(this::onCrossActivitySlideDuration);
                 moduleLog(Log.INFO, TAG, "Hooked slide duration as " + duration.getName());
             } catch (Throwable throwable) {
                 moduleLog(Log.ERROR, TAG, "Failed to hook slide duration", throwable);
@@ -3133,11 +3187,10 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
         if (installFinish) {
             try {
-                Method finish = resolveSlideMethod(defaultClass, baseClass,
+                Method finish = resolveMethodBySignature(defaultClass, baseClass,
                         "finishAnimation", void.class);
-                recordHookHandle(hook(finish)
-                        .setId("systemui_back_slide_finish")
-                        .intercept(this::onCrossActivitySlideFinish));
+                hook(finish)
+                        .intercept(this::onCrossActivitySlideFinish);
                 moduleLog(Log.INFO, TAG, "Hooked slide finish as "
                         + finish.getDeclaringClass().getSimpleName()
                         + "." + finish.getName());
@@ -3157,9 +3210,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 if ("ensureBackground".equals(method.getName())
                         && method.getParameterCount() == expectedParameterCount) {
                     method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("systemui_cross_task_background")
-                            .intercept(this::tintCrossTaskBackground));
+                    hook(method)
+                            .intercept(this::tintCrossTaskBackground);
                     moduleLog(Log.INFO, TAG, "Hooked cross-task background tint");
                     return;
                 }
@@ -3272,69 +3324,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             freeformColorRootAdoption = null;
         }
         return chain.proceed();
-    }
-
-    /**
-     * Resolves an animation-class member by name first, then falls back to a unique
-     * signature match so an R8-renamed member is still found. Same-name declarations
-     * across the hierarchy are one virtual method — the most-derived one wins;
-     * different-name candidates at the same level are ambiguous and fail.
-     */
-    protected Method resolveSlideMethod(Class<?> leaf, Class<?> stop, String name,
-                                        Class<?> returnType, Class<?>... parameters)
-            throws NoSuchMethodException {
-        try {
-            return findDeclaredMethodInHierarchy(leaf, stop, name, parameters);
-        } catch (NoSuchMethodException ignored) {
-        }
-        Class<?> current = leaf;
-        while (current != null) {
-            Method match = null;
-            for (Method candidate : current.getDeclaredMethods()) {
-                if (candidate.isSynthetic()
-                        || candidate.getReturnType() != returnType
-                        || !Arrays.equals(candidate.getParameterTypes(), parameters)) {
-                    continue;
-                }
-                if (match != null) {
-                    throw new NoSuchMethodException(name
-                            + ": ambiguous signature fallback in " + current.getName()
-                            + " (" + match.getName() + " vs " + candidate.getName()
-                            + ")");
-                }
-                match = candidate;
-            }
-            if (match != null) {
-                match.setAccessible(true);
-                moduleLog(Log.INFO, TAG, "Resolved " + name + " by signature as "
-                        + current.getName() + "." + match.getName());
-                return match;
-            }
-            if (current == stop) {
-                break;
-            }
-            current = current.getSuperclass();
-        }
-        throw new NoSuchMethodException(leaf.getName() + "." + name);
-    }
-
-    protected Method findDeclaredMethodInHierarchy(Class<?> leaf, Class<?> stop,
-                                                   String name, Class<?>... parameters)
-            throws NoSuchMethodException {
-        Class<?> current = leaf;
-        while (current != null) {
-            try {
-                Method method = current.getDeclaredMethod(name, parameters);
-                method.setAccessible(true);
-                return method;
-            } catch (NoSuchMethodException ignored) {
-            }
-            if (current == stop) {
-                break;
-            }
-            current = current.getSuperclass();
-        }
-        throw new NoSuchMethodException(leaf.getName() + "." + name);
     }
 
     protected volatile boolean miuixSlideAnimActive;
@@ -4070,23 +4059,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 && session.enteringLeash.isValid();
     }
 
-    protected Object readFirstCrossTaskField(Object target, String... names)
-            throws Exception {
-        Throwable failure = null;
-        for (String name : names) {
-            try {
-                return readField(target, name);
-            } catch (Throwable throwable) {
-                failure = throwable;
-            }
-        }
-        if (failure instanceof Exception) {
-            throw (Exception) failure;
-        }
-        throw new NoSuchFieldException(target.getClass().getName()
-                + "." + Arrays.toString(names));
-    }
-
     /**
      * Fires when any BackProgressAnimator registers its per-gesture ProgressCallback.
      * For the armed cross-activity animation's own animator, the native callback (the
@@ -4618,9 +4590,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 if ("handlePrepareTransition".equals(method.getName())
                         && method.getParameterCount() == 5) {
                     method.setAccessible(true);
-                    recordHookHandle(hook(method)
-                            .setId("systemui_back_prepare_reparent")
-                            .intercept(this::correctPredictiveBackPrepareReparent));
+                    hook(method)
+                            .intercept(this::correctPredictiveBackPrepareReparent);
                     moduleLog(Log.INFO, TAG,
                             "Hooked Shell predictive prepare ownership correction");
                     return;
@@ -4639,10 +4610,13 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            Method method = requireBackMergeAnimation(handlerClass);
-            recordHookHandle(hook(method)
-                    .setId("systemui_back_commit_composition")
-                    .intercept(this::correctPredictiveBackCommitComposition));
+            Method method = requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
+                    IBinder.class.getName(), TransitionInfo.class.getName(),
+                    SurfaceControl.Transaction.class.getName(),
+                    SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
+                    "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
+            hook(method)
+                    .intercept(this::correctPredictiveBackCommitComposition);
             backCommitCompositionHookReady = true;
             moduleLog(Log.INFO, TAG,
                     "Hooked Shell predictive return-home commit composition");
@@ -4651,15 +4625,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     "Failed to hook Shell predictive return-home commit composition",
                     throwable);
         }
-    }
-
-    protected Method requireBackMergeAnimation(Class<?> handlerClass)
-            throws NoSuchMethodException {
-        return requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
-                IBinder.class.getName(), TransitionInfo.class.getName(),
-                SurfaceControl.Transaction.class.getName(),
-                SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
-                "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
     }
 
     protected void captureFreeformColorRootCandidate(Object handler,
@@ -5095,8 +5060,9 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 new Class<?>[]{callbackClass},
                 (proxy, method, invocationArgs) -> {
                     if (method.getDeclaringClass() == Object.class) {
-                        return headlessUpdaterResult(
-                                proxy, method, invocationArgs);
+                        return proxyDefaultResult(
+                                proxy, method, invocationArgs,
+                                "MiuiBackGestureHook.HeadlessNavBarUpdater");
                     }
                     if ("onTransitionFinished".equals(method.getName())
                             && method.getParameterCount() == 1
@@ -5980,9 +5946,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             Method applyFinishOpen = handlerClass.getDeclaredMethod(
                     "applyFinishOpenTransition");
             applyFinishOpen.setAccessible(true);
-            recordHookHandle(hook(applyFinishOpen)
-                    .setId("systemui_back_finish_open_atomic")
-                    .intercept(this::transferReturnHomeFinishIntoCloseStart));
+            hook(applyFinishOpen)
+                    .intercept(this::transferReturnHomeFinishIntoCloseStart);
             backFinishOpenAtomicHookReady = true;
             boolean callerDeoptimized =
                     deoptimizeBackFinishOpenCaller(classLoader);
@@ -6010,7 +5975,11 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            Method mergeAnimation = requireBackMergeAnimation(handlerClass);
+            Method mergeAnimation = requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
+                    IBinder.class.getName(), TransitionInfo.class.getName(),
+                    SurfaceControl.Transaction.class.getName(),
+                    SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
+                    "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
             backFinishOpenCallerDeoptimized = deoptimize(mergeAnimation);
             moduleLog(backFinishOpenCallerDeoptimized ? Log.INFO : Log.WARN,
                     TAG, "Deoptimized exact BackTransitionHandler.mergeAnimation"
@@ -6097,33 +6066,16 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 closingDisplayId);
     }
 
-    protected int resolveRemoteTargetActivityType(Object target) throws Exception {
-        Object windowConfiguration = readField(target, "windowConfiguration");
-        Object activityType = invokeAnyMethod(
-                windowConfiguration, "getActivityType", new Object[0]);
-        return activityType instanceof Number
-                ? ((Number) activityType).intValue() : -1;
-    }
-
-    protected int resolveRemoteTargetWindowingMode(Object target) throws Exception {
-        Object windowConfiguration = readField(target, "windowConfiguration");
-        Object windowingMode = invokeAnyMethod(
-                windowConfiguration, "getWindowingMode", new Object[0]);
-        return windowingMode instanceof Number
-                ? ((Number) windowingMode).intValue() : -1;
-    }
-
     protected void hookShellAnimationFinished(Class<?> controllerClass, String methodName,
-                                              String hookId, boolean optional)
+                                              boolean optional)
             throws NoSuchMethodException {
         try {
             Method method = controllerClass.getDeclaredMethod(methodName);
             method.setAccessible(true);
-            recordHookHandle(hook(method)
-                    .setId(hookId)
+            hook(method)
                     .intercept("finishBackAnimation".equals(methodName)
                             ? this::onShellAnimationFinished
-                            : this::proceedShellAnimationLifecycle));
+                            : this::proceedShellAnimationLifecycle);
         } catch (NoSuchMethodException exception) {
             if (!optional) {
                 throw exception;
@@ -6138,9 +6090,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 "onBackNavigationInfoReceived",
                 BackNavigationInfo.class, BackTouchTracker.class);
         method.setAccessible(true);
-        recordHookHandle(hook(method)
-                .setId("shell_back_onBackNavigationInfoReceived")
-                .intercept(this::onBackNavigationInfoReceived));
+        hook(method)
+                .intercept(this::onBackNavigationInfoReceived);
     }
 
 
@@ -6530,9 +6481,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 }
                 Method invoked = callbackClass.getDeclaredMethod("onBackInvoked");
                 invoked.setAccessible(true);
-                recordHookHandle(hook(invoked)
-                        .setId("systemui_oneui_cross_task_invoke")
-                        .intercept(this::onOneUiCrossTaskInvoked));
+                hook(invoked)
+                        .intercept(this::onOneUiCrossTaskInvoked);
             }
             if (installFinish) {
                 Method finish = null;
@@ -6552,9 +6502,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 }
                 finish.setAccessible(true);
                 oneUiCrossTaskFinishMethod = finish;
-                recordHookHandle(hook(finish)
-                        .setId("systemui_oneui_cross_task_finish")
-                        .intercept(this::onOneUiCrossTaskFinished));
+                hook(finish)
+                        .intercept(this::onOneUiCrossTaskFinished);
             }
             moduleLog(Log.INFO, TAG, "Hooked One UI CrossTask animation bridge"
                     + ", invoke=" + installInvoke + ", finish=" + installFinish
@@ -6563,26 +6512,6 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             oneUiCrossTaskFinishMethod = null;
             moduleLog(Log.ERROR, TAG,
                     "Failed to hook One UI CrossTask animation bridge", throwable);
-        }
-    }
-
-    protected Context resolveCurrentApplicationContext(ClassLoader classLoader) {
-        try {
-            if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL) {
-                return ActivityThread.currentApplication();
-            }
-            Class<?> activityThread = Class.forName(
-                    "android.app.ActivityThread", false, classLoader);
-            Method currentApplication = activityThread.getDeclaredMethod(
-                    "currentApplication");
-            currentApplication.setAccessible(true);
-            Object application = currentApplication.invoke(null);
-            return application instanceof Context ? (Context) application : null;
-        } catch (Throwable throwable) {
-            moduleLog(Log.WARN, TAG,
-                    "Failed to resolve SystemUI application context for status receiver",
-                    throwable);
-            return null;
         }
     }
 
@@ -6619,7 +6548,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     // on the query so a missing boot-created service remains
                     // fail-closed after an API-102 hot upgrade.
                     .putExtra(EXTRA_CONTEXTUAL_SEARCH_ENABLED,
-                            isContextualSearchLongPressRuntimeEnabled())
+                            isContextualSearchLongPressEnabled())
                     .putExtra("sender_uid", Process.myUid());
             Bundle options = BroadcastOptions.makeBasic()
                     .setShareIdentityEnabled(true)
@@ -6926,6 +6855,20 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 + ", overviewVisible=" + overviewVisible);
     }
 
+    @Override
+    protected synchronized void clearMiuiOverviewAfterRejectedShellTarget(
+            String reason) {
+        // A callback-only probe is no longer authoritative after Shell returns a different
+        // target. Feed that evidence through the normal reducer so the short late-enter guard
+        // is retained, while the stale Overview bit cannot classify every following DOWN as
+        // launcher Recents.
+        updateMiuiOverviewState(false, "staleShellTarget", reason);
+        moduleLog(Log.WARN, TAG,
+                "Cleared stale Miui Recents state after rejected Shell target"
+                        + ", reason=" + reason
+                        + ", overviewVisible=" + miuiOverviewVisible);
+    }
+
     protected synchronized void beginMiuiOverviewDismiss(String reason) {
         long pendingUntil = SystemClock.uptimeMillis() + MIUI_OVERVIEW_DISMISS_TIMEOUT_MS;
         miuiOverviewDismissPendingUntilUptime = pendingUntil;
@@ -7062,4 +7005,482 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     throwable);
         }
     }
+    protected int resolveTaskInfoActivityType(Object taskInfo) {
+        try {
+            Object directValue = invokeAnyMethod(
+                    taskInfo, "getActivityType", new Object[0]);
+            if (directValue instanceof Number) {
+                return ((Number) directValue).intValue();
+            }
+            Object configuration = readField(taskInfo, "configuration");
+            Object windowConfiguration = readField(
+                    configuration, "windowConfiguration");
+            Object value = invokeAnyMethod(windowConfiguration,
+                    "getActivityType", new Object[0]);
+            if (value instanceof Number) {
+                return ((Number) value).intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return readIntFieldOrDefault(taskInfo, "topActivityType", -1);
+    }
+
+    protected int resolveTaskInfoWindowingMode(Object taskInfo) {
+        try {
+            Object directValue = invokeAnyMethod(
+                    taskInfo, "getWindowingMode", new Object[0]);
+            if (directValue instanceof Number) {
+                return ((Number) directValue).intValue();
+            }
+            Object configuration = readField(taskInfo, "configuration");
+            Object windowConfiguration = readField(
+                    configuration, "windowConfiguration");
+            Object value = invokeAnyMethod(windowConfiguration,
+                    "getWindowingMode", new Object[0]);
+            if (value instanceof Number) {
+                return ((Number) value).intValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    protected ComponentName readTaskInfoComponent(Object taskInfo) {
+        for (String fieldName : new String[]{
+                "baseActivity", "realActivity", "topActivity"}) {
+            try {
+                Object component = readField(taskInfo, fieldName);
+                if (component instanceof ComponentName) {
+                    return (ComponentName) component;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    protected boolean isMiuiHomeLauncherOpenType(String typeName) {
+        return "OPEN_FROM_ELEMENT".equals(typeName)
+                || "OPEN_FROM_HOME".equals(typeName)
+                || "OPEN_FROM_RECENTS".equals(typeName);
+    }
+
+    protected int readTransitionDebugId(Object infoOrExpose) {
+        if (infoOrExpose == null) {
+            return -1;
+        }
+        try {
+            Object infoObject = infoOrExpose;
+            if (!(infoObject instanceof TransitionInfo)) {
+                infoObject = invokeAnyMethod(infoObject, "unbox", new Object[0]);
+            }
+            return infoObject instanceof TransitionInfo
+                    ? ((TransitionInfo) infoObject).getDebugId() : -1;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    protected void sendAuthenticatedMiuiHomeState(Context context, Intent intent) {
+        Context appContext = context.getApplicationContext();
+        Intent explicitIntent = new Intent(intent);
+        explicitIntent.setPackage(SYSTEM_UI);
+        Bundle options = BroadcastOptions.makeBasic()
+                .setShareIdentityEnabled(true)
+                .toBundle();
+        appContext.sendBroadcast(explicitIntent, null, options);
+    }
+
+    protected void sendAuthenticatedMiuiHomeOpenBreakCommand(
+            Context context, long generation, long attemptId,
+            SystemUiBackGestureDriver driver, Object releaseController) {
+        // Close the local admission gate as soon as one committed command is emitted. The
+        // MiuiHome receiver independently revalidates its native controller before acting.
+        if (miuiLauncherOpenBreakGeneration == generation) {
+            miuiLauncherOpenBreakAvailable = false;
+        }
+        Context appContext = context.getApplicationContext();
+        Intent commandIntent = new Intent(MODULE_MIUI_HOME_OPEN_BREAK_COMMAND);
+        commandIntent.setPackage(MIUI_HOME);
+        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, generation);
+        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT, attemptId);
+        Bundle options = BroadcastOptions.makeBasic()
+                .setShareIdentityEnabled(true)
+                .toBundle();
+        BroadcastReceiver resultReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context receiverContext, Intent intent) {
+                driver.onLauncherOpenBreakCommandResult(
+                        generation, attemptId, getResultCode(), getResultData(),
+                        releaseController);
+            }
+        };
+        appContext.sendOrderedBroadcast(commandIntent, null, options,
+                resultReceiver, new Handler(Looper.getMainLooper()),
+                LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER, "noReceiver", null);
+        moduleLog(Log.INFO, TAG, "Sent authenticated MiuiHome launcher OPEN break command"
+                + ", generation=" + generation
+                + ", attempt=" + attemptId
+                + ", ordered=true");
+    }
+
+    protected void onSystemUiInputMonitorAttached(Context context) {
+        int count = systemUiInputArbiterMonitorCount.incrementAndGet();
+        publishSystemUiInputArbiterState(context, count > 0, "monitorAttached");
+    }
+
+    protected void onSystemUiInputMonitorDetached(Context context) {
+        int count = systemUiInputArbiterMonitorCount.decrementAndGet();
+        if (count < 0) {
+            systemUiInputArbiterMonitorCount.set(0);
+            count = 0;
+        }
+        publishSystemUiInputArbiterState(context, count > 0, "monitorDetached");
+    }
+
+    protected void publishSystemUiInputArbiterState(Context context, boolean ready,
+                                                    String reason) {
+        if (context == null) {
+            return;
+        }
+        try {
+            boolean contextualSearchEnabled =
+                    isContextualSearchLongPressEnabled();
+            Intent stateIntent = new Intent(systemUiInputArbiterStateAction());
+            stateIntent.setPackage(MIUI_HOME);
+            stateIntent.putExtra(EXTRA_INPUT_ARBITER_READY, ready);
+            stateIntent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
+                    systemUiInputArbiterGeneration);
+            stateIntent.putExtra(EXTRA_CONTEXTUAL_SEARCH_ENABLED,
+                    contextualSearchEnabled);
+            stateIntent.putExtra("sender_uid", Process.myUid());
+            Bundle options = BroadcastOptions.makeBasic()
+                    .setShareIdentityEnabled(true)
+                    .toBundle();
+            context.getApplicationContext().sendBroadcast(stateIntent, null, options);
+            moduleLog(Log.INFO, TAG, "Published SystemUI input-arbiter state"
+                    + ", ready=" + ready
+                    + ", contextualSearch=" + contextualSearchEnabled
+                    + ", generation=" + systemUiInputArbiterGeneration
+                    + ", monitors=" + systemUiInputArbiterMonitorCount.get()
+                    + ", reason=" + reason);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to publish SystemUI input-arbiter state"
+                    + ", reason=" + reason, throwable);
+        }
+    }
+
+    protected void publishStandardReturnHomeCommit(
+            int taskId, int transitionDebugId,
+            Object compositionController, Object exactFinishCallback,
+            boolean elementBoundaryOnly) {
+        Context context = miuiOverviewReceiverContext;
+        long attempt = systemUiReturnHomeCommitAttemptIds.incrementAndGet();
+        SystemUiReturnHomeCommitIdentity identity =
+                systemUiReturnHomeCommitIdentity.get();
+        MiuiHomeAcceptedInputToken input = identity == null
+                ? null : identity.input;
+        if (context == null || taskId < 0 || transitionDebugId < 0
+                || systemUiInputArbiterMonitorCount.get() <= 0
+                || identity == null || input == null
+                || identity.taskId != taskId
+                || identity.controller != compositionController
+                || input.generation
+                != systemUiInputArbiterGeneration) {
+            moduleLog(Log.ERROR, TAG,
+                    "Could not publish standard return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", context=" + shortObject(context)
+                            + ", monitors="
+                            + systemUiInputArbiterMonitorCount.get()
+                            + ", identityTaskId="
+                            + (identity == null ? -1 : identity.taskId)
+                            + ", sameController="
+                            + (identity != null
+                            && identity.controller
+                            == compositionController)
+                            + ", eventId="
+                            + (input == null ? 0 : input.eventId)
+                            + ", inputGeneration="
+                            + (input == null ? 0L : input.generation));
+            return;
+        }
+        IBinder runnerSession;
+        try {
+            runnerSession = captureReturnHomeRunnerSession(
+                    compositionController);
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Could not capture exact Shell return-home runner session"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId,
+                    throwable);
+            return;
+        }
+        StandardReturnHomeCommitSignal signal =
+                new StandardReturnHomeCommitSignal(
+                        attempt, systemUiInputArbiterGeneration,
+                        taskId, transitionDebugId,
+                        input.eventId, input.downTime,
+                        input.deviceId, input.source,
+                        input.displayId, input.edge, runnerSession,
+                        elementBoundaryOnly);
+        Object finishCallback = exactFinishCallback;
+        if (!elementBoundaryOnly) {
+            try {
+                Object handler = readField(compositionController,
+                        "mBackTransitionHandler");
+                finishCallback = readField(handler,
+                        "mOnAnimationFinishCallback");
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG,
+                        "Could not capture Shell return-home finish callback",
+                        throwable);
+            }
+        }
+        boolean finishCallbackBound = finishCallback != null
+                && identity.finishCallback.compareAndSet(
+                null, finishCallback);
+        boolean finishReceiptBound = finishCallbackBound
+                && identity.finishSignal.compareAndSet(null, signal);
+        boolean identityCurrent = finishReceiptBound
+                && systemUiReturnHomeCommitIdentity.get() == identity;
+        if (!identityCurrent) {
+            if (finishReceiptBound) {
+                identity.finishSignal.compareAndSet(signal, null);
+            }
+            if (finishCallbackBound) {
+                identity.finishCallback.compareAndSet(
+                        finishCallback, null);
+            }
+            moduleLog(Log.ERROR, TAG,
+                    "Could not bind Shell return-home finish receipt"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", shellSessionId="
+                            + identity.shellSessionId
+                            + ", eventId=" + input.eventId
+                            + ", finishCallback="
+                            + shortObject(finishCallback)
+                            + ", identityCurrent="
+                            + (systemUiReturnHomeCommitIdentity.get()
+                            == identity));
+            return;
+        }
+        try {
+            Intent intent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+            intent.setPackage(MIUI_HOME);
+            intent.putExtra(EXTRA_RETURN_HOME_COMMIT_ATTEMPT, attempt);
+            putStandardReturnHomeSignal(intent, signal);
+            Bundle options = BroadcastOptions.makeBasic()
+                    .setShareIdentityEnabled(true)
+                    .toBundle();
+            context.sendBroadcast(intent, null, options);
+            moduleLog(Log.INFO, TAG,
+                    "Published standard predictive return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId
+                            + ", eventId=" + input.eventId
+                            + ", downTime=" + input.downTime
+                            + ", arbiterGeneration="
+                            + systemUiInputArbiterGeneration
+                            + ", elementBoundaryOnly="
+                            + elementBoundaryOnly
+                            + ", runnerSession="
+                            + shortObject(runnerSession));
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to publish standard return-home commit"
+                            + ", attempt=" + attempt
+                            + ", taskId=" + taskId
+                            + ", transitionDebugId=" + transitionDebugId,
+                    throwable);
+        }
+    }
+
+    protected void putStandardReturnHomeSignal(
+            Intent intent, StandardReturnHomeCommitSignal signal) {
+        intent.putExtra(EXTRA_INPUT_ARBITER_GENERATION,
+                signal.arbiterGeneration);
+        intent.putExtra(EXTRA_RETURN_HOME_COMMIT_TASK_ID, signal.taskId);
+        intent.putExtra(EXTRA_RETURN_HOME_COMMIT_DEBUG_ID,
+                signal.transitionDebugId);
+        intent.putExtra(EXTRA_RETURN_HOME_ELEMENT_BOUNDARY,
+                signal.elementBoundaryOnly);
+        intent.putExtra(EXTRA_INPUT_EVENT_ID, signal.eventId);
+        intent.putExtra(EXTRA_INPUT_DOWN_TIME, signal.downTime);
+        intent.putExtra(EXTRA_INPUT_DEVICE_ID, signal.deviceId);
+        intent.putExtra(EXTRA_INPUT_SOURCE, signal.source);
+        intent.putExtra(EXTRA_INPUT_DISPLAY_ID, signal.displayId);
+        intent.putExtra(EXTRA_INPUT_EDGE, signal.edge);
+        Bundle binderExtras = new Bundle();
+        binderExtras.putBinder(EXTRA_RETURN_HOME_RUNNER_SESSION,
+                signal.runnerSession);
+        intent.putExtras(binderExtras);
+    }
+
+    protected IBinder captureReturnHomeRunnerSession(Object controller)
+            throws Throwable {
+        Object registry = readField(controller, "mShellBackAnimationRegistry");
+        Object definitions = readField(registry, "mAnimationDefinition");
+        Object runner = invokeAnyMethod(definitions, "get",
+                new Object[]{Integer.valueOf(TYPE_RETURN_TO_HOME)});
+        Object remoteCallback = runner == null ? null
+                : readField(runner, "mRemoteCallback");
+        Object runnerApps = runner == null ? null : readField(runner, "mApps");
+        Object controllerApps = readField(controller, "mApps");
+        Object waiting = runner == null ? null
+                : readField(runner, "mWaitingAnimation");
+        Object cancelled = runner == null ? null
+                : readField(runner, "mAnimationCancelled");
+        IBinder session = remoteCallback instanceof IInterface
+                ? ((IInterface) remoteCallback).asBinder() : null;
+        if (runner == null || session == null || runnerApps != controllerApps
+                || !Boolean.FALSE.equals(waiting)
+                || !Boolean.FALSE.equals(cancelled)) {
+            throw new IllegalStateException(
+                    "return-home runner is not the exact active session"
+                            + ", runner=" + shortObject(runner)
+                            + ", remoteCallback="
+                            + shortObject(remoteCallback)
+                            + ", sameApps="
+                            + (runnerApps == controllerApps)
+                            + ", waiting=" + waiting
+                            + ", cancelled=" + cancelled);
+        }
+        return session;
+    }
+
+    @Override
+    protected void publishSystemUiReturnHomeFinish(
+            Object controller, long shellSessionId,
+            Object finishCallback, String reason) {
+        SystemUiReturnHomeCommitIdentity identity =
+                systemUiReturnHomeCommitIdentity.get();
+        StandardReturnHomeCommitSignal signal = identity == null
+                ? null : identity.finishSignal.get();
+        Object expectedFinishCallback = identity == null
+                ? null : identity.finishCallback.get();
+        boolean callbackIdentityMatches = signal != null
+                && expectedFinishCallback != null
+                && (signal.elementBoundaryOnly
+                ? finishCallback == null
+                : finishCallback == expectedFinishCallback);
+        if (identity == null || signal == null
+                || identity.controller != controller
+                || identity.shellSessionId != shellSessionId
+                || !callbackIdentityMatches) {
+            return;
+        }
+        Context context = miuiOverviewReceiverContext;
+        boolean cleanupComplete = false;
+        try {
+            Object handler = readField(controller,
+                    "mBackTransitionHandler");
+            boolean preparedStateClear = readField(handler,
+                    "mOnAnimationFinishCallback") == null
+                    && readField(handler, "mFinishOpenTransaction") == null
+                    && readField(handler,
+                    "mFinishOpenTransitionCallback") == null
+                    && readField(handler, "mPrepareOpenTransition") == null
+                    && readField(handler, "mClosePrepareTransition") == null
+                    && readField(handler, "mOpenTransitionInfo") == null;
+            boolean closeRequested = Boolean.TRUE.equals(readField(
+                    handler, "mCloseTransitionRequested"));
+            if (signal.elementBoundaryOnly
+                    && preparedStateClear && closeRequested) {
+                writeField(handler, "mCloseTransitionRequested",
+                        Boolean.FALSE);
+                closeRequested = false;
+            }
+            cleanupComplete = preparedStateClear && !closeRequested;
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Could not prove completed Shell return-home cleanup",
+                    throwable);
+        }
+        if (identity.taskId != signal.taskId
+                || signal.arbiterGeneration
+                != systemUiInputArbiterGeneration
+                || !signal.matchesInput(identity.input)
+                || context == null
+                || !cleanupComplete
+                || !acceptingBackInputInstalls
+                || systemUiInputArbiterMonitorCount.get() <= 0) {
+            if (signal != null && !cleanupComplete) {
+                moduleLog(Log.WARN, TAG,
+                        "Withheld premature Shell return-home finish receipt"
+                                + ", attempt=" + signal.attempt
+                                + ", taskId=" + signal.taskId
+                                + ", transitionDebugId="
+                                + signal.transitionDebugId
+                                + ", shellSessionId=" + shellSessionId);
+            }
+            return;
+        }
+        try {
+            Intent intent = new Intent(MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
+            intent.setPackage(MIUI_HOME);
+            intent.putExtra(EXTRA_RETURN_HOME_FINISH_ATTEMPT,
+                    signal.attempt);
+            putStandardReturnHomeSignal(intent, signal);
+            Bundle options = BroadcastOptions.makeBasic()
+                    .setShareIdentityEnabled(true)
+                    .toBundle();
+            context.sendBroadcast(intent, null, options);
+            clearSystemUiReturnHomeCommitIdentity(
+                    controller, shellSessionId,
+                    "finishReceipt:" + reason);
+            moduleLog(Log.INFO, TAG,
+                    "Published completed Shell return-home receipt"
+                            + ", attempt=" + signal.attempt
+                            + ", taskId=" + signal.taskId
+                            + ", transitionDebugId="
+                            + signal.transitionDebugId
+                            + ", shellSessionId=" + shellSessionId
+                            + ", eventId=" + signal.eventId
+                            + ", reason=" + reason);
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to publish completed Shell return-home receipt"
+                            + ", attempt=" + signal.attempt
+                            + ", taskId=" + signal.taskId
+                            + ", transitionDebugId="
+                            + signal.transitionDebugId,
+                    throwable);
+        }
+    }
+
+    protected boolean clearSystemUiReturnHomeCommitIdentity(
+            Object controller, long shellSessionId, String reason) {
+        while (true) {
+            SystemUiReturnHomeCommitIdentity identity =
+                    systemUiReturnHomeCommitIdentity.get();
+            if (identity == null
+                    || (controller != null
+                    && identity.controller != controller)
+                    || (shellSessionId != 0L
+                    && identity.shellSessionId != shellSessionId)) {
+                return false;
+            }
+            if (systemUiReturnHomeCommitIdentity.compareAndSet(
+                    identity, null)) {
+                moduleLog(Log.INFO, TAG,
+                        "Cleared committed return-home input identity"
+                                + ", taskId=" + identity.taskId
+                                + ", eventId="
+                                + identity.input.eventId
+                                + ", shellSessionId="
+                                + identity.shellSessionId
+                                + ", reason=" + reason);
+                return true;
+            }
+        }
+    }
+
 }

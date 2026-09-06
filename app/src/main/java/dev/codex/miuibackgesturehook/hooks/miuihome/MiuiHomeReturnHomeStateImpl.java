@@ -1,10 +1,21 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
-import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiHookRuntime;
+import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
 
+import dev.codex.miuibackgesturehook.BuildConfig;
+import dev.codex.miuibackgesturehook.NativeHookStatusProtocol;
+import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
+import dev.codex.miuibackgesturehook.util.HookerBridge;
+
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.os.Build;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
@@ -12,6 +23,7 @@ import android.os.IInterface;
 import android.os.Looper;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.SurfaceControl;
 import android.view.View;
@@ -29,7 +41,425 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
+abstract class MiuiHomeReturnHomeStateImpl extends HookerBridge {
+    protected static final String TAG = "MiuiBackGestureHook";
+    protected static final String BUILD_MARK =
+            BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")";
+    protected static final String SYSTEM_UI = "com.android.systemui";
+    protected static final String MIUI_HOME = "com.miui.home";
+    protected static final int ANDROID_17_API_LEVEL = 37;
+
+    protected static final int UNIFIED_CONFIG_HOOK_PENDING = 0;
+    protected static final int UNIFIED_CONFIG_HOOK_RUNNING = 1;
+    protected static final int UNIFIED_CONFIG_HOOK_COMPLETED = 2;
+    protected static final int EDGE_LEFT = 0;
+    protected static final int EDGE_RIGHT = 1;
+    protected static final int ACTIVITY_TYPE_STANDARD = 1;
+    protected static final int ACTIVITY_TYPE_HOME = 2;
+    protected static final int WINDOWING_MODE_FULLSCREEN = 1;
+    protected static final int WINDOWING_MODE_FREEFORM = 5;
+    protected static final int FLAG_TRANSLUCENT = 1 << 2;
+    protected static final int FLAG_FILLS_TASK = 1 << 10;
+    protected static final int FLAG_IS_OCCLUDED = 1 << 15;
+    protected static final int FLAG_BACK_GESTURE_ANIMATED = 1 << 17;
+    protected static final int FLAG_DISPLAY_CHANGE = 1 << 27;
+    protected static final int FLAG_IS_ELEMENT = Integer.MIN_VALUE;
+    protected static final int FLAG_ONLY_ACTIVITY_RECORD = 1 << 26;
+    protected static final int TRANSIT_OPEN = 1;
+    protected static final int TRANSIT_CLOSE = 2;
+    protected static final int TRANSIT_TO_FRONT = 3;
+    protected static final int TRANSIT_TO_BACK = 4;
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER = 0;
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_REJECTED = 1;
+    protected static final int LAUNCHER_OPEN_BREAK_RESULT_ACCEPTED = 2;
+    protected static final int TYPE_RETURN_TO_HOME = 1;
+    protected static final int TYPE_CROSS_ACTIVITY = 2;
+    protected static final int TYPE_CROSS_TASK = 3;
+    protected static final int TYPE_CALLBACK = 4;
+
+    protected static final float RETURN_HOME_PREVIEW_BLUR_DISTANCE_DP = 48.0f;
+    protected static final float RETURN_HOME_MIN_WINDOW_SCALE = 0.85f;
+    protected static final float RETURN_HOME_WINDOW_MARGIN_DP = 8.0f;
+    protected static final float RETURN_HOME_END_CORNER_RADIUS_DP = 28.0f;
+    protected static final int RETURN_HOME_TERMINAL_NONE = 0;
+    protected static final int RETURN_HOME_TERMINAL_CANCEL = 1;
+    protected static final int RETURN_HOME_TERMINAL_INVOKE = 2;
+    protected static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
+    protected static final int RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS = 2;
+    protected static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_MATRIX = 2;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_WINDOW_CROP = 4;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_CORNER_RADIUS = 16;
+    protected static final int MIUI_SURFACE_PARAM_FLAG_SHOW = 512;
+    protected static final String MIUI_HOME_ICON_CLICK_WITHOUT_RECENT_REASON =
+            "Icon click without recent.";
+    protected static final ComponentName PERMISSION_GRANT_ACTIVITY = new ComponentName(
+            "com.android.permissioncontroller",
+            "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity");
+    protected static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
+
+    protected static final String MODULE_MIUI_OVERVIEW_STATE_CHANGE =
+            "dev.codex.miuibackgesturehook.action.MIUI_OVERVIEW_STATE_CHANGE";
+    protected static final String MODULE_MIUI_HOME_OPEN_BREAK_COMMAND =
+            "dev.codex.miuibackgesturehook.action.MIUI_HOME_OPEN_BREAK";
+    protected static final String MODULE_SYSTEMUI_INPUT_ARBITER_STATE =
+            NativeHookStatusProtocol.ACTION_SYSTEMUI_STATE;
+    protected static final String MODULE_MIUI_HOME_INPUT_ARBITER_QUERY =
+            "dev.codex.miuibackgesturehook.action.MIUI_HOME_INPUT_ARBITER_QUERY";
+    protected static final String MODULE_RUNTIME_STATUS_QUERY =
+            NativeHookStatusProtocol.ACTION_QUERY;
+    protected static final String MODULE_RUNTIME_STATUS_REPLY =
+            NativeHookStatusProtocol.ACTION_REPLY;
+    protected static final String EXTRA_STATUS_NONCE = NativeHookStatusProtocol.EXTRA_NONCE;
+    protected static final String EXTRA_STATUS_QUERY = NativeHookStatusProtocol.EXTRA_QUERY;
+    protected static final String EXTRA_STATUS_LEGACY_READY =
+            NativeHookStatusProtocol.EXTRA_LEGACY_READY;
+    protected static final String EXTRA_INPUT_ARBITER_READY = "input_arbiter_ready";
+    protected static final String EXTRA_INPUT_ARBITER_GENERATION =
+            "input_arbiter_generation";
+    protected static final String EXTRA_CONTEXTUAL_SEARCH_ENABLED =
+            "contextual_search_enabled";
+    protected static final String EXTRA_INPUT_ACCEPTED = "input_accepted";
+    protected static final String EXTRA_INPUT_EVENT_ID = "input_event_id";
+    protected static final String EXTRA_INPUT_DOWN_TIME = "input_down_time";
+    protected static final String EXTRA_INPUT_DEVICE_ID = "input_device_id";
+    protected static final String EXTRA_INPUT_SOURCE = "input_source";
+    protected static final String EXTRA_INPUT_DISPLAY_ID = "input_display_id";
+    protected static final String EXTRA_INPUT_EDGE = "input_edge";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE =
+            "launcher_open_break_available";
+    protected static final String EXTRA_LAUNCHER_OPEN_ACTIVE = "launcher_open_active";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_GENERATION =
+            "launcher_open_break_generation";
+    protected static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
+            "launcher_open_break_attempt";
+    protected static final String EXTRA_LAUNCHER_EDITING = "launcher_editing";
+    protected static final String EXTRA_LAUNCHER_FOLDER_VISIBLE =
+            "launcher_folder_visible";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_TASK_ID =
+            "return_home_commit_task_id";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_DEBUG_ID =
+            "return_home_commit_debug_id";
+    protected static final String EXTRA_RETURN_HOME_COMMIT_ATTEMPT =
+            "return_home_commit_attempt";
+    protected static final String EXTRA_RETURN_HOME_ELEMENT_BOUNDARY =
+            "return_home_element_boundary";
+    protected static final String EXTRA_RETURN_HOME_FINISH_ATTEMPT =
+            "return_home_finish_attempt";
+    protected static final String EXTRA_RETURN_HOME_RUNNER_SESSION =
+            "return_home_runner_session";
+    protected static final String EXTRA_LAUNCHER_XIAOAI_VISIBLE = "xiaoai_visible";
+
+    protected static final String SHELL_BACK_ANIMATION_DESCRIPTOR =
+            "com.android.wm.shell.back.IBackAnimation";
+    protected static final String ON_BACK_INVOKED_CALLBACK_DESCRIPTOR =
+            android.window.IOnBackInvokedCallback.class.getName();
+    protected static final String REMOTE_ANIMATION_RUNNER_DESCRIPTOR =
+            android.view.IRemoteAnimationRunner.class.getName();
+    protected static final String REMOTE_ANIMATION_FINISHED_DESCRIPTOR =
+            android.view.IRemoteAnimationFinishedCallback.class.getName();
+    protected static final int SHELL_BACK_SET_LAUNCHER_CALLBACK_TRANSACTION = 1;
+    protected static final int SHELL_BACK_CLEAR_LAUNCHER_CALLBACK_TRANSACTION = 2;
+
+    protected final AtomicBoolean runtimeStarted = new AtomicBoolean();
+    protected final AtomicBoolean runtimeReleased = new AtomicBoolean();
+    protected final AtomicLong miuiHomeReturnHomeGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeLauncherOpenSnapshotIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeNativeGeometryFrameIds = new AtomicLong();
+    protected final AtomicLong systemUiReturnHomeCommitAttemptIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeOpenBreakGenerationIds =
+            new AtomicLong(SystemClock.elapsedRealtimeNanos());
+    protected final AtomicLong miuiHomeOpenBreakCallbackEpoch = new AtomicLong();
+    protected final AtomicInteger systemUiInputArbiterMonitorCount = new AtomicInteger();
+    protected final ThreadLocal<ReturnHomeNativeGeometrySnapshot>
+            miuiHomePendingNativeGeometry = new ThreadLocal<>();
+    protected final ThreadLocal<ReturnHomeFinishTransferCandidate>
+            returnHomeFinishTransferCandidate = new ThreadLocal<>();
+    protected final AtomicReference<MiuiHomeAcceptedInputToken>
+            miuiHomeAcceptedInputIdentity = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeAcceptedInputToken>
+            acceptedInputToken = new AtomicReference<>();
+    protected final AtomicReference<SystemUiReturnHomeCommitIdentity>
+            systemUiReturnHomeCommitIdentity = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeLocalHandoffToken>
+            miuiHomeLocalHandoffToken = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomeLauncherOpenSnapshot>
+            miuiHomeLauncherOpenSnapshot = new AtomicReference<>();
+    protected final AtomicReference<MiuiHomePermissionMergeToken>
+            miuiHomePermissionMergeToken = new AtomicReference<>();
+    protected final long systemUiInputArbiterGeneration =
+            Math.max(1L, SystemClock.elapsedRealtimeNanos());
+    protected volatile boolean acceptingBackInputInstalls = true;
+    protected volatile boolean miuiOverviewVisible;
+    protected volatile boolean miuiDrawerVisible;
+    protected volatile boolean miuiFolderVisible;
+    protected volatile boolean miuiLauncherEditing;
+    protected volatile long miuiLauncherDartStateOwnerEpoch;
+    protected volatile boolean miuiLauncherXiaoAiVisible;
+    protected volatile boolean miuiHomeEditingStatePublished;
+    protected volatile boolean miuiLauncherOpenActive;
+    protected volatile boolean miuiLauncherOpenBreakAvailable;
+    protected volatile long miuiLauncherOpenBreakGeneration;
+    protected volatile long miuiOverviewDismissPendingUntilUptime;
+    protected volatile Object miuiHomeOpenBreakController;
+    protected volatile boolean miuiHomeOpenBreakCommandPending;
+    protected volatile long miuiHomeOpenBreakGeneration;
+    protected volatile Object miuiHomeOpenBreakStateManager;
+    protected volatile Object miuiHomeOpenBreakAnimationIdentity;
+    protected volatile boolean miuiHomeOpenBreakGenerationPrepared;
+    protected volatile boolean miuiHomeOpenBreakAnimationActive;
+    protected volatile Context miuiHomeOpenBreakContext;
+    protected volatile Context miuiHomeOpenBreakCommandReceiverContext;
+    protected volatile BroadcastReceiver miuiHomeOpenBreakCommandReceiver;
+    protected volatile Context miuiHomeInputArbiterReceiverContext;
+    protected volatile BroadcastReceiver miuiHomeInputArbiterReceiver;
+    protected volatile Context miuiOverviewReceiverContext;
+    protected volatile BroadcastReceiver miuiOverviewReceiver;
+    protected volatile IBinder miuiHomeReturnHomeBinder;
+    protected volatile IBinder pendingMiuiHomeReturnHomeBinder;
+    protected volatile ClassLoader pendingMiuiHomeReturnHomeClassLoader;
+    protected volatile Context pendingMiuiHomeReturnHomeContext;
+    protected volatile String pendingMiuiHomeReturnHomeReason;
+    protected volatile boolean miuiHomeSystemUiInputArbiterReady;
+    protected volatile long miuiHomeSystemUiInputArbiterGeneration;
+    protected volatile SharedPreferences contextualSearchPreferences;
+    protected volatile boolean contextualSearchPreferencesFailureLogged;
+    protected volatile boolean contextualSearchServiceUnavailableLogged;
+    protected volatile boolean moduleLoggingEnabled =
+            PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+    protected volatile SharedPreferences moduleLoggingPreferences;
+    private final SharedPreferences.OnSharedPreferenceChangeListener
+            moduleLoggingPreferenceListener = (preferences, key) -> {
+                if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)) {
+                    return;
+                }
+                try {
+                    moduleLoggingEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_MODULE_LOGGING,
+                            PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+                } catch (Throwable ignored) {
+                    // Keep the last known logging policy when the remote preference is unreadable.
+                }
+            };
+
+    public void start() {
+        if (runtimeStarted.compareAndSet(false, true)) {
+            initializeModuleLoggingPreference();
+            moduleLog(Log.INFO, TAG, "Starting MiuiHome hook state, build="
+                    + BUILD_MARK + ", process=" + packageName);
+        }
+    }
+
+    public boolean isHotReloadSafe() {
+        return true;
+    }
+
+    public void releaseForHotReload() {
+        if (!runtimeReleased.compareAndSet(false, true)) {
+            return;
+        }
+        acceptedInputToken.set(null);
+        miuiHomeAcceptedInputIdentity.set(null);
+        miuiHomeLocalHandoffToken.set(null);
+        miuiHomeLauncherOpenSnapshot.set(null);
+        miuiHomePermissionMergeToken.set(null);
+        systemUiReturnHomeCommitIdentity.set(null);
+        miuiHomePendingNativeGeometry.remove();
+        returnHomeFinishTransferCandidate.remove();
+        releaseModuleLoggingPreference();
+    }
+
+    public boolean miuiOverviewVisibleState() {
+        return miuiOverviewVisible;
+    }
+
+    public void miuiOverviewVisibleState(boolean value) {
+        miuiOverviewVisible = value;
+    }
+
+    public boolean miuiDrawerVisibleState() {
+        return miuiDrawerVisible;
+    }
+
+    public void miuiDrawerVisibleState(boolean value) {
+        miuiDrawerVisible = value;
+    }
+
+    public boolean miuiFolderVisibleState() {
+        return miuiFolderVisible;
+    }
+
+    public void miuiFolderVisibleState(boolean value) {
+        miuiFolderVisible = value;
+    }
+
+    public boolean miuiLauncherEditingState() {
+        return miuiLauncherEditing;
+    }
+
+    public void miuiLauncherEditingState(boolean value) {
+        miuiLauncherEditing = value;
+    }
+
+    public long miuiOverviewDismissDeadlineState() {
+        return miuiOverviewDismissPendingUntilUptime;
+    }
+
+    public void miuiOverviewDismissDeadlineState(long value) {
+        miuiOverviewDismissPendingUntilUptime = value;
+    }
+
+    public synchronized void restoreMiuiOverviewDismissTimeoutAfterHotReload() {
+        long deadline = miuiOverviewDismissPendingUntilUptime;
+        if (deadline == 0L) {
+            return;
+        }
+        long remaining = deadline - SystemClock.uptimeMillis();
+        if (remaining <= 0L) {
+            miuiOverviewDismissPendingUntilUptime = 0L;
+            miuiOverviewVisible = true;
+            return;
+        }
+        new Handler(Looper.getMainLooper()).postDelayed(
+                () -> restoreMiuiOverviewAfterDismissTimeout(deadline), remaining);
+    }
+
+    protected synchronized void restoreMiuiOverviewAfterDismissTimeout(long pendingUntil) {
+        if (miuiOverviewDismissPendingUntilUptime != pendingUntil) {
+            return;
+        }
+        miuiOverviewDismissPendingUntilUptime = 0L;
+        miuiOverviewVisible = true;
+    }
+
+    protected String systemUiInputArbiterStateAction() {
+        return MODULE_SYSTEMUI_INPUT_ARBITER_STATE;
+    }
+
+    protected boolean isContextualSearchPreferenceEnabled() {
+        try {
+            SharedPreferences preferences = contextualSearchPreferences;
+            if (preferences == null) {
+                synchronized (this) {
+                    preferences = contextualSearchPreferences;
+                    if (preferences == null) {
+                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+                        contextualSearchPreferences = preferences;
+                    }
+                }
+            }
+            contextualSearchPreferencesFailureLogged = false;
+            return preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_CONTEXTUAL_SEARCH_LONG_PRESS,
+                    PredictiveBackPreferences.DEFAULT_CONTEXTUAL_SEARCH_LONG_PRESS);
+        } catch (Throwable throwable) {
+            if (!contextualSearchPreferencesFailureLogged) {
+                contextualSearchPreferencesFailureLogged = true;
+                moduleLog(Log.ERROR, TAG, "Contextual-search preference unavailable"
+                        + ", policy=failClosed", throwable);
+            }
+            return false;
+        }
+    }
+
+    protected boolean isContextualSearchLongPressEnabled() {
+        if (!isContextualSearchPreferenceEnabled()) {
+            contextualSearchServiceUnavailableLogged = false;
+            return false;
+        }
+        if (Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL) {
+            return true;
+        }
+        try {
+            boolean available = isBinderServiceAlive("contextual_search");
+            if (available) {
+                contextualSearchServiceUnavailableLogged = false;
+                return true;
+            }
+            if (!contextualSearchServiceUnavailableLogged) {
+                contextualSearchServiceUnavailableLogged = true;
+                moduleLog(Log.WARN, TAG,
+                        "Suppressed Android 17 native contextual search because the"
+                                + " contextual_search service is not registered"
+                                + ", policy=failClosed");
+            }
+            return false;
+        } catch (Throwable throwable) {
+            if (!contextualSearchServiceUnavailableLogged) {
+                contextualSearchServiceUnavailableLogged = true;
+                moduleLog(Log.ERROR, TAG,
+                        "Failed to verify Android 17 contextual-search service"
+                                + ", policy=failClosed", throwable);
+            }
+            return false;
+        }
+    }
+
+    protected final synchronized void initializeModuleLoggingPreference() {
+        try {
+            SharedPreferences preferences = getRemotePreferences(
+                    PredictiveBackPreferences.GROUP);
+            SharedPreferences previous = moduleLoggingPreferences;
+            if (previous != preferences) {
+                if (previous != null) {
+                    previous.unregisterOnSharedPreferenceChangeListener(
+                            moduleLoggingPreferenceListener);
+                }
+                preferences.registerOnSharedPreferenceChangeListener(
+                        moduleLoggingPreferenceListener);
+                moduleLoggingPreferences = preferences;
+            }
+            moduleLoggingEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_MODULE_LOGGING,
+                    PredictiveBackPreferences.DEFAULT_MODULE_LOGGING);
+        } catch (Throwable ignored) {
+            moduleLoggingEnabled = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
+        }
+    }
+
+    protected final synchronized void releaseModuleLoggingPreference() {
+        SharedPreferences current = moduleLoggingPreferences;
+        moduleLoggingPreferences = null;
+        if (current != null) {
+            try {
+                current.unregisterOnSharedPreferenceChangeListener(
+                        moduleLoggingPreferenceListener);
+            } catch (Throwable ignored) {
+                // The process is already retiring this module generation.
+            }
+        }
+    }
+
+    protected final void moduleLog(int priority, String tag, String message) {
+        if (priority < Log.WARN && !moduleLoggingEnabled) {
+            return;
+        }
+        super.log(priority, tag, message);
+    }
+
+    protected final void moduleLog(int priority, String tag, String message,
+                                   Throwable throwable) {
+        if (priority < Log.WARN && !moduleLoggingEnabled) {
+            return;
+        }
+        super.log(priority, tag, message, throwable);
+    }
+
+    protected abstract int readTransitionDebugId(Object infoOrExpose);
+
+    protected abstract boolean isMiuiHomeLauncherOpenType(String typeName);
+
+    protected abstract int resolveTaskInfoActivityType(Object taskInfo);
+
+    protected abstract int resolveTaskInfoWindowingMode(Object taskInfo);
+
+    protected abstract void publishSystemUiReturnHomeFinish(
+            Object controller, long shellSessionId,
+            Object finishCallback, String reason);
+
     /** Shared state, callback binders, and immutable return-home snapshots. */
     protected abstract class ReturnHomeStateController {
         protected final IBinder shellBackAnimation;
@@ -855,11 +1285,10 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
 
         protected float resolveMiuiWindowCornerRadius(Object target) {
             try {
-                Class<?> radiusClass = Class.forName(
-                        MIUI_HOME_WINDOW_CORNER_RADIUS_UTIL, false, classLoader);
-                Method method = radiusClass.getDeclaredMethod("getCornerRadius");
-                method.setAccessible(true);
-                Object value = method.invoke(null);
+                Class<?> radiusClass = findClass(
+                        MIUI_HOME_WINDOW_CORNER_RADIUS_UTIL, classLoader);
+                Object value = invokeStaticMethod(radiusClass, "getCornerRadius",
+                        new Class<?>[0], new Object[0]);
                 if (value instanceof Number) {
                     return Math.max(0.0f, ((Number) value).floatValue());
                 }
@@ -903,15 +1332,15 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
 
         @SuppressWarnings({"rawtypes", "unchecked"})
         protected BackMotionEvent readBackMotionEvent(Parcel parcel) throws Exception {
-            Parcelable.Creator creator = (Parcelable.Creator) readStaticField(
-                    BackMotionEvent.class, "CREATOR");
+            Parcelable.Creator creator = (Parcelable.Creator)
+                    readParcelableCreator(BackMotionEvent.class);
             return (BackMotionEvent) parcel.readTypedObject(creator);
         }
 
         @SuppressWarnings({"rawtypes", "unchecked"})
         protected Object[] readRemoteAnimationTargets(Parcel parcel) throws Exception {
-            Parcelable.Creator creator = (Parcelable.Creator) readStaticField(
-                    android.view.RemoteAnimationTarget.class, "CREATOR");
+            Parcelable.Creator creator = (Parcelable.Creator) readParcelableCreator(
+                    android.view.RemoteAnimationTarget.class);
             return (Object[]) parcel.createTypedArray(creator);
         }
         protected final class ReturnHomeBackCallback extends Binder implements IInterface {

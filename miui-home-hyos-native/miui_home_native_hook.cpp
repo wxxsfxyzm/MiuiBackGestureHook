@@ -271,6 +271,13 @@ void* g_original_contextual_long_press_handler = nullptr;
 void* g_original_drawer_state_handler = nullptr;
 void* g_dart_app_handle = nullptr;
 uint8_t* g_dart_app_base = nullptr;
+// Keep Overview's paired epilogue owner separate from the shared Dart feature
+// owner. Drawer/editing may update g_dart_app_base while libapp.so is replaced;
+// the Overview bridge must still retire the exact old enter/exit pair.
+void* g_dart_overview_hook_handle = nullptr;
+uint8_t* g_dart_overview_hook_base = nullptr;
+uintptr_t g_dart_overview_hook_enter_offset = 0u;
+uintptr_t g_dart_overview_hook_exit_offset = 0u;
 uint32_t g_dart_drawer_install_in_flight = 0;
 uint32_t g_dart_overview_install_in_flight = 0;
 uint32_t g_dart_editing_install_in_flight = 0;
@@ -1133,6 +1140,7 @@ uint32_t DetectDartStateHookRemapMask(
 bool PrepareDartStateHookRetirement(uint32_t remap_mask);
 void FinishDartStateHookRetirement(uint32_t remap_mask);
 void InvalidateDartStateOwnerForRemap();
+bool RetireDartEpilogue(uint8_t* dart_base, uintptr_t offset);
 
 bool IsExactCallbackName(const char* value, size_t length,
                          const char* expected) {
@@ -2445,6 +2453,15 @@ bool HandleRuntimeStatusQuery(void* intent) {
                           AtomicLoad(&g_drawer_state_hook_state)) ||
             !AddBundleI32(response, "status_native_overview_state_hook",
                           AtomicLoad(&g_overview_state_hook_state)) ||
+            !AddBundleI32(response, "status_native_overview_dart_enters",
+                          AtomicLoad(&g_overview_dart_enter_count)) ||
+            !AddBundleI32(response, "status_native_overview_dart_exits",
+                          AtomicLoad(&g_overview_dart_exit_count)) ||
+            !AddBundleI32(response, "status_native_overview_observed_state",
+                          DartStateObservationValue(AtomicLoad(
+                                  &g_overview_state_observation))) ||
+            !AddBundleI32(response, "status_native_overview_published_state",
+                          AtomicLoad(&g_overview_published_state)) ||
             !AddBundleI32(response, "status_native_editing_state_hook",
                           AtomicLoad(&g_editing_state_hook_state)) ||
             !AddBundleI32(response, "status_native_xiaoai_state_hook",
@@ -3767,7 +3784,66 @@ bool TryInstallDartOverviewStateHook(
         void* dart_handle,
         const miui_home_profiles::LauncherProfile* profile) {
     if (dart_handle == nullptr || profile == nullptr) return false;
-    if (AtomicLoad(&g_overview_state_hook_state) == uint32_t{3}) return true;
+    // Resolve the current mapped image before honoring the ready state. The
+    // launcher can replace libapp.so without changing the process or the
+    // resolved Dart profile; a state==3 fast path would otherwise leave the
+    // new enter/exit epilogues completely unhooked.
+    uint8_t* dart_base = nullptr;
+    if (!ResolveDartProfileBase(dart_handle, profile, &dart_base)) {
+        Log(ANDROID_LOG_WARN,
+            "Dart Overview mapping could not be validated for install");
+        return false;
+    }
+    if (AtomicLoad(&g_overview_state_hook_state) == uint32_t{3}) {
+        void* installed_handle = AtomicLoad(&g_dart_overview_hook_handle);
+        auto* installed_base = static_cast<uint8_t*>(
+                AtomicLoad(&g_dart_overview_hook_base));
+        if (installed_handle == dart_handle && installed_base == dart_base) {
+            return true;
+        }
+
+        uint32_t state_expected = 3u;
+        if (!__atomic_compare_exchange_n(
+                    &g_overview_state_hook_state, &state_expected,
+                    uint32_t{0}, false, __ATOMIC_ACQ_REL,
+                    __ATOMIC_ACQUIRE)) {
+            return false;
+        }
+        constexpr uint32_t kOverviewRetirementMask =
+                kDartOverviewEnterRemapped | kDartOverviewExitRemapped;
+        if (!PrepareDartStateHookRetirement(kOverviewRetirementMask)) {
+            AtomicStore(&g_overview_state_hook_state, uint32_t{6});
+            Log(ANDROID_LOG_ERROR,
+                "Dart Overview mapping changed while an observer was active");
+            return false;
+        }
+        const uintptr_t old_enter_offset = AtomicLoad(
+                &g_dart_overview_hook_enter_offset);
+        const uintptr_t old_exit_offset = AtomicLoad(
+                &g_dart_overview_hook_exit_offset);
+        const bool retired = RetireDartEpilogue(
+                installed_base, old_enter_offset) &&
+                RetireDartEpilogue(installed_base, old_exit_offset);
+        if (!retired) {
+            AtomicStore(&g_overview_state_hook_state, uint32_t{6});
+            Log(ANDROID_LOG_ERROR,
+                "Dart Overview old enter/exit epilogues could not be retired");
+            return false;
+        }
+        AtomicStore(&miui_home_hyos_dart_overview_enter_epilogue_original,
+                    static_cast<void*>(nullptr));
+        AtomicStore(&miui_home_hyos_dart_overview_exit_epilogue_original,
+                    static_cast<void*>(nullptr));
+        AtomicStore(&g_dart_overview_hook_handle,
+                    static_cast<void*>(nullptr));
+        AtomicStore(&g_dart_overview_hook_base,
+                    static_cast<uint8_t*>(nullptr));
+        AtomicStore(&g_dart_overview_hook_enter_offset, uintptr_t{0});
+        AtomicStore(&g_dart_overview_hook_exit_offset, uintptr_t{0});
+        InvalidateDartStateOwnerForRemap();
+        Log(ANDROID_LOG_INFO,
+            "retired Dart Overview pair after mapped image changed");
+    }
     uint32_t expected = 0u;
     if (!__atomic_compare_exchange_n(
                 &g_dart_overview_install_in_flight, &expected, uint32_t{1},
@@ -3776,9 +3852,7 @@ bool TryInstallDartOverviewStateHook(
     }
     AtomicStore(&g_overview_state_hook_state, uint32_t{1});
 
-    uint8_t* dart_base = nullptr;
-    const bool valid = ResolveDartProfileBase(
-                               dart_handle, profile, &dart_base) &&
+    const bool valid = dart_base != nullptr &&
             profile->dart_overview_enter_offset != 0u &&
             profile->dart_overview_enter_prologue != nullptr &&
             profile->dart_overview_enter_prologue_size != 0u &&
@@ -3839,6 +3913,12 @@ bool TryInstallDartOverviewStateHook(
     }
     AtomicStore(&g_dart_app_handle, dart_handle);
     AtomicStore(&g_dart_app_base, dart_base);
+    AtomicStore(&g_dart_overview_hook_handle, dart_handle);
+    AtomicStore(&g_dart_overview_hook_base, dart_base);
+    AtomicStore(&g_dart_overview_hook_enter_offset,
+                profile->dart_overview_enter_epilogue_offset);
+    AtomicStore(&g_dart_overview_hook_exit_offset,
+                profile->dart_overview_exit_epilogue_offset);
     AtomicStore(&g_overview_state_hook_state, uint32_t{3});
     AtomicStore(&g_dart_overview_enter_retiring, uint32_t{0});
     AtomicStore(&g_dart_overview_exit_retiring, uint32_t{0});
@@ -3964,6 +4044,8 @@ bool TryInstallDartEditingStateHook(
 uint32_t DetectDartStateHookRemapMask(
         const miui_home_profiles::LauncherProfile* profile) {
     auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
+    auto* overview_base = static_cast<uint8_t*>(
+            AtomicLoad(&g_dart_overview_hook_base));
     if (profile == nullptr || dart_base == nullptr ||
             profile != CurrentDartFeatureProfile()) {
         return 0u;
@@ -3976,13 +4058,19 @@ uint32_t DetectDartStateHookRemapMask(
                     kDartReturnX22Epilogue);
     const bool overview_installed =
             AtomicLoad(&g_overview_state_hook_state) == uint32_t{3};
+    const uintptr_t overview_enter_offset = AtomicLoad(
+            &g_dart_overview_hook_enter_offset);
+    const uintptr_t overview_exit_offset = AtomicLoad(
+            &g_dart_overview_hook_exit_offset);
     const bool enter_original = overview_installed &&
+            overview_base != nullptr &&
             MatchesDartEpilogue(
-                    dart_base, profile->dart_overview_enter_epilogue_offset,
+                    overview_base, overview_enter_offset,
                     kDartReturnX22Epilogue);
     const bool exit_original = overview_installed &&
+            overview_base != nullptr &&
             MatchesDartEpilogue(
-                    dart_base, profile->dart_overview_exit_epilogue_offset,
+                    overview_base, overview_exit_offset,
                     kDartReturnX22Epilogue);
     bool editing = false;
     if (AtomicLoad(&g_editing_state_hook_state) == uint32_t{3}) {
@@ -4199,8 +4287,13 @@ void RepairDartOverviewStateHookIfRemapped(
             AtomicLoad(&g_overview_state_hook_state) != uint32_t{3}) {
         return;
     }
-    auto* dart_base = static_cast<uint8_t*>(AtomicLoad(&g_dart_app_base));
-    void* dart_handle = AtomicLoad(&g_dart_app_handle);
+    auto* dart_base = static_cast<uint8_t*>(
+            AtomicLoad(&g_dart_overview_hook_base));
+    void* dart_handle = AtomicLoad(&g_dart_overview_hook_handle);
+    const uintptr_t enter_offset = AtomicLoad(
+            &g_dart_overview_hook_enter_offset);
+    const uintptr_t exit_offset = AtomicLoad(
+            &g_dart_overview_hook_exit_offset);
     __atomic_fetch_add(&g_overview_dart_repair_attempt_count, uint32_t{1},
                        __ATOMIC_RELAXED);
     AtomicStore(&g_overview_dart_repair_stage, uint32_t{2});
@@ -4210,11 +4303,9 @@ void RepairDartOverviewStateHookIfRemapped(
                     &g_overview_state_hook_state, &expected, uint32_t{0},
                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) &&
             RetireDartEpilogue(
-                    dart_base,
-                    profile->dart_overview_enter_epilogue_offset) &&
+                    dart_base, enter_offset) &&
             RetireDartEpilogue(
-                    dart_base,
-                    profile->dart_overview_exit_epilogue_offset);
+                    dart_base, exit_offset);
     if (!retired) {
         AtomicStore(&g_overview_state_hook_state, uint32_t{6});
         AtomicStore(&g_overview_dart_repair_stage, uint32_t{5});
@@ -4226,6 +4317,12 @@ void RepairDartOverviewStateHookIfRemapped(
                 static_cast<void*>(nullptr));
     AtomicStore(&miui_home_hyos_dart_overview_exit_epilogue_original,
                 static_cast<void*>(nullptr));
+    AtomicStore(&g_dart_overview_hook_handle,
+                static_cast<void*>(nullptr));
+    AtomicStore(&g_dart_overview_hook_base,
+                static_cast<uint8_t*>(nullptr));
+    AtomicStore(&g_dart_overview_hook_enter_offset, uintptr_t{0});
+    AtomicStore(&g_dart_overview_hook_exit_offset, uintptr_t{0});
     const bool installed =
             TryInstallDartOverviewStateHook(dart_handle, profile);
     AtomicStore(&g_overview_dart_repair_stage,
