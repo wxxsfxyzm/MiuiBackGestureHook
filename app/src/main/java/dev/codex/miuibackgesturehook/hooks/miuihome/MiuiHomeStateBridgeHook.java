@@ -1,5 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import android.app.ActivityThread;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
@@ -51,7 +52,7 @@ public final class MiuiHomeStateBridgeHook extends HookerBridge {
     public void onPackageLoad() {
         implementation.start();
         try {
-            Context context = implementation.resolveCurrentApplicationContext(classLoader);
+            Context context = ActivityThread.currentApplication();
             if (context != null) {
                 implementation.ensureMiuiHomeInputArbiterReceiver(context);
             }

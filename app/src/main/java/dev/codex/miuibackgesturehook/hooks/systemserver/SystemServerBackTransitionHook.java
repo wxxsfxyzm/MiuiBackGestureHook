@@ -1030,36 +1030,6 @@ public final class SystemServerBackTransitionHook extends HookerBridge {
                 .interceptScheduleAnimationPrepareTransition(this, chain);
     }
 
-    final boolean readWindowFlag(String methodName,
-                                 ClassLoader preferredLoader,
-                                 boolean fallback) {
-        String[] classNames = new String[]{
-                "com.android.window.flags.Flags",
-                "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
-                "android.window.flags.Flags"
-        };
-        for (String className : classNames) {
-            try {
-                Class<?> flagsClass = Class.forName(className, false, preferredLoader);
-                Method method = flagsClass.getDeclaredMethod(methodName);
-                method.setAccessible(true);
-                Object result = method.invoke(null);
-                if (result instanceof Boolean) {
-                    log(Log.INFO, TAG, "Read " + methodName + " from "
-                            + className + ": " + result);
-                    return (Boolean) result;
-                }
-            } catch (Throwable throwable) {
-                log(Log.WARN, TAG, "Flag lookup failed for " + className
-                        + ": " + throwable.getClass().getSimpleName()
-                        + ": " + throwable.getMessage());
-            }
-        }
-        log(Log.WARN, TAG, "Unable to read " + methodName
-                + "; defaulting to " + fallback);
-        return fallback;
-    }
-
     protected boolean isExactFreeformCrossActivityPrepare(
             XposedInterface.Chain chain, Object builder) throws Exception {
         Object visibleArg = chain.getArg(0);
@@ -1283,7 +1253,7 @@ public final class SystemServerBackTransitionHook extends HookerBridge {
                     builder, "mIsLaunchBehind");
             boolean launchBehindKnown = launchBehind instanceof Boolean;
             boolean returnToHome = Boolean.TRUE.equals(launchBehind);
-            boolean unify = hook.readWindowFlag(
+            boolean unify = readWindowFlag(
                     "unifyBackNavigationTransition", loader, false);
             if (unify && launchBehindKnown && !returnToHome) {
                 boolean exactCrossActivity;
@@ -1912,25 +1882,8 @@ public final class SystemServerBackTransitionHook extends HookerBridge {
             return result.append(']').toString();
         }
 
-        private static int readIntField(Object target, String name) {
-            Object value = readFieldOrNull(target, name);
-            return value instanceof Number ? ((Number) value).intValue() : -1;
-        }
-
         private static int valueOrDefault(Integer value) {
             return value == null ? -1 : value;
-        }
-
-        private static Object invokeOrNull(Object target, String name) {
-            if (target == null) {
-                return null;
-            }
-            try {
-                return invokeAnyMethod(
-                        target, name);
-            } catch (Throwable ignored) {
-                return null;
-            }
         }
 
         private static Method findCalculateTransitionInfo(Class<?> transitionClass) {

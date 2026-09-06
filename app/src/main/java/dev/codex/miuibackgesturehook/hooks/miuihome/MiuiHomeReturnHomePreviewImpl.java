@@ -3,6 +3,7 @@ package dev.codex.miuibackgesturehook.hooks.miuihome;
 import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
 import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeOpenInterruptionHook.*;
 import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
 
 import android.content.Context;
 import android.graphics.Rect;

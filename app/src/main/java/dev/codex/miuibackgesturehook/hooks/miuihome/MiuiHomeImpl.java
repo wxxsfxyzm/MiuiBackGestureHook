@@ -5,6 +5,7 @@ import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeGestureInputH
 import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeOpenInterruptionHook.*;
 import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeReturnHomeHook.*;
 import static dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeStateBridgeHook.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
@@ -2941,39 +2942,6 @@ public class MiuiHomeImpl extends MiuiHomeReturnHomeImpl {
         appContext.sendBroadcast(explicitIntent, null, options);
     }
 
-    protected void sendAuthenticatedMiuiHomeOpenBreakCommand(
-            Context context, long generation, long attemptId,
-            SystemUiBackGestureDriver driver, Object releaseController) {
-        // Close the local admission gate as soon as one committed command is emitted. The
-        // MiuiHome receiver independently revalidates its native controller before acting.
-        if (miuiLauncherOpenBreakGeneration == generation) {
-            miuiLauncherOpenBreakAvailable = false;
-        }
-        Context appContext = context.getApplicationContext();
-        Intent commandIntent = new Intent(MODULE_MIUI_HOME_OPEN_BREAK_COMMAND);
-        commandIntent.setPackage(MIUI_HOME);
-        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_GENERATION, generation);
-        commandIntent.putExtra(EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT, attemptId);
-        Bundle options = BroadcastOptions.makeBasic()
-                .setShareIdentityEnabled(true)
-                .toBundle();
-        BroadcastReceiver resultReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context receiverContext, Intent intent) {
-                driver.onLauncherOpenBreakCommandResult(
-                        generation, attemptId, getResultCode(), getResultData(),
-                        releaseController);
-            }
-        };
-        appContext.sendOrderedBroadcast(commandIntent, null, options,
-                resultReceiver, new Handler(Looper.getMainLooper()),
-                LAUNCHER_OPEN_BREAK_RESULT_NO_RECEIVER, "noReceiver", null);
-        moduleLog(Log.INFO, TAG, "Sent authenticated MiuiHome launcher OPEN break command"
-                + ", generation=" + generation
-                + ", attempt=" + attemptId
-                + ", ordered=true");
-    }
-
     protected Object arbitrateMiuiHomeAcceptedInput(XposedInterface.Chain chain) {
         Object eventObject = chain.getArg(0);
         Object stubObject = chain.getArg(1);
@@ -3031,20 +2999,6 @@ public class MiuiHomeImpl extends MiuiHomeReturnHomeImpl {
         // decisions have accepted the stream. Keep the real Xiaomi input target, but never
         // let its legacy processor create a second BackAnimationAdapter, arrow, or BACK.
         return null;
-    }
-
-    protected int readMotionEventId(MotionEvent event) throws Exception {
-        Object value = invokeAnyMethod(event, "getId", new Object[0]);
-        if (!(value instanceof Number)) {
-            throw new IllegalStateException("MotionEvent.getId returned "
-                    + shortObject(value));
-        }
-        return ((Number) value).intValue();
-    }
-
-    protected int readMotionEventDisplayId(MotionEvent event) throws Exception {
-        Object value = invokeAnyMethod(event, "getDisplayId", new Object[0]);
-        return value instanceof Number ? ((Number) value).intValue() : -1;
     }
 
     protected synchronized void ensureMiuiHomeInputArbiterReceiver(Context context) {

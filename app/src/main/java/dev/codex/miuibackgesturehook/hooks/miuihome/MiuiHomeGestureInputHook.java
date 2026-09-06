@@ -1,5 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.miuihome;
 
+import android.app.ActivityThread;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
@@ -39,8 +40,7 @@ public final class MiuiHomeGestureInputHook extends HookerBridge {
             // This hooker owns the MiuiHomeImpl instance that handles the accepted-DOWN
             // boundary. Register its arbiter receiver during cold startup so the initial
             // SystemUI readiness publication is available before the first gesture.
-            Context launcherContext =
-                    implementation.resolveCurrentApplicationContext(classLoader);
+            Context launcherContext = ActivityThread.currentApplication();
             if (launcherContext != null) {
                 implementation.ensureMiuiHomeInputArbiterReceiver(launcherContext);
             } else {

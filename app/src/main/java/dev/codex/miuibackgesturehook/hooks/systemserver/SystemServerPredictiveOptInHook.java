@@ -2,7 +2,6 @@ package dev.codex.miuibackgesturehook.hooks.systemserver;
 
 import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
 
-import android.app.Activity;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
@@ -12,7 +11,6 @@ import android.window.WindowOnBackInvokedDispatcher;
 
 import java.lang.reflect.Method;
 import java.util.Collections;
-import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -78,7 +76,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
         return null;
     }
 
-    protected void hookPredictiveBackOptInMetadata(ClassLoader classLoader) {
+    private void hookPredictiveBackOptInMetadata(ClassLoader classLoader) {
         try {
             Method method = resolvePredictiveBackOptInMethod(classLoader);
             if (method == null) {
@@ -121,13 +119,12 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
         return null;
     }
 
-    protected Object injectSelectedPredictiveBackMetadata(XposedInterface.Chain chain)
+    private Object injectSelectedPredictiveBackMetadata(XposedInterface.Chain chain)
             throws Throwable {
         Object activityInfoArgument = chain.getArg(0);
-        if (!(activityInfoArgument instanceof ActivityInfo)) {
+        if (!(activityInfoArgument instanceof ActivityInfo activityInfo)) {
             return chain.proceed();
         }
-        ActivityInfo activityInfo = (ActivityInfo) activityInfoArgument;
         String packageName = activityInfo.packageName;
         if (packageName == null || packageName.isEmpty()
                 || !isPredictiveBackOptInSelected(packageName)) {
@@ -138,7 +135,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
         if (applicationOptInEnabled == null) {
             return chain.proceed();
         }
-        if (applicationOptInEnabled.booleanValue()) {
+        if (applicationOptInEnabled) {
             log(Log.INFO, TAG, "Ignored stale predictive-back selection"
                     + ", package=" + packageName
                     + ", reason=applicationAlreadyOptedIn");
@@ -173,7 +170,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
         return result;
     }
 
-    protected Boolean readApplicationPredictiveBackOptInEnabled(Object applicationInfo) {
+    private Boolean readApplicationPredictiveBackOptInEnabled(Object applicationInfo) {
         if (applicationInfo == null) {
             return null;
         }
@@ -181,8 +178,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
             int privateFlagsExt = ((Number) readField(
                     applicationInfo, "privateFlagsExt")).intValue();
             predictiveBackApplicationMetadataFailureLogged = false;
-            return Boolean.valueOf(
-                    (privateFlagsExt & APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG) != 0);
+            return (privateFlagsExt & APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG) != 0;
         } catch (Throwable throwable) {
             if (!predictiveBackApplicationMetadataFailureLogged) {
                 predictiveBackApplicationMetadataFailureLogged = true;
@@ -195,7 +191,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
         }
     }
 
-    protected boolean isPredictiveBackOptInSelected(String packageName) {
+    private boolean isPredictiveBackOptInSelected(String packageName) {
         try {
             SharedPreferences preferences = predictiveBackPreferences;
             if (preferences == null) {
@@ -211,7 +207,7 @@ public final class SystemServerPredictiveOptInHook extends HookerBridge {
                     PredictiveBackPreferences.KEY_PACKAGES,
                     Collections.emptySet());
             predictiveBackPreferencesFailureLogged = false;
-            return packages != null && packages.contains(packageName);
+            return packages.contains(packageName);
         } catch (Throwable throwable) {
             if (!predictiveBackPreferencesFailureLogged) {
                 predictiveBackPreferencesFailureLogged = true;

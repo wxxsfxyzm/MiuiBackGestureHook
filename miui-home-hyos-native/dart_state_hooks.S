@@ -166,7 +166,11 @@ MiuiHomeHyosDartOverviewEnterEpilogueHook:
     save_epilogue_scratch
     enter_dart_observer g_dart_overview_enter_active_count, g_dart_overview_enter_retiring, .Loverview_enter_leave
     increment_dart_counter g_overview_dart_enter_count
-    store_dart_observation g_overview_state_observation, 2, .Loverview_enter_leave
+    // Enter is also a repair/publish edge when the state value is unchanged.
+    // The publisher de-duplicates already published observations, but this
+    // wake lets a repeated enter repair a missed or late exit publication.
+    store_dart_observation g_overview_state_observation, 2, .Loverview_enter_publish
+.Loverview_enter_publish:
     mark_dart_state_pending 2
     wake_dart_state_publisher
 .Loverview_enter_leave:
@@ -183,7 +187,10 @@ MiuiHomeHyosDartOverviewExitEpilogueHook:
     save_epilogue_scratch
     enter_dart_observer g_dart_overview_exit_active_count, g_dart_overview_exit_retiring, .Loverview_exit_leave
     increment_dart_counter g_overview_dart_exit_count
-    store_dart_observation g_overview_state_observation, 1, .Loverview_exit_leave
+    // Exit has the same retry semantics as enter; do not lose a false state
+    // merely because the previous observation already contained false.
+    store_dart_observation g_overview_state_observation, 1, .Loverview_exit_publish
+.Loverview_exit_publish:
     mark_dart_state_pending 2
     wake_dart_state_publisher
 .Loverview_exit_leave:

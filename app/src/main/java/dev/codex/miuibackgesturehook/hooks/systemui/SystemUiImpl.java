@@ -1,12 +1,13 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
 import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
 import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiBackPipelineHook.*;
 import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiGestureInputHook.*;
 import static dev.codex.miuibackgesturehook.hooks.systemui.SystemUiNavigationPolicyHook.*;
 
-import android.app.BroadcastOptions;
 import android.app.ActivityThread;
+import android.app.BroadcastOptions;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
@@ -35,7 +36,6 @@ import android.util.Log;
 import android.view.Display;
 import android.view.HapticFeedbackConstants;
 import android.view.InsetsFrameProvider;
-import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.View;
 import android.view.WindowInsets;
@@ -70,20 +70,11 @@ import io.github.libxposed.api.XposedInterface;
 
 public class SystemUiImpl extends SystemUiInputImpl {
 
-    private final AtomicBoolean runtimeStarted = new AtomicBoolean();
     private final AtomicBoolean reloadReleased = new AtomicBoolean();
 
     @Override
     public void onPackageLoad() {
         // The concrete SystemUI hook classes own installation ordering.
-    }
-
-    public void start() {
-        if (runtimeStarted.compareAndSet(false, true)) {
-            initializeModuleLoggingPreference();
-            moduleLog(Log.INFO, TAG, "Starting SystemUI hook state, build="
-                    + BUILD_MARK + ", process=" + packageName);
-        }
     }
 
     public synchronized void ensureSystemUiPlatformSelected() throws Exception {
@@ -140,46 +131,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
         releaseModuleLoggingPreference();
     }
 
-    public boolean miuiOverviewVisibleState() {
-        return miuiOverviewVisible;
-    }
-
-    public void miuiOverviewVisibleState(boolean value) {
-        miuiOverviewVisible = value;
-    }
-
-    public boolean miuiDrawerVisibleState() {
-        return miuiDrawerVisible;
-    }
-
-    public void miuiDrawerVisibleState(boolean value) {
-        miuiDrawerVisible = value;
-    }
-
-    public boolean miuiFolderVisibleState() {
-        return miuiFolderVisible;
-    }
-
-    public void miuiFolderVisibleState(boolean value) {
-        miuiFolderVisible = value;
-    }
-
-    public boolean miuiLauncherEditingState() {
-        return miuiLauncherEditing;
-    }
-
-    public void miuiLauncherEditingState(boolean value) {
-        miuiLauncherEditing = value;
-    }
-
-    public long miuiOverviewDismissDeadlineState() {
-        return miuiOverviewDismissPendingUntilUptime;
-    }
-
-    public void miuiOverviewDismissDeadlineState(long value) {
-        miuiOverviewDismissPendingUntilUptime = value;
-    }
-
     public Object headlessNavBarControllerState() {
         synchronized (headlessNavBarLifecycleLock) {
             return headlessNavBarLease == null ? null : headlessNavBarLease.controller;
@@ -194,24 +145,9 @@ public class SystemUiImpl extends SystemUiInputImpl {
         pendingHotReloadInputState = value;
     }
 
-    public synchronized void restoreMiuiOverviewDismissTimeoutAfterHotReload() {
-        long deadline = miuiOverviewDismissPendingUntilUptime;
-        if (deadline == 0L) {
-            return;
-        }
-        long remaining = deadline - SystemClock.uptimeMillis();
-        if (remaining <= 0L) {
-            miuiOverviewDismissPendingUntilUptime = 0L;
-            miuiOverviewVisible = true;
-            return;
-        }
-        new Handler(Looper.getMainLooper()).postDelayed(
-                () -> restoreMiuiOverviewAfterDismissTimeout(deadline), remaining);
-    }
-
     /** Install the input-owned hooks for the concrete SystemUI input hooker. */
     public void installGestureInputHooks(ClassLoader loader) throws Throwable {
-        Context context = resolveCurrentApplicationContext(loader);
+        Context context = ActivityThread.currentApplication();
         if (context != null) {
             ensureMiuiOverviewStateReceiver(context);
         }
@@ -2031,7 +1967,9 @@ public class SystemUiImpl extends SystemUiInputImpl {
         Object updaterProxy = Proxy.newProxyInstance(
                 updaterInterface.getClassLoader(),
                 new Class<?>[]{updaterInterface},
-                (proxy, method, args) -> headlessUpdaterResult(proxy, method, args));
+                (proxy, method, args) -> proxyDefaultResult(
+                        proxy, method, args,
+                        "MiuiBackGestureHook.HeadlessNavBarUpdater"));
         try {
             navigationModeChanged.invoke(edgeBackGestureHandler,
                     Integer.valueOf(navigationMode));
@@ -2098,55 +2036,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
             throw new IllegalStateException("Failed to attach headless NavBar lease",
                     throwable);
         }
-    }
-
-    protected Object headlessUpdaterResult(Object proxy, Method method, Object[] args) {
-        if (method.getDeclaringClass() == Object.class) {
-            switch (method.getName()) {
-                case "equals":
-                    return Boolean.valueOf(args != null && args.length == 1
-                            && proxy == args[0]);
-                case "hashCode":
-                    return Integer.valueOf(System.identityHashCode(proxy));
-                case "toString":
-                    return "MiuiBackGestureHook.HeadlessNavBarUpdater@"
-                            + Integer.toHexString(System.identityHashCode(proxy));
-                default:
-                    return null;
-            }
-        }
-        return primitiveDefaultValue(method.getReturnType());
-    }
-
-    protected static Object primitiveDefaultValue(Class<?> type) {
-        if (type == void.class || !type.isPrimitive()) {
-            return null;
-        }
-        if (type == boolean.class) {
-            return Boolean.FALSE;
-        }
-        if (type == char.class) {
-            return Character.valueOf('\0');
-        }
-        if (type == byte.class) {
-            return Byte.valueOf((byte) 0);
-        }
-        if (type == short.class) {
-            return Short.valueOf((short) 0);
-        }
-        if (type == int.class) {
-            return Integer.valueOf(0);
-        }
-        if (type == long.class) {
-            return Long.valueOf(0L);
-        }
-        if (type == float.class) {
-            return Float.valueOf(0.0f);
-        }
-        if (type == double.class) {
-            return Double.valueOf(0.0d);
-        }
-        return null;
     }
 
     protected static boolean containsIdentity(Object collection, Object target) {
@@ -2307,7 +2196,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
                     || generation != headlessNavBarLifecycleGeneration.get()) {
                 return;
             }
-            Context systemUiContext = resolveCurrentApplicationContext(classLoader);
+            Context systemUiContext = ActivityThread.currentApplication();
             if (systemUiContext != null) {
                 ensureMiuiOverviewStateReceiver(systemUiContext);
             }
@@ -3227,7 +3116,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
         // Xiaomi's build, and a missing one must only degrade its own stage.
         if (installColorRootApply) {
             try {
-                Method apply = resolveSlideMethod(defaultClass, baseClass,
+                Method apply = resolveMethodBySignature(defaultClass, baseClass,
                         "applyTransaction", void.class);
                 hook(apply)
                         .intercept(this::onCrossActivityColorRootApply);
@@ -3239,7 +3128,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
         }
         if (installStart) {
             try {
-                Method start = resolveSlideMethod(defaultClass, baseClass,
+                Method start = resolveMethodBySignature(defaultClass, baseClass,
                         "startBackAnimation", void.class, backMotionEventClass);
                 hook(start)
                         .intercept(this::onCrossActivitySlideStart);
@@ -3268,7 +3157,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
         }
         if (installPostCommit) {
             try {
-                Method postCommit = resolveSlideMethod(defaultClass, baseClass,
+                Method postCommit = resolveMethodBySignature(defaultClass, baseClass,
                         "onPostCommitProgress", void.class, float.class);
                 // Hooked on the base class means this is the super-call position:
                 // the subclass override keeps writing its native geometry after our
@@ -3287,7 +3176,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
         }
         if (installDuration) {
             try {
-                Method duration = resolveSlideMethod(defaultClass, baseClass,
+                Method duration = resolveMethodBySignature(defaultClass, baseClass,
                         "getPostCommitAnimationDuration", long.class);
                 hook(duration)
                         .intercept(this::onCrossActivitySlideDuration);
@@ -3298,7 +3187,7 @@ public class SystemUiImpl extends SystemUiInputImpl {
         }
         if (installFinish) {
             try {
-                Method finish = resolveSlideMethod(defaultClass, baseClass,
+                Method finish = resolveMethodBySignature(defaultClass, baseClass,
                         "finishAnimation", void.class);
                 hook(finish)
                         .intercept(this::onCrossActivitySlideFinish);
@@ -3435,69 +3324,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
             freeformColorRootAdoption = null;
         }
         return chain.proceed();
-    }
-
-    /**
-     * Resolves an animation-class member by name first, then falls back to a unique
-     * signature match so an R8-renamed member is still found. Same-name declarations
-     * across the hierarchy are one virtual method — the most-derived one wins;
-     * different-name candidates at the same level are ambiguous and fail.
-     */
-    protected Method resolveSlideMethod(Class<?> leaf, Class<?> stop, String name,
-                                        Class<?> returnType, Class<?>... parameters)
-            throws NoSuchMethodException {
-        try {
-            return findDeclaredMethodInHierarchy(leaf, stop, name, parameters);
-        } catch (NoSuchMethodException ignored) {
-        }
-        Class<?> current = leaf;
-        while (current != null) {
-            Method match = null;
-            for (Method candidate : current.getDeclaredMethods()) {
-                if (candidate.isSynthetic()
-                        || candidate.getReturnType() != returnType
-                        || !Arrays.equals(candidate.getParameterTypes(), parameters)) {
-                    continue;
-                }
-                if (match != null) {
-                    throw new NoSuchMethodException(name
-                            + ": ambiguous signature fallback in " + current.getName()
-                            + " (" + match.getName() + " vs " + candidate.getName()
-                            + ")");
-                }
-                match = candidate;
-            }
-            if (match != null) {
-                match.setAccessible(true);
-                moduleLog(Log.INFO, TAG, "Resolved " + name + " by signature as "
-                        + current.getName() + "." + match.getName());
-                return match;
-            }
-            if (current == stop) {
-                break;
-            }
-            current = current.getSuperclass();
-        }
-        throw new NoSuchMethodException(leaf.getName() + "." + name);
-    }
-
-    protected Method findDeclaredMethodInHierarchy(Class<?> leaf, Class<?> stop,
-                                                   String name, Class<?>... parameters)
-            throws NoSuchMethodException {
-        Class<?> current = leaf;
-        while (current != null) {
-            try {
-                Method method = current.getDeclaredMethod(name, parameters);
-                method.setAccessible(true);
-                return method;
-            } catch (NoSuchMethodException ignored) {
-            }
-            if (current == stop) {
-                break;
-            }
-            current = current.getSuperclass();
-        }
-        throw new NoSuchMethodException(leaf.getName() + "." + name);
     }
 
     protected volatile boolean miuixSlideAnimActive;
@@ -4233,23 +4059,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
                 && session.enteringLeash.isValid();
     }
 
-    protected Object readFirstCrossTaskField(Object target, String... names)
-            throws Exception {
-        Throwable failure = null;
-        for (String name : names) {
-            try {
-                return readField(target, name);
-            } catch (Throwable throwable) {
-                failure = throwable;
-            }
-        }
-        if (failure instanceof Exception) {
-            throw (Exception) failure;
-        }
-        throw new NoSuchFieldException(target.getClass().getName()
-                + "." + Arrays.toString(names));
-    }
-
     /**
      * Fires when any BackProgressAnimator registers its per-gesture ProgressCallback.
      * For the armed cross-activity animation's own animator, the native callback (the
@@ -4801,7 +4610,11 @@ public class SystemUiImpl extends SystemUiInputImpl {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            Method method = requireBackMergeAnimation(handlerClass);
+            Method method = requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
+                    IBinder.class.getName(), TransitionInfo.class.getName(),
+                    SurfaceControl.Transaction.class.getName(),
+                    SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
+                    "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
             hook(method)
                     .intercept(this::correctPredictiveBackCommitComposition);
             backCommitCompositionHookReady = true;
@@ -4812,15 +4625,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
                     "Failed to hook Shell predictive return-home commit composition",
                     throwable);
         }
-    }
-
-    protected Method requireBackMergeAnimation(Class<?> handlerClass)
-            throws NoSuchMethodException {
-        return requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
-                IBinder.class.getName(), TransitionInfo.class.getName(),
-                SurfaceControl.Transaction.class.getName(),
-                SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
-                "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
     }
 
     protected void captureFreeformColorRootCandidate(Object handler,
@@ -5256,8 +5060,9 @@ public class SystemUiImpl extends SystemUiInputImpl {
                 new Class<?>[]{callbackClass},
                 (proxy, method, invocationArgs) -> {
                     if (method.getDeclaringClass() == Object.class) {
-                        return headlessUpdaterResult(
-                                proxy, method, invocationArgs);
+                        return proxyDefaultResult(
+                                proxy, method, invocationArgs,
+                                "MiuiBackGestureHook.HeadlessNavBarUpdater");
                     }
                     if ("onTransitionFinished".equals(method.getName())
                             && method.getParameterCount() == 1
@@ -6170,7 +5975,11 @@ public class SystemUiImpl extends SystemUiInputImpl {
         try {
             Class<?> handlerClass = Class.forName(
                     BACK_TRANSITION_HANDLER, false, classLoader);
-            Method mergeAnimation = requireBackMergeAnimation(handlerClass);
+            Method mergeAnimation = requireExactDeclaredMethod(handlerClass, "mergeAnimation", "void",
+                    IBinder.class.getName(), TransitionInfo.class.getName(),
+                    SurfaceControl.Transaction.class.getName(),
+                    SurfaceControl.Transaction.class.getName(), IBinder.class.getName(),
+                    "com.android.wm.shell.transition.Transitions$TransitionFinishCallback");
             backFinishOpenCallerDeoptimized = deoptimize(mergeAnimation);
             moduleLog(backFinishOpenCallerDeoptimized ? Log.INFO : Log.WARN,
                     TAG, "Deoptimized exact BackTransitionHandler.mergeAnimation"
@@ -6255,22 +6064,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
         return new ReturnHomeComposition(apps, closingTarget, openingTarget,
                 closingLeash, openingLeash, closingTaskId, openingTaskId,
                 closingDisplayId);
-    }
-
-    protected int resolveRemoteTargetActivityType(Object target) throws Exception {
-        Object windowConfiguration = readField(target, "windowConfiguration");
-        Object activityType = invokeAnyMethod(
-                windowConfiguration, "getActivityType", new Object[0]);
-        return activityType instanceof Number
-                ? ((Number) activityType).intValue() : -1;
-    }
-
-    protected int resolveRemoteTargetWindowingMode(Object target) throws Exception {
-        Object windowConfiguration = readField(target, "windowConfiguration");
-        Object windowingMode = invokeAnyMethod(
-                windowConfiguration, "getWindowingMode", new Object[0]);
-        return windowingMode instanceof Number
-                ? ((Number) windowingMode).intValue() : -1;
     }
 
     protected void hookShellAnimationFinished(Class<?> controllerClass, String methodName,
@@ -6722,26 +6515,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
         }
     }
 
-    public Context resolveCurrentApplicationContext(ClassLoader classLoader) {
-        try {
-            if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL) {
-                return ActivityThread.currentApplication();
-            }
-            Class<?> activityThread = Class.forName(
-                    "android.app.ActivityThread", false, classLoader);
-            Method currentApplication = activityThread.getDeclaredMethod(
-                    "currentApplication");
-            currentApplication.setAccessible(true);
-            Object application = currentApplication.invoke(null);
-            return application instanceof Context ? (Context) application : null;
-        } catch (Throwable throwable) {
-            moduleLog(Log.WARN, TAG,
-                    "Failed to resolve SystemUI application context for status receiver",
-                    throwable);
-            return null;
-        }
-    }
-
     protected void handleModuleRuntimeStatusQuery(Context context, int senderUid,
                                                   String senderPackage,
                                                   Intent intent) {
@@ -7082,6 +6855,20 @@ public class SystemUiImpl extends SystemUiInputImpl {
                 + ", overviewVisible=" + overviewVisible);
     }
 
+    @Override
+    protected synchronized void clearMiuiOverviewAfterRejectedShellTarget(
+            String reason) {
+        // A callback-only probe is no longer authoritative after Shell returns a different
+        // target. Feed that evidence through the normal reducer so the short late-enter guard
+        // is retained, while the stale Overview bit cannot classify every following DOWN as
+        // launcher Recents.
+        updateMiuiOverviewState(false, "staleShellTarget", reason);
+        moduleLog(Log.WARN, TAG,
+                "Cleared stale Miui Recents state after rejected Shell target"
+                        + ", reason=" + reason
+                        + ", overviewVisible=" + miuiOverviewVisible);
+    }
+
     protected synchronized void beginMiuiOverviewDismiss(String reason) {
         long pendingUntil = SystemClock.uptimeMillis() + MIUI_OVERVIEW_DISMISS_TIMEOUT_MS;
         miuiOverviewDismissPendingUntilUptime = pendingUntil;
@@ -7335,20 +7122,6 @@ public class SystemUiImpl extends SystemUiInputImpl {
                 + ", generation=" + generation
                 + ", attempt=" + attemptId
                 + ", ordered=true");
-    }
-
-    protected int readMotionEventId(MotionEvent event) throws Exception {
-        Object value = invokeAnyMethod(event, "getId", new Object[0]);
-        if (!(value instanceof Number)) {
-            throw new IllegalStateException("MotionEvent.getId returned "
-                    + shortObject(value));
-        }
-        return ((Number) value).intValue();
-    }
-
-    protected int readMotionEventDisplayId(MotionEvent event) throws Exception {
-        Object value = invokeAnyMethod(event, "getDisplayId", new Object[0]);
-        return value instanceof Number ? ((Number) value).intValue() : -1;
     }
 
     protected void onSystemUiInputMonitorAttached(Context context) {

@@ -1,7 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.systemserver;
 
-import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
-
+import android.app.ActivityThread;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -14,29 +13,24 @@ import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import dev.codex.miuibackgesturehook.util.ReflectionHelper;
 import io.github.libxposed.api.XposedInterface;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import dev.codex.miuibackgesturehook.util.Hooker;
 import dev.codex.miuibackgesturehook.util.HookerBridge;
 
-@Hooker.XposedHooker(
-        name = "SystemServerContextualSearchHook",
-        targets = "system",
-        order = 90)
+@Hooker.XposedHooker(name = "SystemServerContextualSearchHook", targets = "system", order = 90)
 public final class SystemServerContextualSearchHook extends HookerBridge {
     private static final String TAG = "SystemServerContextualSearchHook";
     private static final String SYSTEM_UI = "com.android.systemui";
     private static final String MIUI_HOME = "com.miui.home";
-    private static final String GOOGLE_CONTEXTUAL_SEARCH_PACKAGE =
-            "com.google.android.googlequicksearchbox";
-    private static final int ANDROID_17_API_LEVEL = 37;
+    private static final String GOOGLE_CONTEXTUAL_SEARCH_PACKAGE = "com.google.android.googlequicksearchbox";
 
     private final ThreadLocal<Boolean> contextualSearchBridgeInvocation = new ThreadLocal<>();
     private final AtomicInteger contextualSearchBridgeCallsInFlight = new AtomicInteger();
     private final AtomicInteger contextualSearchStartAcceptedCalls = new AtomicInteger();
     private final AtomicInteger contextualSearchProviderAcceptedCalls = new AtomicInteger();
-    private volatile PackageManager contextualSearchPackageManager;
     private volatile int contextualSearchPackageResourceId;
     private volatile SharedPreferences contextualSearchPreferences;
     private volatile boolean contextualSearchPreferencesFailureLogged;
@@ -108,9 +102,7 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
                 continue;
             }
             try {
-                Class.forName(
-                        "com.android.server.contextualsearch.ContextualSearchManagerService",
-                        false, candidate);
+                ReflectionHelper.findClass("com.android.server.contextualsearch.ContextualSearchManagerService", candidate);
                 return candidate;
             } catch (Throwable ignored) {
             }
@@ -125,16 +117,11 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
                 + systemServerImpl.name());
     }
 
-    protected void hookContextualSearchCompatibility(ClassLoader classLoader) {
+    private void hookContextualSearchCompatibility(ClassLoader classLoader) {
         hookContextualSearchStartupGate(classLoader);
         try {
-            Class<?> serviceClass = Class.forName(
-                    "com.android.server.contextualsearch.ContextualSearchManagerService",
-                    false, classLoader);
-            Class<?> stubClass = Class.forName(
-                    "com.android.server.contextualsearch.ContextualSearchManagerService"
-                            + "$ContextualSearchManagerStub",
-                    false, classLoader);
+            Class<?> serviceClass = ReflectionHelper.findClass("com.android.server.contextualsearch.ContextualSearchManagerService", classLoader);
+            Class<?> stubClass = ReflectionHelper.findClass("com.android.server.contextualsearch.ContextualSearchManagerService$ContextualSearchManagerStub", classLoader);
             installContextualSearchStartHook(stubClass);
             installContextualSearchStateHook(stubClass);
             installContextualSearchPermissionHook(serviceClass);
@@ -162,7 +149,17 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
             start.setAccessible(true);
             boolean deoptimized = deoptimize(start);
             hook(start)
-                    .intercept(this::bridgeContextualSearchSystemUiCall);
+                    .intercept(chain -> {
+                        if (!systemServerImpl.isSelected()) {
+                            log(Log.WARN, TAG,
+                                    "Contextual-search caller policy unavailable; preserving platform call");
+                            return chain.proceed();
+                        }
+                        String requiredPackage = systemServerImpl
+                                .nativeLauncherOwnsContextualSearchLongPress()
+                                ? MIUI_HOME : SYSTEM_UI;
+                        return runContextualSearchBridge(chain, requiredPackage);
+                    });
             log(deoptimized ? Log.INFO : Log.WARN, TAG,
                     "Prepared contextual-search start boundary"
                             + ", executable=" + start
@@ -182,8 +179,7 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
             }
             state.setAccessible(true);
             boolean deoptimized = deoptimize(state);
-            hook(state)
-                    .intercept(this::bridgeContextualSearchProviderCall);
+            hook(state).intercept(chain -> runContextualSearchBridge(chain, GOOGLE_CONTEXTUAL_SEARCH_PACKAGE));
             log(deoptimized ? Log.INFO : Log.WARN, TAG,
                     "Prepared contextual-search provider callback boundary"
                             + ", executable=" + state
@@ -201,7 +197,12 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
             permission.setAccessible(true);
             boolean deoptimized = deoptimize(permission);
             hook(permission)
-                    .intercept(this::scopeContextualSearchPermission);
+                    .intercept(chain -> {
+                        if (Boolean.TRUE.equals(contextualSearchBridgeInvocation.get())) {
+                            return null;
+                        }
+                        return chain.proceed();
+                    });
             log(deoptimized ? Log.INFO : Log.WARN, TAG,
                     "Prepared contextual-search permission boundary"
                             + ", deoptimized=" + deoptimized);
@@ -218,7 +219,12 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
             provider.setAccessible(true);
             boolean deoptimized = deoptimize(provider);
             hook(provider)
-                    .intercept(this::scopeContextualSearchProvider);
+                    .intercept(chain -> {
+                        if (Boolean.TRUE.equals(contextualSearchBridgeInvocation.get())) {
+                            return GOOGLE_CONTEXTUAL_SEARCH_PACKAGE;
+                        }
+                        return chain.proceed();
+                    });
             log(deoptimized ? Log.INFO : Log.WARN, TAG,
                     "Prepared contextual-search provider boundary"
                             + ", deoptimized=" + deoptimized);
@@ -228,11 +234,10 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
         }
     }
 
-    protected void hookContextualSearchStartupGate(ClassLoader classLoader) {
+    private void hookContextualSearchStartupGate(ClassLoader classLoader) {
         try {
             resolveContextualSearchPackageResourceId(classLoader);
-            Class<?> systemServerClass = Class.forName(
-                    "com.android.server.SystemServer", false, classLoader);
+            Class<?> systemServerClass = ReflectionHelper.findClass("com.android.server.SystemServer", classLoader);
             Method gate = systemServerClass.getDeclaredMethod(
                     "deviceHasConfigString", Context.class, int.class);
             gate.setAccessible(true);
@@ -244,13 +249,8 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
         }
     }
 
-    protected Object enableContextualSearchServiceAtBoot(
+    private Object enableContextualSearchServiceAtBoot(
             XposedInterface.Chain chain) throws Throwable {
-        Object contextArgument = chain.getArg(0);
-        if (contextArgument instanceof Context) {
-            contextualSearchPackageManager =
-                    ((Context) contextArgument).getPackageManager();
-        }
         int resourceId = contextualSearchPackageResourceId;
         if (resourceId == 0) {
             resourceId = resolveContextualSearchPackageResourceId(
@@ -271,40 +271,6 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
                             + ", alwaysRegister=" + alwaysRegister
                             + ", preferenceEnabled=" + preferenceEnabled);
             return Boolean.TRUE;
-        }
-        return chain.proceed();
-    }
-
-    protected Object bridgeContextualSearchSystemUiCall(
-            XposedInterface.Chain chain) throws Throwable {
-        if (!systemServerImpl.isSelected()) {
-            log(Log.WARN, TAG,
-                    "Contextual-search caller policy unavailable; preserving platform call");
-            return chain.proceed();
-        }
-        String requiredPackage = systemServerImpl
-                .nativeLauncherOwnsContextualSearchLongPress()
-                ? MIUI_HOME : SYSTEM_UI;
-        return runContextualSearchBridge(chain, requiredPackage);
-    }
-
-    protected Object bridgeContextualSearchProviderCall(
-            XposedInterface.Chain chain) throws Throwable {
-        return runContextualSearchBridge(chain, GOOGLE_CONTEXTUAL_SEARCH_PACKAGE);
-    }
-
-    protected Object scopeContextualSearchPermission(
-            XposedInterface.Chain chain) throws Throwable {
-        if (Boolean.TRUE.equals(contextualSearchBridgeInvocation.get())) {
-            return null;
-        }
-        return chain.proceed();
-    }
-
-    protected Object scopeContextualSearchProvider(
-            XposedInterface.Chain chain) throws Throwable {
-        if (Boolean.TRUE.equals(contextualSearchBridgeInvocation.get())) {
-            return GOOGLE_CONTEXTUAL_SEARCH_PACKAGE;
         }
         return chain.proceed();
     }
@@ -342,7 +308,7 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
     }
 
     private boolean callingUidOwnsPackage(String requiredPackage) {
-        PackageManager packageManager = resolveContextualSearchPackageManager();
+        PackageManager packageManager = ActivityThread.currentApplication().getPackageManager();
         if (packageManager == null) {
             return false;
         }
@@ -369,50 +335,13 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
         return false;
     }
 
-    private PackageManager resolveContextualSearchPackageManager() {
-        PackageManager cached = contextualSearchPackageManager;
-        if (cached != null) {
-            return cached;
-        }
-        try {
-            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-            Object application = activityThreadClass
-                    .getDeclaredMethod("currentApplication")
-                    .invoke(null);
-            Context context = application instanceof Context ? (Context) application : null;
-            if (context == null) {
-                Object activityThread = activityThreadClass
-                        .getDeclaredMethod("currentActivityThread")
-                        .invoke(null);
-                if (activityThread != null) {
-                    Method getSystemContext = activityThreadClass
-                            .getDeclaredMethod("getSystemContext");
-                    getSystemContext.setAccessible(true);
-                    Object systemContext = getSystemContext.invoke(activityThread);
-                    if (systemContext instanceof Context) {
-                        context = (Context) systemContext;
-                    }
-                }
-            }
-            if (context != null) {
-                cached = context.getPackageManager();
-                contextualSearchPackageManager = cached;
-            }
-        } catch (Throwable throwable) {
-            log(Log.WARN, TAG,
-                    "Could not resolve system PackageManager for contextual search", throwable);
-        }
-        return cached;
-    }
-
     private int resolveContextualSearchPackageResourceId(ClassLoader classLoader)
             throws Exception {
         int cached = contextualSearchPackageResourceId;
         if (cached != 0) {
             return cached;
         }
-        Class<?> stringResources = Class.forName(
-                "com.android.internal.R$string", false, classLoader);
+        Class<?> stringResources = ReflectionHelper.findClass("com.android.internal.R$string", classLoader);
         Field field = stringResources.getDeclaredField(
                 "config_defaultContextualSearchPackageName");
         field.setAccessible(true);
@@ -470,8 +399,7 @@ public final class SystemServerContextualSearchHook extends HookerBridge {
             if (selected && selectedClassLoader == classLoader) {
                 return;
             }
-            Class<?> transitionClass = Class.forName(
-                    "com.android.server.wm.Transition", false, classLoader);
+            Class<?> transitionClass = ReflectionHelper.findClass("com.android.server.wm.Transition", classLoader);
             if (matchesAndroid17(transitionClass)) {
                 android17 = true;
             } else if (matchesAndroid16(transitionClass)) {

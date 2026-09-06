@@ -1,6 +1,7 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
 import static dev.codex.miuibackgesturehook.util.ReflectionHelper.*;
+import static dev.codex.miuibackgesturehook.data.ReturnHomeData.*;
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import android.annotation.SuppressLint;
 import android.animation.Animator;
@@ -72,8 +73,121 @@ import dev.codex.miuibackgesturehook.util.HookerBridge;
 import io.github.libxposed.api.XposedInterface;
 
 public abstract class SystemUiInputImpl extends HookerBridge {
-    protected abstract void invalidateOpenTransitionSnapshot(
-            OpenTransitionSnapshot snapshot, String reason);
+    private final AtomicBoolean runtimeStarted = new AtomicBoolean();
+    private final AtomicBoolean runtimeReleased = new AtomicBoolean();
+
+    /** Shared lifecycle entry point used by both process-specific hook runtimes. */
+    public void start() {
+        if (runtimeStarted.compareAndSet(false, true)) {
+            initializeModuleLoggingPreference();
+            moduleLog(Log.INFO, TAG, "Starting hook state, build="
+                    + BUILD_MARK + ", process=" + packageName);
+        }
+    }
+
+    /** MiuiHome has no SystemUI-owned resources to inspect at this layer. */
+    public boolean isHotReloadSafe() {
+        return true;
+    }
+
+    /** Release only state owned by the shared input/communication layer. */
+    public void releaseForHotReload() {
+        if (!runtimeReleased.compareAndSet(false, true)) {
+            return;
+        }
+        acceptedInputToken.set(null);
+        miuiHomeAcceptedInputIdentity.set(null);
+        miuiHomeLocalHandoffToken.set(null);
+        miuiHomeLauncherOpenSnapshot.set(null);
+        miuiHomePermissionMergeToken.set(null);
+        systemUiReturnHomeCommitIdentity.set(null);
+        miuiHomePendingNativeGeometry.remove();
+        returnHomeFinishTransferCandidate.remove();
+        releaseModuleLoggingPreference();
+    }
+
+    public boolean miuiOverviewVisibleState() {
+        return miuiOverviewVisible;
+    }
+
+    public void miuiOverviewVisibleState(boolean value) {
+        miuiOverviewVisible = value;
+    }
+
+    public boolean miuiDrawerVisibleState() {
+        return miuiDrawerVisible;
+    }
+
+    public void miuiDrawerVisibleState(boolean value) {
+        miuiDrawerVisible = value;
+    }
+
+    public boolean miuiFolderVisibleState() {
+        return miuiFolderVisible;
+    }
+
+    public void miuiFolderVisibleState(boolean value) {
+        miuiFolderVisible = value;
+    }
+
+    public boolean miuiLauncherEditingState() {
+        return miuiLauncherEditing;
+    }
+
+    public void miuiLauncherEditingState(boolean value) {
+        miuiLauncherEditing = value;
+    }
+
+    public long miuiOverviewDismissDeadlineState() {
+        return miuiOverviewDismissPendingUntilUptime;
+    }
+
+    public void miuiOverviewDismissDeadlineState(long value) {
+        miuiOverviewDismissPendingUntilUptime = value;
+    }
+
+    public synchronized void restoreMiuiOverviewDismissTimeoutAfterHotReload() {
+        long deadline = miuiOverviewDismissPendingUntilUptime;
+        if (deadline == 0L) {
+            return;
+        }
+        long remaining = deadline - SystemClock.uptimeMillis();
+        if (remaining <= 0L) {
+            miuiOverviewDismissPendingUntilUptime = 0L;
+            miuiOverviewVisible = true;
+            return;
+        }
+        new Handler(Looper.getMainLooper()).postDelayed(
+                () -> restoreMiuiOverviewAfterDismissTimeout(deadline), remaining);
+    }
+
+    protected synchronized void restoreMiuiOverviewAfterDismissTimeout(long pendingUntil) {
+        if (miuiOverviewDismissPendingUntilUptime != pendingUntil) {
+            return;
+        }
+        miuiOverviewDismissPendingUntilUptime = 0L;
+        miuiOverviewVisible = true;
+    }
+
+    /**
+     * A callback-only launcher probe is authoritative only while Shell still returns the
+     * launcher callback.  A different back type proves that the mirrored Overview state is
+     * stale for this generation; let the SystemUI implementation consume that evidence through
+     * its normal state reducer instead of probing the same stale target on every DOWN.
+     */
+    protected synchronized void clearMiuiOverviewAfterRejectedShellTarget(String reason) {
+        miuiOverviewVisible = false;
+        miuiOverviewDismissPendingUntilUptime = 0L;
+    }
+
+    protected String systemUiInputArbiterStateAction() {
+        return MODULE_SYSTEMUI_INPUT_ARBITER_STATE;
+    }
+
+    /** Open-transition snapshots are captured only by the SystemUI implementation. */
+    protected void invalidateOpenTransitionSnapshot(
+            OpenTransitionSnapshot snapshot, String reason) {
+    }
 
     protected void onOpenTransitionAnimatorEnded(
             OpenTransitionSnapshot snapshot, boolean isReverse) {
@@ -96,26 +210,30 @@ public abstract class SystemUiInputImpl extends HookerBridge {
             int taskId, int transitionDebugId, Object compositionController,
             Object exactFinishCallback, boolean elementBoundaryOnly);
 
-    protected abstract void clearLegacyBackGuard(String reason);
+    protected void clearLegacyBackGuard(String reason) {
+    }
 
     protected abstract boolean clearSystemUiReturnHomeCommitIdentity(
             Object controller, long attemptId, String reason);
 
-    protected abstract LegacyBackAttempt armLegacyBackGuard(
-            Object controller, Object runningInfo);
+    protected LegacyBackAttempt armLegacyBackGuard(
+            Object controller, Object runningInfo) {
+        return null;
+    }
 
-    protected abstract void ensureAospBackAnimations(Object controller, String source);
+    /** AOSP back animation registry setup is a SystemUI-only responsibility. */
+    protected void ensureAospBackAnimations(Object controller, String source) {
+    }
 
     protected abstract void onSystemUiInputMonitorAttached(Context context);
 
     protected abstract void onSystemUiInputMonitorDetached(Context context);
 
-    protected abstract int readMotionEventId(MotionEvent event) throws Exception;
-
-    protected abstract int readMotionEventDisplayId(MotionEvent event) throws Exception;
-
-    protected abstract boolean isCurrentHeadlessNavBarLifecycle(
-            Object edgeBackGestureHandler);
+    /** Headless NavigationBar lifecycle is owned only by the SystemUI runtime. */
+    protected boolean isCurrentHeadlessNavBarLifecycle(
+            Object edgeBackGestureHandler) {
+        return false;
+    }
 
 
     protected static final String TAG = "MiuiBackGestureHook";
@@ -472,42 +590,6 @@ public abstract class SystemUiInputImpl extends HookerBridge {
     protected volatile Object[][] pendingHotReloadInputState = new Object[0][0];
     protected volatile Object[][] pendingHotReloadHeadlessState = new Object[0][0];
 
-    public static final class ReturnHomeNativeGeometrySnapshot {
-        public final long generation;
-        public final Object animationIdentity;
-        public final long frameTraceId;
-        public final int sourceKind;
-        public final float[] matrixValues;
-        public final Rect windowCrop;
-        public final float[] surfaceCornerRadii;
-
-        public ReturnHomeNativeGeometrySnapshot(
-                long generation, Object animationIdentity,
-                float[] matrixValues, Rect windowCrop,
-                float[] surfaceCornerRadii, long frameTraceId,
-                int sourceKind) {
-            this.generation = generation;
-            this.animationIdentity = animationIdentity;
-            this.frameTraceId = frameTraceId;
-            this.sourceKind = sourceKind;
-            this.matrixValues = matrixValues.clone();
-            this.windowCrop = new Rect(windowCrop);
-            this.surfaceCornerRadii = surfaceCornerRadii.clone();
-        }
-
-        public float[] copyMatrixValues() {
-            return matrixValues.clone();
-        }
-
-        public Rect copyWindowCrop() {
-            return new Rect(windowCrop);
-        }
-
-        public float[] copySurfaceCornerRadii() {
-            return surfaceCornerRadii.clone();
-        }
-    }
-
     public static final class HeadlessNavBarLease {
         public final Object controller;
         public final Object navBarHelper;
@@ -654,255 +736,7 @@ public abstract class SystemUiInputImpl extends HookerBridge {
         }
     }
 
-    public static final class MiuiHomeLocalHandoffToken {
-        public final long generation;
-        public final Object session;
-        public final Object windowElement;
-        public final Object windowAnimContext;
-        public final Object status;
-
-        public MiuiHomeLocalHandoffToken(long generation, Object session,
-                                         Object windowElement, Object windowAnimContext,
-                                         Object status) {
-            this.generation = generation;
-            this.session = session;
-            this.windowElement = windowElement;
-            this.windowAnimContext = windowAnimContext;
-            this.status = status;
-        }
-    }
-
-    public static final class LauncherOpenMainTask {
-        public final int taskId;
-        public final int displayId;
-        public final ComponentName component;
-        public final Rect bounds;
-
-        public LauncherOpenMainTask(int taskId, int displayId,
-                                    ComponentName component, Rect bounds) {
-            this.taskId = taskId;
-            this.displayId = displayId;
-            this.component = component;
-            this.bounds = bounds;
-        }
-    }
-
-    public static final class MiuiHomeLauncherOpenSnapshot {
-        public final long generation;
-        public final long nativeGeneration;
-        public final long callbackEpoch;
-        public final Object stateManager;
-        public final Object windowElement;
-        public final Object animationIdentity;
-        public final String animationType;
-        public final Object windowTransitionCompat;
-        public final Object helper;
-        public final Object mainTransitionToken;
-        public final Object mainTransitionInfo;
-        public final int mainTransitionDebugId;
-        public final LauncherOpenMainTask mainTask;
-
-        public MiuiHomeLauncherOpenSnapshot(
-                long generation, long nativeGeneration, long callbackEpoch,
-                Object stateManager,
-                Object windowElement, Object animationIdentity,
-                String animationType, Object windowTransitionCompat,
-                Object helper, Object mainTransitionToken,
-                Object mainTransitionInfo, int mainTransitionDebugId,
-                LauncherOpenMainTask mainTask) {
-            this.generation = generation;
-            this.nativeGeneration = nativeGeneration;
-            this.callbackEpoch = callbackEpoch;
-            this.stateManager = stateManager;
-            this.windowElement = windowElement;
-            this.animationIdentity = animationIdentity;
-            this.animationType = animationType;
-            this.windowTransitionCompat = windowTransitionCompat;
-            this.helper = helper;
-            this.mainTransitionToken = mainTransitionToken;
-            this.mainTransitionInfo = mainTransitionInfo;
-            this.mainTransitionDebugId = mainTransitionDebugId;
-            this.mainTask = mainTask;
-        }
-    }
-
-    public static final class PermissionActivityTransition {
-        public final Object container;
-        public final Object parent;
-        public final SurfaceControl leash;
-        public final ComponentName component;
-        public final Rect startBounds;
-        public final Rect endBounds;
-        public final int debugId;
-        public final int backgroundColor;
-        public final int startDisplayId;
-        public final int endDisplayId;
-
-        public PermissionActivityTransition(
-                Object container, Object parent, SurfaceControl leash,
-                ComponentName component,
-                Rect startBounds, Rect endBounds, int debugId,
-                int backgroundColor, int startDisplayId, int endDisplayId) {
-            this.container = container;
-            this.parent = parent;
-            this.leash = leash;
-            this.component = component;
-            this.startBounds = startBounds;
-            this.endBounds = endBounds;
-            this.debugId = debugId;
-            this.backgroundColor = backgroundColor;
-            this.startDisplayId = startDisplayId;
-            this.endDisplayId = endDisplayId;
-        }
-    }
-
-    public static final class MiuiHomePermissionMergeToken {
-        public final MiuiHomeLauncherOpenSnapshot launcherOpen;
-        public final PermissionActivityTransition permissionOpen;
-        public final AtomicInteger consumed = new AtomicInteger();
-
-        public MiuiHomePermissionMergeToken(
-                MiuiHomeLauncherOpenSnapshot launcherOpen,
-                PermissionActivityTransition permissionOpen) {
-            this.launcherOpen = launcherOpen;
-            this.permissionOpen = permissionOpen;
-        }
-    }
-
-    public static final class ReturnHomeComposition {
-        public final Object appsIdentity;
-        public final Object closingTarget;
-        public final Object openingTarget;
-        public final SurfaceControl closingLeash;
-        public final SurfaceControl openingLeash;
-        public final int closingTaskId;
-        public final int openingTaskId;
-        public final int displayId;
-
-        public ReturnHomeComposition(Object appsIdentity, Object closingTarget,
-                                     Object openingTarget, SurfaceControl closingLeash,
-                                     SurfaceControl openingLeash, int closingTaskId,
-                                     int openingTaskId, int displayId) {
-            this.appsIdentity = appsIdentity;
-            this.closingTarget = closingTarget;
-            this.openingTarget = openingTarget;
-            this.closingLeash = closingLeash;
-            this.openingLeash = openingLeash;
-            this.closingTaskId = closingTaskId;
-            this.openingTaskId = openingTaskId;
-            this.displayId = displayId;
-        }
-    }
-
-    public static final class ReturnHomeCommitComposition {
-        public final Object handler;
-        public final Object controller;
-        public final ReturnHomeComposition composition;
-        public final SurfaceControl changeLeash;
-        public final Object transitionToken;
-        public final Object transitionInfo;
-        public final Object startTransaction;
-        public final Object finishTransaction;
-        public final Object mergeTarget;
-        public final Object finishCallback;
-        public final Object previousAnimationFinishCallback;
-        public final int transitionType;
-        public final AtomicInteger acceptedBoundaryComposition =
-                new AtomicInteger();
-
-        public ReturnHomeCommitComposition(Object handler, Object controller,
-                                           ReturnHomeComposition composition,
-                                           SurfaceControl changeLeash,
-                                           Object transitionToken,
-                                           Object transitionInfo,
-                                           Object startTransaction,
-                                           Object finishTransaction,
-                                           Object mergeTarget,
-                                           Object finishCallback,
-                                           Object previousAnimationFinishCallback,
-                                           int transitionType) {
-            this.handler = handler;
-            this.controller = controller;
-            this.composition = composition;
-            this.changeLeash = changeLeash;
-            this.transitionToken = transitionToken;
-            this.transitionInfo = transitionInfo;
-            this.startTransaction = startTransaction;
-            this.finishTransaction = finishTransaction;
-            this.mergeTarget = mergeTarget;
-            this.finishCallback = finishCallback;
-            this.previousAnimationFinishCallback =
-                    previousAnimationFinishCallback;
-            this.transitionType = transitionType;
-        }
-    }
-
-    public static final class StandardReturnHomeCommitSignal {
-        public final long attempt;
-        public final long arbiterGeneration;
-        public final int taskId;
-        public final int transitionDebugId;
-        public final int eventId;
-        public final long downTime;
-        public final int deviceId;
-        public final int source;
-        public final int displayId;
-        public final int edge;
-        public final IBinder runnerSession;
-        public final boolean elementBoundaryOnly;
-
-        public StandardReturnHomeCommitSignal(
-                long attempt, long arbiterGeneration,
-                int taskId, int transitionDebugId,
-                int eventId, long downTime,
-                int deviceId, int source, int displayId, int edge,
-                IBinder runnerSession, boolean elementBoundaryOnly) {
-            this.attempt = attempt;
-            this.arbiterGeneration = arbiterGeneration;
-            this.taskId = taskId;
-            this.transitionDebugId = transitionDebugId;
-            this.eventId = eventId;
-            this.downTime = downTime;
-            this.deviceId = deviceId;
-            this.source = source;
-            this.displayId = displayId;
-            this.edge = edge;
-            this.runnerSession = runnerSession;
-            this.elementBoundaryOnly = elementBoundaryOnly;
-        }
-
-        public boolean matchesInput(MiuiHomeAcceptedInputToken token) {
-            return token != null
-                    && token.generation == arbiterGeneration
-                    && token.eventId == eventId
-                    && token.downTime == downTime
-                    && token.deviceId == deviceId
-                    && token.source == source
-                    && token.displayId == displayId
-                    && token.edge == edge;
-        }
-    }
-
-    public static final class SystemUiReturnHomeCommitIdentity {
-        public final Object controller;
-        public final long shellSessionId;
-        public final int taskId;
-        public final MiuiHomeAcceptedInputToken input;
-        public final AtomicReference<StandardReturnHomeCommitSignal>
-                finishSignal = new AtomicReference<>();
-        public final AtomicReference<Object> finishCallback =
-                new AtomicReference<>();
-
-        public SystemUiReturnHomeCommitIdentity(
-                Object controller, long shellSessionId, int taskId,
-                MiuiHomeAcceptedInputToken input) {
-            this.controller = controller;
-            this.shellSessionId = shellSessionId;
-            this.taskId = taskId;
-            this.input = input;
-        }
-    }
-
+    /** SystemUI-only edge-width snapshot; it is not part of the cross-process contract. */
     public static final class EdgeWidthSnapshot {
         public final int leftSensitivity;
         public final int rightSensitivity;
@@ -920,25 +754,6 @@ public abstract class SystemUiInputImpl extends HookerBridge {
         public static int combineTouchWidth(int sensitivity, int inset) {
             long width = (long) sensitivity + (long) inset;
             return (int) Math.max(1L, Math.min(Integer.MAX_VALUE, width));
-        }
-    }
-
-    public static final class ObjectIdentityKey {
-        public final Object object;
-
-        public ObjectIdentityKey(Object object) {
-            this.object = object;
-        }
-
-        @Override
-        public boolean equals(Object candidate) {
-            return candidate instanceof ObjectIdentityKey
-                    && object == ((ObjectIdentityKey) candidate).object;
-        }
-
-        @Override
-        public int hashCode() {
-            return System.identityHashCode(object);
         }
     }
 
@@ -990,153 +805,6 @@ public abstract class SystemUiInputImpl extends HookerBridge {
             return;
         }
         super.log(priority, tag, message, throwable);
-    }
-
-    public static final class ReturnHomeFinishTransferCandidate {
-        public final Object handler;
-        public final Object controller;
-        public final Thread ownerThread;
-        public final Object transitions;
-        public final Object remoteTransitionHandler;
-        public final ReturnHomeComposition composition;
-        public final Object transitionToken;
-        public final Object transitionInfo;
-        public final Object mergeTarget;
-        public final SurfaceControl.Transaction startTransaction;
-        public final Object preparedOpenInfo;
-        public final SurfaceControl.Transaction preparedFinishTransaction;
-        public final Object preparedFinishCallback;
-        public final Object elementChange;
-        public final Object appChange;
-        public final SurfaceControl homeLeash;
-        public final SurfaceControl elementLeash;
-        public final SurfaceControl appLeash;
-        public final Rect fullscreenBounds;
-        public final Rect elementEndBounds;
-        public final int transitionType;
-        public final int appFlags;
-        public final int elementStartDisplayId;
-        public final int elementEndDisplayId;
-        public final int transitionDebugId;
-        public final int preparedDebugId;
-        public final AtomicInteger transferAttempted = new AtomicInteger();
-
-        public ReturnHomeFinishTransferCandidate(
-                Object handler, Object controller,
-                Thread ownerThread,
-                Object transitions, Object remoteTransitionHandler,
-                ReturnHomeComposition composition,
-                Object transitionToken, Object transitionInfo,
-                Object mergeTarget,
-                SurfaceControl.Transaction startTransaction,
-                Object preparedOpenInfo,
-                SurfaceControl.Transaction preparedFinishTransaction,
-                Object preparedFinishCallback, Object elementChange,
-                Object appChange,
-                SurfaceControl homeLeash, SurfaceControl elementLeash,
-                SurfaceControl appLeash, Rect fullscreenBounds,
-                Rect elementEndBounds, int transitionType, int appFlags,
-                int elementStartDisplayId,
-                int elementEndDisplayId, int transitionDebugId,
-                int preparedDebugId) {
-            this.handler = handler;
-            this.controller = controller;
-            this.ownerThread = ownerThread;
-            this.transitions = transitions;
-            this.remoteTransitionHandler = remoteTransitionHandler;
-            this.composition = composition;
-            this.transitionToken = transitionToken;
-            this.transitionInfo = transitionInfo;
-            this.mergeTarget = mergeTarget;
-            this.startTransaction = startTransaction;
-            this.preparedOpenInfo = preparedOpenInfo;
-            this.preparedFinishTransaction = preparedFinishTransaction;
-            this.preparedFinishCallback = preparedFinishCallback;
-            this.elementChange = elementChange;
-            this.appChange = appChange;
-            this.homeLeash = homeLeash;
-            this.elementLeash = elementLeash;
-            this.appLeash = appLeash;
-            this.fullscreenBounds = new Rect(fullscreenBounds);
-            this.elementEndBounds = new Rect(elementEndBounds);
-            this.transitionType = transitionType;
-            this.appFlags = appFlags;
-            this.elementStartDisplayId = elementStartDisplayId;
-            this.elementEndDisplayId = elementEndDisplayId;
-            this.transitionDebugId = transitionDebugId;
-            this.preparedDebugId = preparedDebugId;
-        }
-    }
-
-    public static final class MiuiHomeAcceptedInputToken {
-        public final int eventId;
-        public final long downTime;
-        public final int deviceId;
-        public final int source;
-        public final int displayId;
-        public final int edge;
-        public final long generation;
-        public final long launcherStateOwnerEpoch;
-        public final long receivedUptime;
-
-        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
-                                          int source, int displayId, int edge,
-                                          long generation) {
-            this(eventId, downTime, deviceId, source, displayId, edge,
-                    generation, 0L);
-        }
-
-        public MiuiHomeAcceptedInputToken(int eventId, long downTime, int deviceId,
-                                          int source, int displayId, int edge,
-                                          long generation,
-                                          long launcherStateOwnerEpoch) {
-            this.eventId = eventId;
-            this.downTime = downTime;
-            this.deviceId = deviceId;
-            this.source = source;
-            this.displayId = displayId;
-            this.edge = edge;
-            this.generation = generation;
-            this.launcherStateOwnerEpoch = launcherStateOwnerEpoch;
-            this.receivedUptime = SystemClock.uptimeMillis();
-        }
-
-        public boolean isExpired() {
-            long now = SystemClock.uptimeMillis();
-            long streamAge = now - downTime;
-            return now - receivedUptime > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS
-                    || streamAge < 0L
-                    || streamAge > INPUT_ACCEPTED_TOKEN_TIMEOUT_MS;
-        }
-    }
-
-    protected boolean readWindowFlag(String methodName, ClassLoader preferredLoader,
-                                     boolean defaultValue) {
-        String[] classNames = new String[]{
-                "com.android.window.flags.Flags",
-                "com.android.internal.hidden_from_bootclasspath.com.android.window.flags.Flags",
-                "android.window.flags.Flags"
-        };
-        for (String className : classNames) {
-            try {
-                Class<?> flagsClass = Class.forName(className, false, preferredLoader);
-                Method method = flagsClass.getDeclaredMethod(methodName);
-                method.setAccessible(true);
-                Object result = method.invoke(null);
-                if (result instanceof Boolean) {
-                    moduleLog(Log.INFO, TAG, "Read " + methodName + " from "
-                            + className + ": " + result);
-                    return ((Boolean) result).booleanValue();
-                }
-            } catch (Throwable throwable) {
-                moduleLog(Log.WARN, TAG, "Flag lookup failed for " + className
-                        + ": " + throwable.getClass().getSimpleName()
-                        + ": " + throwable.getMessage());
-            }
-        }
-        moduleLog(Log.WARN, TAG, "Unable to read " + methodName
-                + "; defaulting to " + defaultValue);
-        return defaultValue;
     }
 
     protected boolean isNativePluginAttached(Object plugin) {
@@ -1211,23 +879,6 @@ public abstract class SystemUiInputImpl extends HookerBridge {
         }
     }
 
-    protected boolean surfacesAreSame(SurfaceControl first, SurfaceControl second)
-            throws Exception {
-        if (first == second) {
-            return true;
-        }
-        if (first == null || second == null) {
-            return false;
-        }
-        Object same = invokeAnyMethod(
-                first, "isSameSurface", new Object[]{second});
-        if (!(same instanceof Boolean)) {
-            throw new IllegalStateException("isSameSurface returned "
-                    + shortObject(same));
-        }
-        return ((Boolean) same).booleanValue();
-    }
-
     protected EdgeWidthSnapshot readEdgeWidthSnapshot(Object edgeBackGestureHandler,
                                                       float density) {
         int fallbackWidth = Math.max(1, Math.round(EDGE_TOUCH_WIDTH_DP * density));
@@ -1286,131 +937,34 @@ public abstract class SystemUiInputImpl extends HookerBridge {
      * A non-framework object is deliberately treated as unavailable so wrapper/compatibility
      * objects still fail closed at their existing callers.
      */
-    protected Integer readBackNavigationType(Object navigation) {
-        return navigation instanceof BackNavigationInfo
-                ? ((BackNavigationInfo) navigation).getType() : null;
-    }
-
-    /**
-     * Reads a real framework TransitionInfo directly. Xiaomi's expose/wrapper objects are not
-     * accepted here and continue through their own reflective compatibility paths.
-     */
-    protected Integer readTransitionInfoType(Object info) {
-        return info instanceof TransitionInfo ? ((TransitionInfo) info).getType() : null;
-    }
-
-    protected List<?> readTransitionInfoChanges(Object info) {
-        return info instanceof TransitionInfo ? ((TransitionInfo) info).getChanges() : null;
-    }
-
-    protected Integer readTransitionInfoRootCount(Object info) {
-        return info instanceof TransitionInfo ? ((TransitionInfo) info).getRootCount() : null;
-    }
-
-    protected Object readTransitionInfoRoot(Object info, int index) {
-        return info instanceof TransitionInfo
-                ? ((TransitionInfo) info).getRoot(index) : null;
-    }
-
-    protected Object readTransitionRootLeash(Object root) {
-        return root instanceof TransitionInfo.Root
-                ? ((TransitionInfo.Root) root).getLeash() : null;
-    }
-
-    protected Object readTransitionRootOffset(Object root) {
-        return root instanceof TransitionInfo.Root
-                ? ((TransitionInfo.Root) root).getOffset() : null;
-    }
-
-    protected Integer readTransitionChangeMode(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getMode() : null;
-    }
-
-    protected Integer readTransitionChangeFlags(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getFlags() : null;
-    }
-
-    protected Boolean hasTransitionChangeFlags(Object change, int flags) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).hasFlags(flags) : null;
-    }
-
-    protected Object readTransitionChangeTaskInfo(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getTaskInfo() : null;
-    }
-
-    protected Object readTransitionChangeParent(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getParent() : null;
-    }
-
-    protected Object readTransitionChangeLastParent(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getLastParent() : null;
-    }
-
-    protected Object readTransitionChangeActivityComponent(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getActivityComponent() : null;
-    }
-
-    protected Object readTransitionChangeLeash(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getLeash() : null;
-    }
-
-    protected Object readTransitionChangeStartAbsBounds(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getStartAbsBounds() : null;
-    }
-
-    protected Object readTransitionChangeEndAbsBounds(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getEndAbsBounds() : null;
-    }
-
-    protected Integer readTransitionChangeStartDisplayId(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getStartDisplayId() : null;
-    }
-
-    protected Integer readTransitionChangeEndDisplayId(Object change) {
-        return change instanceof TransitionInfo.Change
-                ? ((TransitionInfo.Change) change).getEndDisplayId() : null;
-    }
-
-    protected boolean setTransitionChangeMode(Object change, int mode) {
-        if (!(change instanceof TransitionInfo.Change)) {
-            return false;
-        }
-        ((TransitionInfo.Change) change).setMode(mode);
-        return true;
-    }
-
-    protected String readNativeAnimationType(Object windowElement) throws Exception {
-        return enumName(invokeAnyMethod(
-                windowElement, "getCurrentAnimType", new Object[0]));
-    }
-
     protected abstract void sendAuthenticatedMiuiHomeOpenBreakCommand(
             Context context, long generation, long attemptId,
             SystemUiBackGestureDriver driver, Object releaseController);
     protected abstract void publishSystemUiReturnHomeFinish(
             Object controller, long shellSessionId,
             Object finishCallback, String reason);
-    protected abstract Object findNativeEdgeBackPlugin(
-            Object edgeBackGestureHandler) throws Exception;
-    protected abstract void prepareNativeBackPanel(
-            Object edgeBackGestureHandler, Object plugin) throws Exception;
-    protected abstract void updateNativeBackPanelDisplaySize(
-            Object edgeBackGestureHandler, Object plugin) throws Exception;
-    protected abstract boolean isNavigationOverlayExcluded(
-            Object edgeBackGestureHandler, int x, int y) throws Exception;
-    protected abstract void injectPlatformLegacyBackKey(
-            Object controller, int displayId) throws Exception;
+    /** SystemUI-only native panel operations are deliberately inert for MiuiHome. */
+    protected Object findNativeEdgeBackPlugin(
+            Object edgeBackGestureHandler) throws Exception {
+        return null;
+    }
+
+    protected void prepareNativeBackPanel(
+            Object edgeBackGestureHandler, Object plugin) throws Exception {
+    }
+
+    protected void updateNativeBackPanelDisplaySize(
+            Object edgeBackGestureHandler, Object plugin) throws Exception {
+    }
+
+    protected boolean isNavigationOverlayExcluded(
+            Object edgeBackGestureHandler, int x, int y) throws Exception {
+        return false;
+    }
+
+    protected void injectPlatformLegacyBackKey(
+            Object controller, int displayId) throws Exception {
+    }
 
     protected static boolean hasXiaomiBackIntent(
             float outwardDistance, float verticalDelta, float outwardThreshold) {
@@ -1479,12 +1033,7 @@ public abstract class SystemUiInputImpl extends HookerBridge {
             return true;
         }
         try {
-            Class<?> serviceManagerClass = Class.forName("android.os.ServiceManager");
-            Object binderObject = serviceManagerClass
-                    .getMethod("getService", String.class)
-                    .invoke(null, "contextual_search");
-            boolean available = binderObject instanceof IBinder
-                    && ((IBinder) binderObject).isBinderAlive();
+            boolean available = isBinderServiceAlive("contextual_search");
             if (available) {
                 if (contextualSearchServiceUnavailableLogged) {
                     moduleLog(Log.INFO, TAG,
@@ -4400,6 +3949,7 @@ public abstract class SystemUiInputImpl extends HookerBridge {
                         + ", state=" + start.stateDescription);
                 if (launcherOverviewGesture) {
                     recentsVisualOnlyGesture = true;
+                    clearMiuiOverviewAfterRejectedShellTarget("nullNavigation");
                 }
                 if (launcherCallbackOnly) {
                     cleanupRejectedShellGesture(session);
@@ -4463,6 +4013,8 @@ public abstract class SystemUiInputImpl extends HookerBridge {
                             + ", info=" + shortObject(info));
                     if (launcherOverviewGesture) {
                         recentsVisualOnlyGesture = true;
+                        clearMiuiOverviewAfterRejectedShellTarget(
+                                "nonCallbackType=" + navigationType);
                     }
                     cleanupRejectedShellGesture(session);
                     return false;
@@ -4499,7 +4051,24 @@ public abstract class SystemUiInputImpl extends HookerBridge {
                 if (completedSession == null) {
                     return true;
                 }
-                if (!completedSession.completionConsumed.get()) {
+            }
+            if (!completedSession.completionConsumed.get()
+                    && retireQuiescentShellSessionBeforeStart(completedSession)) {
+                return true;
+            }
+            synchronized (backInputLifecycleLock) {
+                if (shellStartInFlight || shellOwnerUncertain) {
+                    moduleLog(Log.WARN, TAG,
+                            "Rejected Shell start while ownership is unsettled"
+                                    + ", startInFlight=" + shellStartInFlight
+                                    + ", ownerUncertain=" + shellOwnerUncertain);
+                    return false;
+                }
+                if (activeShellSession == null) {
+                    return true;
+                }
+                if (activeShellSession != completedSession
+                        || !completedSession.completionConsumed.get()) {
                     moduleLog(Log.WARN, TAG,
                             "Rejected Shell start while another session owns the slot"
                                     + ", shellSessionId=" + completedSession.id
@@ -4514,6 +4083,93 @@ public abstract class SystemUiInputImpl extends HookerBridge {
                 return activeShellSession == null
                         && !shellStartInFlight && !shellOwnerUncertain;
             }
+        }
+
+        /**
+         * A rejected remote probe can finish on Shell without delivering the normal module
+         * completion callback.  Once the owner executor proves the exact stock quiescent state,
+         * retire that one module session so its stale Java slot cannot reject every next DOWN.
+         * This is deliberately narrower than a timeout: any remaining Shell identity or
+         * transition state keeps the slot fail-closed and lets stock cleanup finish it.
+         */
+        protected boolean retireQuiescentShellSessionBeforeStart(
+                ShellGestureSession session) {
+            if (session == null || !session.releaseQueued.get()
+                    || !session.awaitingStockCleanup.get()
+                    || session.completionConsumed.get()
+                    || !isShellSessionOwnerCurrent(session)) {
+                return false;
+            }
+            SystemUiReturnHomeCommitIdentity returnHomeIdentity =
+                    systemUiReturnHomeCommitIdentity.get();
+            if (returnHomeIdentity != null
+                    && returnHomeIdentity.controller == session.controller
+                    && returnHomeIdentity.shellSessionId == session.id) {
+                return false;
+            }
+            AtomicBoolean quiescent = new AtomicBoolean();
+            Runnable check = () -> {
+                try {
+                    Object stateController = session.controller;
+                    Object currentTracker = readField(stateController,
+                            "mCurrentTracker");
+                    Object queuedTracker = readField(stateController,
+                            "mQueuedTracker");
+                    Object finishCallback = readField(stateController,
+                            "mBackAnimationFinishedCallback");
+                    recoverStaleCloseTransitionRequest(
+                            stateController, currentTracker, queuedTracker,
+                            finishCallback, session.id);
+                    Object transitionHandler = readField(stateController,
+                            "mBackTransitionHandler");
+                    boolean ready = isShellReadyOnOwner(stateController)
+                            && !Boolean.TRUE.equals(readField(transitionHandler,
+                            "mCloseTransitionRequested"))
+                            && readField(transitionHandler,
+                            "mOnAnimationFinishCallback") == null
+                            && readField(transitionHandler,
+                            "mPrepareOpenTransition") == null
+                            && readField(transitionHandler,
+                            "mClosePrepareTransition") == null
+                            && readField(transitionHandler,
+                            "mOpenTransitionInfo") == null
+                            && readField(transitionHandler,
+                            "mFinishOpenTransaction") == null
+                            && readField(transitionHandler,
+                            "mFinishOpenTransitionCallback") == null
+                            && readField(transitionHandler,
+                            "mTakeoverHandler") == null;
+                    quiescent.set(ready);
+                } catch (Throwable throwable) {
+                    moduleLog(Log.WARN, TAG,
+                            "Failed to verify quiescent Shell session before next start",
+                            throwable);
+                }
+            };
+            if (!executeShellBlocking(session.executor, check,
+                    "retireQuiescentShellSession")) {
+                return false;
+            }
+            if (!quiescent.get()) {
+                return false;
+            }
+            synchronized (backInputLifecycleLock) {
+                if (activeShellSession != session || shellStartInFlight
+                        || shellOwnerUncertain
+                        || !session.releaseQueued.get()
+                        || !session.completionConsumed.compareAndSet(false, true)) {
+                    return false;
+                }
+                activeShellSession = null;
+                shellOwnerUncertain = false;
+            }
+            clearSystemUiReturnHomeCommitIdentity(
+                    session.controller, session.id,
+                    "quiescent-before-next-start");
+            moduleLog(Log.WARN, TAG,
+                    "Retired quiescent Shell session before next start"
+                            + ", shellSessionId=" + session.id);
+            return true;
         }
 
         protected boolean publishShellGestureSession(
