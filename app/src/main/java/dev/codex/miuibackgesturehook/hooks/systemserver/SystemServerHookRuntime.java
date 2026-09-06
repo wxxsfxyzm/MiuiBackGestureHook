@@ -8,6 +8,7 @@ import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Binder;
@@ -1132,19 +1133,29 @@ public abstract class SystemServerHookRuntime extends GoogleAppLiveTranslateRunt
             int openingMode = openingModeObject;
             int closingFlags = closingFlagsObject;
             int openingFlags = openingFlagsObject;
+            Object closingContainer = readField(closingChangeInfo, "mContainer");
+            Object openingContainer = readField(openingChangeInfo, "mContainer");
+            boolean fixedRotation = isA17FixedRotationCrossActivityPair(
+                    closingContainer, openingContainer);
+            int requiredOpeningFlags = fixedRotation
+                    ? SERVER_FREEFORM_PREPARED_OPENING_FLAGS & ~FLAG_FILLS_TASK
+                    : SERVER_FREEFORM_PREPARED_OPENING_FLAGS;
             if ((closingMode != TRANSIT_TO_FRONT && closingMode != TRANSIT_CHANGE)
                     || openingMode != TRANSIT_TO_FRONT
                     || (closingFlags & SERVER_FREEFORM_PREPARED_CLOSING_FLAGS)
                     != SERVER_FREEFORM_PREPARED_CLOSING_FLAGS
-                    || (openingFlags & SERVER_FREEFORM_PREPARED_OPENING_FLAGS)
-                    != SERVER_FREEFORM_PREPARED_OPENING_FLAGS) {
+                    || (openingFlags & requiredOpeningFlags) != requiredOpeningFlags
+                    || (fixedRotation && (closingFlags != SERVER_FREEFORM_PREPARED_CLOSING_FLAGS
+                    || openingFlags != requiredOpeningFlags))) {
                 throw new IllegalStateException("unexpected prepared roles, closingMode="
                         + closingMode + ", openingMode=" + openingMode
                         + ", closingFlags=0x" + Integer.toHexString(closingFlags)
                         + ", openingFlags=0x" + Integer.toHexString(openingFlags));
             }
-            Object closingContainer = readField(closingChangeInfo, "mContainer");
-            Object openingContainer = readField(openingChangeInfo, "mContainer");
+            if (fixedRotation) {
+                validateFixedRotationCrossActivityChanges(result, closingContainer,
+                        openingContainer, closingChange, openingChange);
+            }
             Object surfaceAnimator = readField(closingContainer, "mSurfaceAnimator");
             Object openingSurfaceAnimator = readField(
                     openingContainer, "mSurfaceAnimator");
@@ -1182,6 +1193,7 @@ public abstract class SystemServerHookRuntime extends GoogleAppLiveTranslateRunt
                     || !(openingLeash instanceof SurfaceControl)
                     || !((SurfaceControl) closingLeash).isValid()
                     || !((SurfaceControl) openingLeash).isValid()
+                    || (fixedRotation && closingLeash == openingLeash)
                     || !(startTransaction instanceof SurfaceControl.Transaction)
                     || closingLayer <= openingLayer || openingLayer < 0) {
                 throw new IllegalStateException("predictive leashes unavailable"
@@ -1232,7 +1244,9 @@ public abstract class SystemServerHookRuntime extends GoogleAppLiveTranslateRunt
                             + ", mode=" + closingMode + "->" + TRANSIT_CHANGE
                             + ", changed=" + (closingMode == TRANSIT_TO_FRONT)
                             + ", leashLayers=" + closingLayer + "/" + openingLayer
-                            + ", flags=0x" + Integer.toHexString(normalizedFlags));
+                            + ", flags=0x" + Integer.toHexString(normalizedFlags)
+                            + ", openingFlags=0x" + Integer.toHexString(openingFlags)
+                            + ", fixedRotation=" + fixedRotation);
         } catch (Throwable throwable) {
             moduleLog(Log.ERROR, TAG,
                     "Server cross-activity prepare-role normalization failed;"
@@ -1304,7 +1318,7 @@ public abstract class SystemServerHookRuntime extends GoogleAppLiveTranslateRunt
                 closingContainer, "getBounds", new Object[0]);
         Object openingBounds = invokeAnyMethod(
                 openingContainer, "getBounds", new Object[0]);
-        return closingTask != null
+        boolean exact = closingTask != null
                 && closingTask == openingTask
                 && activityType instanceof Number
                 && ((Number) activityType).intValue() == ACTIVITY_TYPE_STANDARD
@@ -1316,8 +1330,84 @@ public abstract class SystemServerHookRuntime extends GoogleAppLiveTranslateRunt
                 || ((Number) closingMode).intValue() == WINDOWING_MODE_FULLSCREEN)
                 && closingBounds instanceof Rect
                 && !((Rect) closingBounds).isEmpty()
-                && closingBounds.equals(openingBounds)
-                ? closingInfo : null;
+                && openingBounds instanceof Rect;
+        if (!exact) {
+            return null;
+        }
+        if (closingBounds.equals(openingBounds)) {
+            return closingInfo;
+        }
+        boolean fixedRotation = isA17FixedRotationCrossActivityPair(
+                closingContainer, openingContainer);
+        if (systemServerPlatformImpl instanceof SystemServerAndroid17Impl) {
+            moduleLog(Log.INFO, TAG, "Inspected Android 17 fixed-rotation prepare candidate"
+                    + ", admitted=" + fixedRotation + ", closingBounds=" + closingBounds
+                    + ", openingBounds=" + openingBounds);
+        }
+        return fixedRotation ? closingInfo : null;
+    }
+
+    private boolean isA17FixedRotationCrossActivityPair(Object closing, Object opening)
+            throws Exception {
+        if (!(systemServerPlatformImpl instanceof SystemServerAndroid17Impl)) {
+            return false;
+        }
+        Object closingBounds = invokeAnyMethod(closing, "getBounds", new Object[0]);
+        Object openingBounds = invokeAnyMethod(opening, "getBounds", new Object[0]);
+        return closingBounds instanceof Rect && openingBounds instanceof Rect
+                && ((SystemServerAndroid17Impl) systemServerPlatformImpl)
+                .isFixedRotationCrossActivityPair(this, closing, opening,
+                        (Rect) closingBounds, (Rect) openingBounds);
+    }
+
+    private void validateFixedRotationCrossActivityChanges(Object info,
+                                                           Object closing, Object opening,
+                                                           Object closingChange, Object openingChange)
+            throws Exception {
+        Rect taskBounds = (Rect) invokeAnyMethod(closing, "getBounds", new Object[0]);
+        Object rootCount = invokeAnyMethod(info, "getRootCount", new Object[0]);
+        if (!(rootCount instanceof Number) || ((Number) rootCount).intValue() != 1) {
+            throw new IllegalStateException("fixed-rotation prepared root count changed");
+        }
+        Object root = readTransitionInfoRoot(info, 0);
+        Object rootLeash = readTransitionRootLeash(root);
+        Object offset = readTransitionRootOffset(root);
+        if (!(rootLeash instanceof SurfaceControl) || !((SurfaceControl) rootLeash).isValid()
+                || !Integer.valueOf(0).equals(invokeAnyMethod(root, "getDisplayId", new Object[0]))
+                || !(offset instanceof Point) || ((Point) offset).x != 0 || ((Point) offset).y != 0) {
+            throw new IllegalStateException("fixed-rotation prepared root unavailable");
+        }
+        Object[] containers = {closing, opening};
+        Object[] changes = {closingChange, openingChange};
+        for (int index = 0; index < 2; index++) {
+            Object container = containers[index];
+            Object change = changes[index];
+            Object token = invokeAnyMethod(readField(container, "mRemoteToken"),
+                    "toWindowContainerToken", new Object[0]);
+            Object expectedLeash = invokeAnyMethod(container,
+                    index == 0 ? "getSurfaceControl" : "getFixedRotationLeash", new Object[0]);
+            Object leash = readTransitionChangeLeash(change);
+            if (token == null || !token.equals(invokeAnyMethod(change, "getContainer", new Object[0]))
+                    || !(leash instanceof SurfaceControl) || !((SurfaceControl) leash).isValid()
+                    || leash != expectedLeash || leash == rootLeash
+                    || !readField(container, "mActivityComponent").equals(
+                    readTransitionChangeActivityComponent(change))
+                    || invokeAnyMethod(change, "getTaskInfo", new Object[0]) != null
+                    || invokeAnyMethod(change, "getParent", new Object[0]) != null
+                    || invokeAnyMethod(change, "getLastParent", new Object[0]) != null
+                    || !taskBounds.equals(readTransitionChangeStartAbsBounds(change))
+                    || !taskBounds.equals(readTransitionChangeEndAbsBounds(change))
+                    || !Integer.valueOf(0).equals(readTransitionChangeStartDisplayId(change))
+                    || !Integer.valueOf(0).equals(readTransitionChangeEndDisplayId(change))) {
+                throw new IllegalStateException("fixed-rotation Activity target changed, index=" + index);
+            }
+        }
+        if (readTransitionChangeLeash(closingChange) == readTransitionChangeLeash(openingChange)) {
+            throw new IllegalStateException("fixed-rotation Activity leashes are not distinct");
+        }
+        // Stock Shell uses CHANGE + FLAG_BACK_GESTURE_ANIMATED for the closing
+        // runner leash. Keep the opening rotation leash, transforms and flags
+        // native; only the existing role/layer correction follows this proof.
     }
 
     protected void hookScheduleAnimationPrepareTransition(ClassLoader classLoader) {

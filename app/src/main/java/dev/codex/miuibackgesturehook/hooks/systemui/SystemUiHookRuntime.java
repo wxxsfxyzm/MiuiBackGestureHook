@@ -2473,21 +2473,29 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
     protected void hookPreparedBackTargetArrival(ClassLoader classLoader) {
         try {
+            String suffix = Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL ? "$4" : "$3";
+            Class<?> controllerClass = Class.forName(
+                    BACK_ANIMATION_CONTROLLER, false, classLoader);
             Class<?> adapterClass = Class.forName(
-                    BACK_ANIMATION_CONTROLLER + "$3", false, classLoader);
-            Method onAnimationStart = findAnyMethod(
-                    adapterClass, "onAnimationStart", 3);
-            if (onAnimationStart == null) {
+                    BACK_ANIMATION_CONTROLLER + suffix, false, classLoader);
+            Class<?> runnerStub = Class.forName(
+                    "android.window.IBackAnimationRunner$Stub", false, classLoader);
+            Method onAnimationStart = requireExactDeclaredMethod(
+                    adapterClass, "onAnimationStart", "void",
+                    "[Landroid.view.RemoteAnimationTarget;", IBinder.class.getName(),
+                    "android.window.IBackAnimationFinishedCallback");
+            if (adapterClass.getSuperclass() != runnerStub
+                    || adapterClass.getDeclaredField("this$0").getType() != controllerClass) {
                 throw new NoSuchMethodException(
-                        "Back animation adapter onAnimationStart");
+                        "Unexpected back animation adapter owner: " + adapterClass.getName());
             }
-            onAnimationStart.setAccessible(true);
             recordHookHandle(hook(onAnimationStart)
                     .setId("systemui_back_prepared_target_arrival")
                     .intercept(this::onPreparedBackTargetArrival));
             preparedBackTargetArrivalHookReady = true;
             moduleLog(Log.INFO, TAG,
-                    "Hooked prepared-back remote-target arrival handoff");
+                    "Hooked prepared-back remote-target arrival handoff"
+                            + ", adapter=" + adapterClass.getName());
         } catch (Throwable throwable) {
             preparedBackTargetArrivalHookReady = false;
             moduleLog(Log.ERROR, TAG,
@@ -2647,6 +2655,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         Object openingComponent = null;
         SurfaceControl closingLeash = null;
         SurfaceControl openingLeash = null;
+        boolean fixedRotationOpening = false;
         int changeIndex = 0;
         for (Object change : (List<?>) changesObject) {
             Object modeObject = readTransitionChangeMode(change);
@@ -2694,10 +2703,14 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     && closingComponent == null) {
                 closingComponent = component;
                 closingLeash = (SurfaceControl) leashObject;
-            } else if (mode == TRANSIT_TO_FRONT && flags == openingFlags
-                    && openingComponent == null) {
+            } else if (mode == TRANSIT_TO_FRONT && openingComponent == null
+                    && (flags == openingFlags
+                    || (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                    && windowingMode == WINDOWING_MODE_FULLSCREEN
+                    && flags == (openingFlags & ~FLAG_FILLS_TASK)))) {
                 openingComponent = component;
                 openingLeash = (SurfaceControl) leashObject;
+                fixedRotationOpening = flags != openingFlags;
             } else {
                 throw new IllegalStateException(
                         "prepared Activity role mismatch"
@@ -2707,6 +2720,24 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                                 + ", flags=0x" + Integer.toHexString(flags));
             }
             changeIndex++;
+        }
+        if (fixedRotationOpening) {
+            // The server's exact fixed-rotation role correction retains the
+            // opening Activity's missing FILLS_TASK bit. Wait for the same
+            // adapter here too; a prepared-before-targets race must not strand it.
+            if (displayId != 0 || taskBounds.left != 0 || taskBounds.top != 0) {
+                return false;
+            }
+            for (Object change : (List<?>) changesObject) {
+                Object activityInfo = invokeAnyMethod(
+                        change, "getActivityTransitionInfo", new Object[0]);
+                if (activityInfo == null || !Integer.valueOf(focusedTaskId).equals(
+                        invokeAnyMethod(activityInfo, "getTaskId", new Object[0]))
+                        || invokeAnyMethod(change, "getParent", new Object[0]) != null
+                        || invokeAnyMethod(change, "getLastParent", new Object[0]) != null) {
+                    return false;
+                }
+            }
         }
         return closingComponent != null && openingComponent != null
                 && !surfacesAreSame(closingLeash, openingLeash);

@@ -114,6 +114,57 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
         return false;
     }
 
+    boolean isFixedRotationCrossActivityPair(SystemServerHookRuntime runtime,
+                                             Object closing, Object opening,
+                                             Rect closingBounds, Rect openingBounds)
+            throws Exception {
+        if (runtime.invokeSystemServerPlatformMethod(closing, "asActivityRecord") != closing
+                || runtime.invokeSystemServerPlatformMethod(opening, "asActivityRecord") != opening
+                || readIntResult(runtime, closing, "getWindowingMode") != WINDOWING_MODE_FULLSCREEN
+                || readIntResult(runtime, opening, "getWindowingMode") != WINDOWING_MODE_FULLSCREEN
+                || !Boolean.FALSE.equals(runtime.invokeSystemServerPlatformMethod(
+                closing, "hasFixedRotationTransform"))
+                || !Boolean.TRUE.equals(runtime.invokeSystemServerPlatformMethod(
+                opening, "isFixedRotationTransforming"))) {
+            return false;
+        }
+        Object display = runtime.readSystemServerPlatformFieldOrNull(closing, "mDisplayContent");
+        Object state = runtime.readSystemServerPlatformFieldOrNull(
+                opening, "mFixedRotationTransformState");
+        Object associated = runtime.readSystemServerPlatformFieldOrNull(state, "mAssociatedTokens");
+        Object task = runtime.invokeSystemServerPlatformMethod(closing, "getTask");
+        return display != null && state != null && task != null
+                && display == runtime.readSystemServerPlatformFieldOrNull(opening, "mDisplayContent")
+                && readIntResult(runtime, display, "getDisplayId") == 0
+                && task == runtime.invokeSystemServerPlatformMethod(opening, "getTask")
+                && associated instanceof List<?> && ((List<?>) associated).size() == 1
+                && ((List<?>) associated).get(0) == opening
+                && closingBounds.left == 0 && closingBounds.top == 0
+                && openingBounds.left == 0 && openingBounds.top == 0
+                && closingBounds.equals(runtime.invokeSystemServerPlatformMethod(task, "getBounds"))
+                && openingBounds.equals(runtime.invokeSystemServerPlatformMethod(
+                opening, "getFixedRotationTransformDisplayBounds"))
+                && isQuarterTurnGeometry(
+                readIntResult(runtime, closing, "getRelativeDisplayRotation"),
+                readIntResult(runtime, opening, "getRelativeDisplayRotation"),
+                closingBounds.width(), closingBounds.height(),
+                openingBounds.width(), openingBounds.height());
+    }
+
+    static boolean isQuarterTurnGeometry(int closingRotation, int openingRotation,
+                                          int closingWidth, int closingHeight,
+                                          int openingWidth, int openingHeight) {
+        return closingRotation == 0 && (openingRotation == 1 || openingRotation == 3)
+                && closingWidth > 0 && closingHeight > 0 && closingWidth != closingHeight
+                && openingWidth == closingHeight && openingHeight == closingWidth;
+    }
+
+    private static int readIntResult(SystemServerHookRuntime runtime,
+                                     Object target, String method) throws Exception {
+        Object value = runtime.invokeSystemServerPlatformMethod(target, method);
+        return value instanceof Number ? ((Number) value).intValue() : -1;
+    }
+
     @Override
     void restoreOpeningSurfaceVisibility(SystemServerHookRuntime runtime,
                                          XposedInterface.Chain chain) throws Exception {

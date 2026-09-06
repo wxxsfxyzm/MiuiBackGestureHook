@@ -363,6 +363,20 @@ Remote-animation rules:
   to `CHANGE`, preserve the opening Task as `TO_FRONT`, and restate the two native predictive
   leash layers in the existing start transaction. Do not swap targets, transform either leash,
   or apply this rule to freeform, return-to-home, cross-activity, or ambiguous shapes.
+- On Android 17, preserve its mandatory prepared transition for an exact fullscreen
+  cross-Activity quarter-turn on the default display. Extend the existing closing-role
+  correction only when both immutable Activity/Task identities, native predictive adaptors,
+  original visibility and flags, full display bounds, singleton opening fixed-rotation state,
+  native rotation leash, transition root and absolute predictive layers all match.
+  Keep the opening Activity as `TO_FRONT` with its original non-`FILLS_TASK` flags and native
+  rotation geometry; change only the closing Activity to `CHANGE` and restate the original
+  predictive layers in the pending start transaction. Preserve the matching target-arrival
+  hold/resume lifecycle: the opening Change may lack `FILLS_TASK` only under that exact
+  fullscreen shape, with both ActivityTransitionInfo task IDs matching the focused Task and
+  no parent/lastParent. Resolve the Shell adapter through its actual runner contract and
+  exact callback/outer-controller shape, not an anonymous-class ordinal alone.
+  Do not swap targets, remove the rotation leash, suppress rotation,
+  or apply this exception to Android 16, freeform, embedded, letterboxed or ambiguous shapes.
 - For prepared remote animations, mark the tracker finished and call or wait for
   `startPostCommitAnimation()` so the runner receives cancel/invoke before navigation
   cleanup. Do not finish an active prepared animation directly from the overlay.
@@ -611,7 +625,7 @@ System-server compatibility rules:
   fullscreen cross-Activity shape only when the two distinct ActivityRecords are in the same
   standard Task, the opening Activity is still hidden, and the supplied containers exactly match
   `promoteToTFIfNeeded(...)` (the ActivityRecords themselves or their native embedded-TaskFragment
-  promotion). Treat a shape for which the opening Activity's native
+  promotion). On Android 16's unified path, treat a shape for which the opening Activity's native
   `DisplayContent.rotationForActivityInDifferentOrientation(...)` returns a concrete rotation as
   non-exact and retain the compatibility skip; Xiaomi's prepared transition loses its stable roles
   and close ownership when fixed rotation ends during the gesture. Xiaomi reports both prepared
@@ -786,6 +800,11 @@ dev.codex.miuibackgesturehook.MiuiBackGestureHook
   report, experiment timeline, log summary, or version changelog.
 - Put implementation notes, reverse-engineering evidence, experiment results, and
   historical findings under a topic-specific directory in `reports/`.
+- Write reports as reusable explanations of the failure, native contract, fix rationale,
+  evidence, and validation limits. Put durable operating boundaries and prohibitions in
+  `AGENTS.md` and reference them from reports. Keep session narration, tool-call counts,
+  approval history, and workspace/build bookkeeping out of the report narrative;
+  retain raw evidence and artifact metadata in supporting files.
 - Number experiment directories chronologically as
   `reports/NNN-short-topic/README.md`, starting at `001`. Once assigned, do not renumber or
   reuse a number; later work on the same experiment updates its existing report.
