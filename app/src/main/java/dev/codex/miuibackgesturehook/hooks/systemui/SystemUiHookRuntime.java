@@ -6526,7 +6526,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                 }
                 boolean carriesDartState = intent.hasExtra("drawer_visible")
                         || intent.hasExtra("overview_visible")
-                        || intent.hasExtra(EXTRA_LAUNCHER_EDITING);
+                        || intent.hasExtra(EXTRA_LAUNCHER_EDITING)
+                        || intent.hasExtra(EXTRA_LAUNCHER_HOME_SURFACE_VISIBLE);
                 if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
                         && (carriesDartState
                         || intent.hasExtra(EXTRA_LAUNCHER_STATE_OWNER_EPOCH))) {
@@ -6558,6 +6559,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                         miuiDrawerVisible = false;
                         miuiOverviewVisible = false;
                         miuiLauncherEditing = false;
+                        miuiLauncherHomeSurfaceVisible = false;
                         miuiOverviewDismissPendingUntilUptime = 0L;
                         moduleLog(Log.INFO, TAG,
                                 "Adopted native launcher-state owner"
@@ -6619,28 +6621,24 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + ", uid=" + senderUid
                             + ", package=" + senderPackage);
                 }
-                if (intent.hasExtra(EXTRA_LAUNCHER_EDITING)) {
-                    long editingGeneration = intent.getLongExtra(
-                            EXTRA_INPUT_ARBITER_GENERATION, 0L);
-                    if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
-                            && (editingGeneration <= 0L
-                            || editingGeneration
-                            != systemUiInputArbiterGeneration)) {
-                        moduleLog(Log.WARN, TAG,
-                                "Ignored stale native MiuiHome editing state"
-                                        + ", generation=" + editingGeneration
-                                        + ", currentGeneration="
-                                        + systemUiInputArbiterGeneration);
-                    } else {
-                        miuiLauncherEditing = intent.getBooleanExtra(
-                                EXTRA_LAUNCHER_EDITING, false);
-                        moduleLog(Log.INFO, TAG,
-                                "MiuiHome editing state changed"
-                                        + ", editing=" + miuiLauncherEditing
-                                        + ", generation=" + editingGeneration
-                                        + ", uid=" + senderUid
-                                        + ", package=" + senderPackage);
-                    }
+                if (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                        && intent.hasExtra(EXTRA_LAUNCHER_HOME_SURFACE_VISIBLE)) {
+                    // Caller, arbiter generation and Dart owner were validated above.
+                    // A distinct key prevents old native editing hooks from reviving the
+                    // stale-true gate during Java hot reload before native activation.
+                    miuiLauncherHomeSurfaceVisible = intent.getBooleanExtra(
+                            EXTRA_LAUNCHER_HOME_SURFACE_VISIBLE, false);
+                    moduleLog(Log.INFO, TAG, "Native MiuiHome callback surface changed"
+                            + ", visible=" + miuiLauncherHomeSurfaceVisible
+                            + ", generation=" + systemUiInputArbiterGeneration
+                            + ", ownerEpoch=" + miuiLauncherDartStateOwnerEpoch);
+                }
+                if (Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
+                        && intent.hasExtra(EXTRA_LAUNCHER_EDITING)) {
+                    miuiLauncherEditing = intent.getBooleanExtra(EXTRA_LAUNCHER_EDITING, false);
+                    moduleLog(Log.INFO, TAG, "MiuiHome editing state changed"
+                            + ", editing=" + miuiLauncherEditing
+                            + ", uid=" + senderUid + ", package=" + senderPackage);
                 }
                 if (intent.hasExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)
                         && intent.hasExtra(EXTRA_LAUNCHER_OPEN_ACTIVE)) {

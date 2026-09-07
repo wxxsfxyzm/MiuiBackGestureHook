@@ -93,10 +93,11 @@ struct LauncherProfile {
     uintptr_t dart_drawer_transition_epilogue_offset;
     uintptr_t dart_overview_enter_epilogue_offset;
     uintptr_t dart_overview_exit_epilogue_offset;
-    uintptr_t dart_editing_true_epilogue_offsets[4];
-    size_t dart_editing_true_epilogue_count;
-    uintptr_t dart_editing_false_epilogue_offsets[4];
-    size_t dart_editing_false_epilogue_count;
+    uintptr_t dart_home_surface_notify_offset;
+    const uint8_t* dart_home_surface_notify_code;
+    size_t dart_home_surface_notify_code_size;
+    uintptr_t dart_home_surface_inactive_epilogue_offset;
+    uintptr_t dart_home_surface_published_epilogue_offset;
 };
 
 }  // namespace miui_home_profiles

@@ -30,6 +30,7 @@ struct ResolutionStorage {
     uint8_t overview_enter_prologue[32];
     uint8_t overview_exit_prologue[32];
     uint8_t editing_query_prologue[64];
+    uint8_t home_surface_notify_code[0x300];
 };
 
 struct ResolutionDiagnostics {
@@ -50,10 +51,9 @@ struct ResolutionDiagnostics {
     uintptr_t editing_query_offset;
     uintptr_t editing_query_return_offset_a;
     uintptr_t editing_query_return_offset_b;
-    uintptr_t editing_true_epilogue_offsets[4];
-    size_t editing_true_epilogue_count;
-    uintptr_t editing_false_epilogue_offsets[4];
-    size_t editing_false_epilogue_count;
+    uintptr_t home_surface_notify_offset;
+    uintptr_t home_surface_inactive_epilogue_offset;
+    uintptr_t home_surface_published_epilogue_offset;
     uintptr_t all_apps_state_slot_offset;
     uintptr_t home_state_slot_offset;
 };

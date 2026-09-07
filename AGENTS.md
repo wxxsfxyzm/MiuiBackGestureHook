@@ -349,6 +349,22 @@ Recents ownership rules:
   SystemUI arbiter generation must force MiuiHome to republish the current editing state; idle Home
   remains ignored.
 
+- On Android 17, mirror the complete `LauncherOverlayStateManager.notifyBackGestureStatus()`
+  decision for Home children, including caller-generated false, source adjustment and early
+  ineligibility. A true child state requires the final native `interactable=true` and exact
+  `typefrom_home_sub`; all other completed results clear it. Preserve native state/input policy
+  and use the existing authenticated, arbiter-generation and Dart-owner-bound channel.
+  Resolve the notifier's frame, complete forwarding call and String layout from the same mapped
+  AOT image before reading its live frame; never call Dart or C++ from the assembly observer.
+  Replace the partial editing-query observation, retire/repair both notifier exits together,
+  and invalidate owner state across remaps. Android 17 must ignore legacy `launcher_editing`
+  broadcasts and restored editing booleans. Do not infer completion from a timeout or clear
+  state merely because one BACK finished; native menus may still have another level to close.
+- Serialize native Dart-state broadcasts through their existing publisher. Cache the exact
+  snapshot successfully sent, including its owner and arbiter generation, even when live
+  state changed during the send. Compare that receipt with current state before draining;
+  an `A -> B -> A` change must not suppress the corrective A after B was delivered.
+
 Remote-animation rules:
 
 - Restore the whole AOSP WM Shell behavior, not only `TYPE_CROSS_ACTIVITY`.

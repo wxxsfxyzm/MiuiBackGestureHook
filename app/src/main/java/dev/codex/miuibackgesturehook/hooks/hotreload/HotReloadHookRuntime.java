@@ -1,6 +1,7 @@
 package dev.codex.miuibackgesturehook.hooks.hotreload;
 
 import android.content.Context;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -87,6 +88,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
         boolean savedMiuiFolderVisible = miuiFolderVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
+        miuiLauncherHomeSurfaceVisible = false;
         long savedMiuiLauncherDartStateOwnerEpoch =
                 miuiLauncherDartStateOwnerEpoch;
         long savedMiuiOverviewDismissDeadline = miuiOverviewDismissPendingUntilUptime;
@@ -1052,7 +1054,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     pendingHotReloadHeadlessState = (Object[][]) state[12];
                 }
                 if (state.length >= 14) {
-                    miuiLauncherEditing = Boolean.TRUE.equals(state[13]);
+                    miuiLauncherEditing = Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
+                            && Boolean.TRUE.equals(state[13]);
                 }
                 if (state.length >= 15) {
                     miuiFolderVisible = Boolean.TRUE.equals(state[14]);

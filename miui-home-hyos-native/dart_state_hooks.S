@@ -191,45 +191,82 @@ MiuiHomeHyosDartOverviewExitEpilogueHook:
     finish_return_x22
     .size MiuiHomeHyosDartOverviewExitEpilogueHook, .-MiuiHomeHyosDartOverviewExitEpilogueHook
 
-    .macro editing_epilogue_hook name, value, return_offset
     .p2align 2
-    .global \name
-    .hidden \name
-    .type \name, %function
-\name:
+    .global MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook
+    .hidden MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook
+    .type MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook, %function
+MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook:
     bti c
     save_epilogue_scratch
-    enter_dart_observer g_dart_editing_active_count, g_dart_editing_retiring, .Lediting_leave\@
-    // x29 still identifies the original Dart frame. Publish only for the two
-    // proven Launcher callers saved in that frame's LR slot.
-    ldr x12, [x29, #8]
-    adrp x16, miui_home_hyos_dart_editing_return_a
-    add x16, x16, :lo12:miui_home_hyos_dart_editing_return_a
-    ldar x13, [x16]
-    cmp x12, x13
-    b.eq .Lediting_publish\@
-    adrp x16, miui_home_hyos_dart_editing_return_b
-    add x16, x16, :lo12:miui_home_hyos_dart_editing_return_b
-    ldar x13, [x16]
-    cmp x12, x13
-    b.ne .Lediting_leave\@
-.Lediting_publish\@:
+    enter_dart_observer g_dart_editing_active_count, g_dart_editing_retiring, .Lhome_surface_leave
+    b .Lhome_surface_inactive
+    .size MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook, .-MiuiHomeHyosDartHomeSurfaceInactiveEpilogueHook
+
+    .p2align 2
+    .global MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook
+    .hidden MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook
+    .type MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook, %function
+MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook:
+    bti c
+    save_epilogue_scratch
+    enter_dart_observer g_dart_editing_active_count, g_dart_editing_retiring, .Lhome_surface_leave
+    // The resolver proves this notifyBackGestureStatus frame and its context
+    // stores/loads through the original setGestureRegionState call. Observe the
+    // final decision, including caller-generated false and source adjustment.
+    ldur x12, [x29, #-16]
+    ldur x13, [x29, #-8]
+    ldur w14, [x12, #15]
+    cmp w14, w13
+    b.ne .Lhome_surface_inactive
+    ldur w13, [x12, #27]
+    add w14, w22, #0x20
+    cmp w13, w14
+    b.ne .Lhome_surface_inactive
+    ldur w12, [x12, #31]
+    add x12, x12, x28, lsl #32
+    tbz w12, #0, .Lhome_surface_inactive
+    cmp w12, w22
+    b.eq .Lhome_surface_inactive
+    // String.___0 in this same image proves CID, length and character layout.
+    ldur x13, [x12, #-1]
+    ubfx x13, x13, #12, #20
+    cmp x13, #94
+    b.ne .Lhome_surface_inactive
+    ldur x13, [x12, #7]
+    cmp x13, #(17 * 2)
+    b.ne .Lhome_surface_inactive
+    add x12, x12, #15
+    adrp x13, .Lhome_surface_source
+    add x13, x13, :lo12:.Lhome_surface_source
+    ldr x14, [x12]
+    ldr x17, [x13]
+    cmp x14, x17
+    b.ne .Lhome_surface_inactive
+    ldr x14, [x12, #8]
+    ldr x17, [x13, #8]
+    cmp x14, x17
+    b.ne .Lhome_surface_inactive
+    ldrb w14, [x12, #16]
+    ldrb w17, [x13, #16]
+    cmp w14, w17
+    b.ne .Lhome_surface_inactive
+    store_dart_observation g_editing_state_observation, 2, .Lhome_surface_leave
+    b .Lhome_surface_publish
+.Lhome_surface_inactive:
+    store_dart_observation g_editing_state_observation, 1, .Lhome_surface_leave
+.Lhome_surface_publish:
     increment_dart_counter g_editing_dart_observe_count
-    store_dart_observation g_editing_state_observation, \value, .Lediting_leave\@
     mark_dart_state_pending 4
     wake_dart_state_publisher
-.Lediting_leave\@:
+.Lhome_surface_leave:
     leave_dart_observer g_dart_editing_active_count
-    restore_epilogue_scratch
-    add x0, x22, #\return_offset
-    mov x15, x29
-    ldp x29, x30, [x15], #16
-    ret
-    .size \name, .-\name
-    .endm
+    finish_return_x22
+    .size MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook, .-MiuiHomeHyosDartHomeSurfacePublishedEpilogueHook
 
-    editing_epilogue_hook MiuiHomeHyosDartEditingFalseEpilogueHook, 1, 0x30
-    editing_epilogue_hook MiuiHomeHyosDartEditingTrueEpilogueHook, 2, 0x20
+    .section .rodata
+    .p2align 3
+.Lhome_surface_source:
+    .ascii "typefrom_home_sub"
 
     .section .note.gnu.property, "a"
     .p2align 3

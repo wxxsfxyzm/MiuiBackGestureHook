@@ -1394,9 +1394,14 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             boolean launcherXiaoAi = launcherHome && displayId == 0
                     && !launcherShade
                     && miuiLauncherXiaoAiVisible;
+            boolean launcherHomeSurface = launcherHome && displayId == 0
+                    && Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                    && !launcherShade && !launcherXiaoAi && !miuiOverviewVisible
+                    && miuiLauncherHomeSurfaceVisible;
             boolean launcherOpenBreak = displayId == 0
                     && !launcherShade
                     && !launcherXiaoAi
+                    && !launcherHomeSurface
                     && !miuiOverviewVisible
                     && miuiLauncherOpenActive
                     && miuiLauncherOpenBreakGeneration != 0L
@@ -1415,6 +1420,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && !launcherOpenBreak
                     && !launcherDrawer;
             boolean launcherEditing = launcherHome
+                    && Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
                     && !launcherShade
                     && !launcherXiaoAi
                     && miuiLauncherEditing
@@ -1425,6 +1431,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             if (launcherHome && !miuiOverviewVisible
                     && !launcherOpenBreak && !launcherShade
                     && !launcherXiaoAi
+                    && !launcherHomeSurface
                     && !launcherDrawer && !launcherFolder
                     && !launcherEditing) {
                 moduleLog(Log.INFO, TAG, "Ignored native back on launcher Home"
@@ -1432,6 +1439,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         + ", overviewVisible=false"
                         + ", launcherShade=false"
                         + ", launcherXiaoAi=false"
+                        + ", launcherHomeSurface=false"
                         + ", launcherDrawer=false"
                         + ", launcherFolder=false"
                         + ", launcherEditing=false"
@@ -1484,6 +1492,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         + ", requireShellCallback=true"
                         + ", displayId=" + displayId
                         + ", edge=" + edge);
+            }
+            if (launcherHomeSurface) {
+                moduleLog(Log.INFO, TAG, "Accepted native MiuiHome callback surface"
+                        + ", requireShellCallback=true"
+                        + ", ownerEpoch=" + miuiLauncherDartStateOwnerEpoch
+                        + ", displayId=" + displayId + ", edge=" + edge);
             }
             if (launcherOpenBreak) {
                 moduleLog(Log.INFO, TAG, "Accepted native back during launcher OPEN animation"
@@ -1552,9 +1566,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     ? miuiLauncherOpenBreakGeneration : 0L;
             launcherShadeCandidate = launcherShade;
             launcherXiaoAiCandidate = launcherXiaoAi;
-            // Drawer and folder are mutually exclusive launcher surfaces with the same
-            // callback-only Shell contract, so they share the established probe path.
-            launcherDrawerCandidate = launcherDrawer || launcherFolder;
+            // Native Home children share the existing callback-only probe. The
+            // complete native state, rather than the old editing query, owns A17 admission.
+            launcherDrawerCandidate = launcherDrawer || launcherFolder || launcherHomeSurface;
             launcherEditingCandidate = launcherEditing;
             // Geometry, attachment, touchability, and redirect acceptance are proved later
             // by the matching token emitted only from MiuiHome's accepted processor boundary.
@@ -2347,7 +2361,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         : launcherOverviewGesture
                         ? "SystemUI-owned Recents back gesture candidate"
                         : launcherDrawerGesture
-                        ? "SystemUI-owned MiuiHome drawer/folder back gesture candidate"
+                        ? "SystemUI-owned MiuiHome callback surface back gesture candidate"
                         : "SystemUI-owned MiuiHome editing back gesture candidate")
                         + ", useShellCallback=true"
                         + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
@@ -2368,7 +2382,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             : launcherXiaoAiGesture
                             ? "Ignored XiaoAi gesture without a callback target"
                             : launcherDrawerGesture
-                            ? "Ignored MiuiHome drawer/folder gesture without a callback target"
+                            ? "Ignored MiuiHome callback surface gesture without a callback target"
                             : launcherEditingGesture
                             ? "Ignored MiuiHome editing gesture without a callback target"
                             : "Ignored Recents edge gesture without a back navigation target")
@@ -3122,7 +3136,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             : launcherOverviewGesture
                             ? "Rejected stale Recents Shell target"
                             : launcherDrawerGesture
-                            ? "Rejected non-callback MiuiHome drawer/folder Shell target"
+                            ? "Rejected non-callback MiuiHome callback surface Shell target"
                             : "Rejected non-callback MiuiHome editing Shell target")
                             + ", type=" + navigationType
                             + ", info=" + shortObject(info));
@@ -3139,7 +3153,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         : launcherOverviewGesture
                         ? "Resolved Launcher Recents Shell callback, type="
                         : launcherDrawerGesture
-                        ? "Resolved MiuiHome drawer/folder Shell callback, type="
+                        ? "Resolved MiuiHome callback surface Shell callback, type="
                         : "Resolved MiuiHome editing Shell callback, type=")
                         + navigationType);
             }

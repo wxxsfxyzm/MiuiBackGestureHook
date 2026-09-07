@@ -102,9 +102,10 @@ inline constexpr LauncherProfile kProfile6144 = {
         0u,
         0u,
         0u,
-        {},
         0u,
-        {},
+        nullptr,
+        0u,
+        0u,
         0u,
 };
 
@@ -214,9 +215,10 @@ inline constexpr LauncherProfile kProfile4371 = {
         0u,
         0u,
         0u,
-        {},
         0u,
-        {},
+        nullptr,
+        0u,
+        0u,
         0u,
 };
 
@@ -324,9 +326,10 @@ inline constexpr LauncherProfile kProfile5334 = {
         0u,
         0u,
         0u,
-        {},
         0u,
-        {},
+        nullptr,
+        0u,
+        0u,
         0u,
 };
 
@@ -413,9 +416,10 @@ inline constexpr LauncherProfile kProfile5402 = {
         0u,
         0u,
         0u,
-        {},
         0u,
-        {},
+        nullptr,
+        0u,
+        0u,
         0u,
 };
 

@@ -256,8 +256,6 @@ constexpr uint32_t kDartRestoreFrame = 0xaa1d03efu;
 constexpr uint32_t kDartPopFrame = 0xa8c179fdu;
 constexpr uint32_t kDartReturn = 0xd65f03c0u;
 constexpr uint32_t kDartReturnX22 = 0xaa1603e0u;
-constexpr uint32_t kDartReturnTrue = 0x910082c0u;
-constexpr uint32_t kDartReturnFalse = 0x9100c2c0u;
 
 bool IsDartReturnEpilogue(const ElfView& view, uintptr_t offset,
                           uint32_t first) {
@@ -311,37 +309,6 @@ bool FindUniqueDrawerCallerEpilogue(
     if (direct_call_count != 1u || valid_caller_count != 1u) return false;
     *result = match;
     return true;
-}
-
-bool FindUniqueDartReturnEpilogue(
-        const ElfView& view, uintptr_t start, uintptr_t span,
-        uint32_t first, uintptr_t* result) {
-    if (result == nullptr || AddOverflows(start, span)) return false;
-    uintptr_t match = 0u;
-    size_t count = 0u;
-    for (uintptr_t cursor = start; cursor < start + span; cursor += 4u) {
-        if (!IsDartReturnEpilogue(view, cursor, first)) continue;
-        match = cursor;
-        ++count;
-    }
-    if (count != 1u) return false;
-    *result = match;
-    return true;
-}
-
-size_t CollectDartReturnEpilogues(
-        const ElfView& view, uintptr_t start, uintptr_t span, uint32_t first,
-        uintptr_t* results, size_t capacity) {
-    if (results == nullptr || capacity == 0u || AddOverflows(start, span)) {
-        return 0u;
-    }
-    size_t count = 0u;
-    for (uintptr_t cursor = start; cursor < start + span; cursor += 4u) {
-        if (!IsDartReturnEpilogue(view, cursor, first)) continue;
-        if (count >= capacity) return capacity + 1u;
-        results[count++] = cursor;
-    }
-    return count;
 }
 
 bool MatchOverviewEnter(const ElfView& view, uintptr_t offset,
@@ -597,6 +564,53 @@ bool MatchNotifyBackStatus(const ElfView& view, uintptr_t offset,
     return true;
 }
 
+bool MatchHomeSurfacePublication(const ElfView& view, uintptr_t notify,
+                                 uintptr_t* published_epilogue) {
+    // This native String equality fast path independently proves the layout
+    // read by the observer: tagged OneByteString CID 94, Smi length at +7,
+    // bytes at +15. A changed Dart ABI must not leave a guessed heap reader.
+    constexpr uint32_t string_layout[] = {
+            0xf94005e0u, 0xf94001e1u, 0xeb01001fu, 0x540002e0u,
+            0x36000281u, 0xf85ff030u, 0xd34c7e10u, 0xf1017a1fu,
+            0x54000281u, 0xf8407002u, 0xf8407030u, 0xeb10005fu,
+            0x54000181u, 0x9341fc42u, 0x91001c42u, 0x9343fc42u,
+            0x91003c00u, 0x91003c21u};
+    uint32_t code[113]{};
+    uintptr_t first_equals = 0u;
+    uintptr_t second_equals = 0u;
+    uintptr_t type_from = 0u;
+    uintptr_t publish = 0u;
+    if (published_epilogue == nullptr ||
+            !ReadInstructions(view, notify, code, 113u)) return false;
+    if (code[3] != 0xf81f83a1u || code[7] != 0xf81f03a0u ||
+            code[8] != 0xb800f001u ||
+            code[49] != 0xf85f03a2u || code[50] != 0xb8413040u ||
+            code[51] != 0x8b1c8000u || code[52] != 0x362000a0u ||
+            !IsDartReturnEpilogue(view, notify + 53u * 4u, kDartReturnX22) ||
+            code[62] != 0xaa0003e1u || code[63] != 0xf85f03a0u ||
+            code[64] != 0xb801b001u || code[65] != 0xaa0103e2u ||
+            code[66] != 0xf85f83a1u ||
+            !DecodeBlTarget(notify + 67u * 4u, code[67], &type_from) ||
+            code[68] != 0xaa0003e1u || code[69] != 0xf85f03a2u ||
+            code[70] != 0xb801f040u ||
+            !DecodeBlTarget(notify + 80u * 4u, code[80], &first_equals) ||
+            !DecodeBlTarget(notify + 88u * 4u, code[88], &second_equals) ||
+            first_equals != second_equals ||
+            !Contains(view, first_equals, sizeof(string_layout), PF_R | PF_X) ||
+            memcmp(view.base + first_equals, string_layout, sizeof(string_layout)) != 0 ||
+            code[103] != 0xf85f03a0u || code[104] != 0xb841b001u ||
+            code[105] != 0x8b1c8021u || code[106] != 0xb841f002u ||
+            code[107] != 0x8b1c8042u ||
+            !DecodeBlTarget(notify + 108u * 4u, code[108], &publish) ||
+            !Contains(view, type_from, 4u, PF_R | PF_X) ||
+            !Contains(view, publish, 4u, PF_R | PF_X) ||
+            !IsDartReturnEpilogue(view, notify + 109u * 4u, kDartReturnX22)) {
+        return false;
+    }
+    *published_epilogue = notify + 109u * 4u;
+    return true;
+}
+
 void Increment(uint32_t* value) {
     if (value != nullptr && *value != UINT32_MAX) ++*value;
 }
@@ -735,6 +749,8 @@ bool ResolveDartFeatureProfile(
     diagnostics->stage = ResolveStage::kResolvingEditing;
     EditingCandidate editing{};
     uintptr_t editing_refresh = 0u;
+    uintptr_t home_surface_notify = 0u;
+    uintptr_t home_surface_published = 0u;
     uint32_t editing_notify_candidates = 0u;
     for (size_t segment_index = 0u; segment_index < view.load_count;
          ++segment_index) {
@@ -746,11 +762,13 @@ bool ResolveDartFeatureProfile(
             if (MatchNotifyBackStatus(view, offset, &refresh)) {
                 Increment(&editing_notify_candidates);
                 editing_refresh = refresh;
+                home_surface_notify = offset;
             }
             offset += 4u;
         }
     }
     if (editing_notify_candidates == 1u &&
+            MatchHomeSurfacePublication(view, home_surface_notify, &home_surface_published) &&
             editing_refresh <= UINTPTR_MAX - 0x500u) {
         const uintptr_t refresh_end = editing_refresh + 0x500u;
         for (size_t segment_index = 0u; segment_index < view.load_count;
@@ -793,15 +811,8 @@ bool ResolveDartFeatureProfile(
     uintptr_t drawer_epilogue = 0u;
     const uintptr_t enter_epilogue = enter.offset + 25u * 4u;
     const uintptr_t exit_epilogue = exit.offset + 40u * 4u;
-    uintptr_t editing_false_epilogue = 0u;
-    uintptr_t editing_true_epilogues[4]{};
-    uintptr_t editing_false_epilogues[4]{};
     if (!FindUniqueDrawerCallerEpilogue(
                 view, transition_offset, &drawer_epilogue) ||
-            !FindUniqueDartReturnEpilogue(
-                    view, editing.query_offset, 0x200u,
-                    kDartReturnFalse, &editing_false_epilogue) ||
-            editing_false_epilogue <= editing.query_offset ||
             !IsDartReturnEpilogue(
                     view, enter_epilogue, kDartReturnX22) ||
             !IsDartReturnEpilogue(
@@ -809,16 +820,6 @@ bool ResolveDartFeatureProfile(
         diagnostics->stage = ResolveStage::kRejectedEditing;
         return false;
     }
-    const size_t editing_true_count = CollectDartReturnEpilogues(
-            view, editing.query_offset,
-            editing_false_epilogue - editing.query_offset,
-            kDartReturnTrue, editing_true_epilogues, 4u);
-    if (editing_true_count == 0u || editing_true_count > 4u) {
-        diagnostics->stage = ResolveStage::kRejectedEditing;
-        return false;
-    }
-    editing_false_epilogues[0] = editing_false_epilogue;
-    constexpr size_t editing_false_count = 1u;
 
     storage->profile = launcher_profile;
     auto& profile = storage->profile;
@@ -868,14 +869,14 @@ bool ResolveDartFeatureProfile(
     profile.dart_drawer_transition_epilogue_offset = drawer_epilogue;
     profile.dart_overview_enter_epilogue_offset = enter_epilogue;
     profile.dart_overview_exit_epilogue_offset = exit_epilogue;
-    memcpy(profile.dart_editing_true_epilogue_offsets,
-           editing_true_epilogues,
-           editing_true_count * sizeof(editing_true_epilogues[0]));
-    profile.dart_editing_true_epilogue_count = editing_true_count;
-    memcpy(profile.dart_editing_false_epilogue_offsets,
-           editing_false_epilogues,
-           editing_false_count * sizeof(editing_false_epilogues[0]));
-    profile.dart_editing_false_epilogue_count = editing_false_count;
+    profile.dart_home_surface_notify_offset = home_surface_notify;
+    profile.dart_home_surface_notify_code_size =
+            home_surface_published + 16u - home_surface_notify;
+    memcpy(storage->home_surface_notify_code, base + home_surface_notify,
+           profile.dart_home_surface_notify_code_size);
+    profile.dart_home_surface_notify_code = storage->home_surface_notify_code;
+    profile.dart_home_surface_inactive_epilogue_offset = home_surface_notify + 53u * 4u;
+    profile.dart_home_surface_published_epilogue_offset = home_surface_published;
 
     diagnostics->drawer_progress_end_offset = drawer.offset;
     diagnostics->drawer_transition_complete_offset = transition_offset;
@@ -888,14 +889,10 @@ bool ResolveDartFeatureProfile(
     diagnostics->drawer_transition_epilogue_offset = drawer_epilogue;
     diagnostics->overview_enter_epilogue_offset = enter_epilogue;
     diagnostics->overview_exit_epilogue_offset = exit_epilogue;
-    memcpy(diagnostics->editing_true_epilogue_offsets,
-           editing_true_epilogues,
-           editing_true_count * sizeof(editing_true_epilogues[0]));
-    diagnostics->editing_true_epilogue_count = editing_true_count;
-    memcpy(diagnostics->editing_false_epilogue_offsets,
-           editing_false_epilogues,
-           editing_false_count * sizeof(editing_false_epilogues[0]));
-    diagnostics->editing_false_epilogue_count = editing_false_count;
+    diagnostics->home_surface_notify_offset = home_surface_notify;
+    diagnostics->home_surface_inactive_epilogue_offset =
+            profile.dart_home_surface_inactive_epilogue_offset;
+    diagnostics->home_surface_published_epilogue_offset = home_surface_published;
     diagnostics->all_apps_state_slot_offset = drawer.all_apps_slot;
     diagnostics->home_state_slot_offset = drawer.home_slot;
     diagnostics->stage = ResolveStage::kComplete;

@@ -272,6 +272,7 @@ def resolve_dart_runtime_profile(
             editing_queries.append(query_rva)
 
     editing_refreshes = []
+    home_notifies = []
     notify_prefix = (0xA9BF79FD, 0xAA0F03FD, 0xD100A1EF,
                      0xF81F83A1, 0xD28000A1)
     for notify_rva, notify in candidates(notify_prefix, 63):
@@ -286,6 +287,7 @@ def resolve_dart_runtime_profile(
             and words(refresh_rva, 2) == [0xA9BF79FD, 0xAA0F03FD]
         ):
             editing_refreshes.append(refresh_rva)
+            home_notifies.append(notify_rva)
 
     editing = []
     if len(editing_refreshes) == 1:
@@ -308,13 +310,6 @@ def resolve_dart_runtime_profile(
 
     return_tail = (0xAA1D03EF, 0xA8C179FD, 0xD65F03C0)
 
-    def return_epilogues(start: int, span: int, first: int) -> list[int]:
-        result = []
-        for rva in range(start, start + span, 4):
-            if words(rva, 4) == [first, *return_tail]:
-                result.append(rva)
-        return result
-
     drawer_callers = []
     for start, end in executable_ranges:
         executable_words = words(start, (end - start) // 4)
@@ -332,18 +327,30 @@ def resolve_dart_runtime_profile(
     )
     enter_epilogue = selected_enter[0] + 25 * 4
     exit_epilogue = selected_exit[0] + 40 * 4
-    editing_false_epilogues = return_epilogues(
-        editing_query, 0x200, 0x9100C2C0
-    )
-    editing_true_epilogues = (
-        return_epilogues(
-            editing_query,
-            editing_false_epilogues[0] - editing_query,
-            0x910082C0,
-        )
-        if len(editing_false_epilogues) == 1
-        else []
-    )
+    home_notify = home_notifies[0]
+    home_code = words(home_notify, 113)
+    string_layout = [
+        0xF94005E0, 0xF94001E1, 0xEB01001F, 0x540002E0,
+        0x36000281, 0xF85FF030, 0xD34C7E10, 0xF1017A1F,
+        0x54000281, 0xF8407002, 0xF8407030, 0xEB10005F,
+        0x54000181, 0x9341FC42, 0x91001C42, 0x9343FC42,
+        0x91003C00, 0x91003C21,
+    ]
+    equals = bl_target(home_notify + 80 * 4, home_code[80])
+    if (
+        home_code[7:9] != [0xF81F03A0, 0xB800F001]
+        or home_code[49:53] != [0xF85F03A2, 0xB8413040, 0x8B1C8000, 0x362000A0]
+        or home_code[62:67] != [0xAA0003E1, 0xF85F03A0, 0xB801B001, 0xAA0103E2, 0xF85F83A1]
+        or bl_target(home_notify + 67 * 4, home_code[67]) is None
+        or home_code[68:71] != [0xAA0003E1, 0xF85F03A2, 0xB801F040]
+        or equals is None
+        or bl_target(home_notify + 88 * 4, home_code[88]) != equals
+        or words(equals, len(string_layout)) != string_layout
+        or home_code[103:108] != [0xF85F03A0, 0xB841B001, 0x8B1C8021, 0xB841F002, 0x8B1C8042]
+        or bl_target(home_notify + 108 * 4, home_code[108]) is None
+        or home_code[109:113] != [0xAA1603E0, *return_tail]
+    ):
+        raise ValueError("Dart Home-surface frame/string/publication ABI mismatch")
     if (
         len(drawer_callers) != 1
         or words(drawer_callers[0] - len(drawer_caller_prefix) * 4,
@@ -351,14 +358,10 @@ def resolve_dart_runtime_profile(
         or words(drawer_epilogue, 4) != [0xAA1603E0, *return_tail]
         or words(enter_epilogue, 4) != [0xAA1603E0, *return_tail]
         or words(exit_epilogue, 4) != [0xAA1603E0, *return_tail]
-        or not 1 <= len(editing_true_epilogues) <= 4
-        or len(editing_false_epilogues) != 1
     ):
         raise ValueError(
             "Dart resolver return epilogues: "
-            f"drawer_callers={len(drawer_callers)} "
-            f"editing_true={len(editing_true_epilogues)} "
-            f"editing_false={len(editing_false_epilogues)}"
+            f"drawer_callers={len(drawer_callers)}"
         )
     return {
         "progress_end_offset": drawer_rva,
@@ -373,8 +376,9 @@ def resolve_dart_runtime_profile(
         "drawer_transition_epilogue_offset": drawer_epilogue,
         "overview_enter_epilogue_offset": enter_epilogue,
         "overview_exit_epilogue_offset": exit_epilogue,
-        "editing_true_epilogue_offsets": editing_true_epilogues,
-        "editing_false_epilogue_offsets": editing_false_epilogues,
+        "home_surface_notify_offset": home_notify,
+        "home_surface_inactive_epilogue_offset": home_notify + 53 * 4,
+        "home_surface_published_epilogue_offset": home_notify + 109 * 4,
     }
 
 
