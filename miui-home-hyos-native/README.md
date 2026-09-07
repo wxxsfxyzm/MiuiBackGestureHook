@@ -38,17 +38,6 @@ boolean with its owner epoch; the existing publisher sends authenticated state.
 The native readiness protocol retains its `editing` group name for compatibility,
 while Android 17 consumes the distinct `launcher_home_surface_visible` state key.
 
-The host regression exercises the production resolver on a supplied local Dart ELF,
-including changed context fields, String layout and ambiguous notifier rejection:
-
-```text
-c++ -std=c++17 -O2 tests/dart_home_surface_test.cpp dart_runtime_resolver.cpp -o dart_home_surface_test
-./dart_home_surface_test /path/to/libapp.so
-```
-
-Run from this directory. On Windows, supply a compatible ELF header through the
-compiler include path; the Android NDK supplies the corresponding ELF definitions.
-
 ## Build
 
 Use the application build; there is no separate native-module package task:
