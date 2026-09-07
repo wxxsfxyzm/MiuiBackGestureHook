@@ -35,6 +35,12 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                             + ", process=" + processName);
             return false;
         }
+        if (systemUiDexResolutionInFlight.get() != 0) {
+            moduleLog(Log.WARN, TAG,
+                    "Deferred hot reload during SystemUI dex resolution"
+                            + ", process=" + processName);
+            return false;
+        }
         if (contextualSearchBridgeCallsInFlight.get() != 0) {
             moduleLog(Log.WARN, TAG,
                     "Deferred hot reload during an authenticated contextual-search call"

@@ -46,6 +46,20 @@ import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 public abstract class HookRuntimeCore extends XposedModule {
+    private volatile boolean dexKitLibraryLoaded;
+
+    protected final void ensureDexKitLibraryLoaded() {
+        if (dexKitLibraryLoaded) {
+            return;
+        }
+        synchronized (this) {
+            if (!dexKitLibraryLoaded) {
+                System.loadLibrary("dexkit");
+                dexKitLibraryLoaded = true;
+            }
+        }
+    }
+
     protected abstract void invalidateOpenTransitionSnapshot(
             OpenTransitionSnapshot snapshot, String reason);
 

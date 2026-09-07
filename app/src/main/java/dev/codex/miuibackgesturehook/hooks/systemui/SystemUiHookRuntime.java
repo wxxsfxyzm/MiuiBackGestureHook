@@ -48,6 +48,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -55,10 +56,15 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import io.github.libxposed.api.XposedInterface;
+import org.luckypray.dexkit.DexKitBridge;
+import org.luckypray.dexkit.query.FindMethod;
+import org.luckypray.dexkit.query.matchers.MethodMatcher;
+import org.luckypray.dexkit.result.MethodData;
 
 public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
@@ -2470,25 +2476,27 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             preparedBackStartAnimationInvoker;
     protected volatile boolean preparedBackTargetArrivalHookReady;
     protected volatile boolean preparedBackTerminalHookReady;
+    protected final AtomicInteger systemUiDexResolutionInFlight =
+            new AtomicInteger();
+    private volatile String preparedBackRunnerDexContainer;
 
     protected void hookPreparedBackTargetArrival(ClassLoader classLoader) {
         try {
-            String suffix = Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL ? "$4" : "$3";
             Class<?> controllerClass = Class.forName(
                     BACK_ANIMATION_CONTROLLER, false, classLoader);
-            Class<?> adapterClass = Class.forName(
-                    BACK_ANIMATION_CONTROLLER + suffix, false, classLoader);
             Class<?> runnerStub = Class.forName(
                     "android.window.IBackAnimationRunner$Stub", false, classLoader);
-            Method onAnimationStart = requireExactDeclaredMethod(
-                    adapterClass, "onAnimationStart", "void",
+            Method onAnimationStart = Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
+                    ? resolvePreparedBackTargetArrivalWithDexKit(
+                    classLoader, controllerClass, runnerStub)
+                    : requireExactDeclaredMethod(
+                    Class.forName(BACK_ANIMATION_CONTROLLER + "$3", false, classLoader),
+                    "onAnimationStart", "void",
                     "[Landroid.view.RemoteAnimationTarget;", IBinder.class.getName(),
                     "android.window.IBackAnimationFinishedCallback");
-            if (adapterClass.getSuperclass() != runnerStub
-                    || adapterClass.getDeclaredField("this$0").getType() != controllerClass) {
-                throw new NoSuchMethodException(
-                        "Unexpected back animation adapter owner: " + adapterClass.getName());
-            }
+            Class<?> adapterClass = onAnimationStart.getDeclaringClass();
+            validatePreparedBackTargetArrivalAdapter(
+                    adapterClass, controllerClass, runnerStub);
             recordHookHandle(hook(onAnimationStart)
                     .setId("systemui_back_prepared_target_arrival")
                     .intercept(this::onPreparedBackTargetArrival));
@@ -2501,6 +2509,146 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             moduleLog(Log.ERROR, TAG,
                     "Failed to hook prepared-back remote-target arrival handoff",
                     throwable);
+        }
+    }
+
+    private Method resolvePreparedBackTargetArrivalWithDexKit(
+            ClassLoader classLoader, Class<?> controllerClass, Class<?> runnerStub)
+            throws Throwable {
+        Method resolved = null;
+        systemUiDexResolutionInFlight.incrementAndGet();
+        try {
+            ensureDexKitLibraryLoaded();
+            // BackAnimationController lives in a shared Shell jar on Android 17, not in the
+            // SystemUI APK. DexKit's ClassLoader bridge does not necessarily expose shared
+            // library dex files, so locate the one loaded dex container that actually declares
+            // the controller and search that container directly.
+            String dexContainer = resolveDexContainerForLoadedClass(controllerClass);
+            try (DexKitBridge bridge = DexKitBridge.create(dexContainer)) {
+                FindMethod query = FindMethod.create().matcher(
+                        MethodMatcher.create()
+                                .name("onAnimationStart")
+                                .paramCount(3));
+                for (MethodData candidate : bridge.findMethod(query)) {
+                    Method method;
+                    try {
+                        method = candidate.getMethodInstance(classLoader);
+                        validatePreparedBackTargetArrivalSignature(method);
+                        validatePreparedBackTargetArrivalAdapter(
+                                method.getDeclaringClass(), controllerClass, runnerStub);
+                    } catch (Throwable ignored) {
+                        // The method name and arity are intentionally only a Dex search key.
+                        // Require the complete callback and owner contract after loading it.
+                        continue;
+                    }
+                    if (resolved != null && !resolved.equals(method)) {
+                        throw new IllegalStateException(
+                                "Ambiguous back animation runner adapters: "
+                                        + resolved + " and " + method);
+                    }
+                    resolved = method;
+                }
+            }
+        } finally {
+            systemUiDexResolutionInFlight.decrementAndGet();
+        }
+        if (resolved == null) {
+            throw new NoSuchMethodException(
+                    "No exact BackAnimationController runner adapter found");
+        }
+        return resolved;
+    }
+
+    private String resolveDexContainerForLoadedClass(Class<?> targetClass)
+            throws Throwable {
+        String cached = preparedBackRunnerDexContainer;
+        if (cached != null && !cached.isEmpty()) {
+            return cached;
+        }
+        String targetName = targetClass.getName();
+        List<String> matches = new ArrayList<>();
+        ClassLoader loader = targetClass.getClassLoader();
+        while (loader != null) {
+            Object pathList;
+            Object dexElements;
+            try {
+                pathList = readField(loader, "pathList");
+                dexElements = readField(pathList, "dexElements");
+            } catch (Throwable ignored) {
+                loader = loader.getParent();
+                continue;
+            }
+            int elementCount = Array.getLength(dexElements);
+            for (int index = 0; index < elementCount; index++) {
+                Object element = Array.get(dexElements, index);
+                Object dexFile;
+                try {
+                    dexFile = readField(element, "dexFile");
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (dexFile == null || !dexFileDeclaresClass(dexFile, targetName)) {
+                    continue;
+                }
+                Method getName = dexFile.getClass().getMethod("getName");
+                String path = String.valueOf(getName.invoke(dexFile));
+                if (!path.isEmpty() && !matches.contains(path)) {
+                    matches.add(path);
+                }
+            }
+            loader = loader.getParent();
+        }
+        if (matches.size() != 1) {
+            throw new IllegalStateException(
+                    "Expected one loaded dex container for " + targetName
+                            + ", found=" + matches);
+        }
+        cached = matches.get(0);
+        preparedBackRunnerDexContainer = cached;
+        moduleLog(Log.INFO, TAG,
+                "Resolved prepared-back runner dex container=" + cached);
+        return cached;
+    }
+
+    private static boolean dexFileDeclaresClass(Object dexFile, String targetName)
+            throws ReflectiveOperationException {
+        Method entriesMethod = dexFile.getClass().getMethod("entries");
+        Object entriesObject = entriesMethod.invoke(dexFile);
+        if (!(entriesObject instanceof Enumeration<?>)) {
+            return false;
+        }
+        Enumeration<?> entries = (Enumeration<?>) entriesObject;
+        while (entries.hasMoreElements()) {
+            if (targetName.equals(entries.nextElement())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void validatePreparedBackTargetArrivalSignature(Method method)
+            throws NoSuchMethodException {
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (!"onAnimationStart".equals(method.getName())
+                || method.getReturnType() != void.class
+                || parameterTypes.length != 3
+                || !"[Landroid.view.RemoteAnimationTarget;".equals(
+                parameterTypes[0].getName())
+                || !IBinder.class.getName().equals(parameterTypes[1].getName())
+                || !"android.window.IBackAnimationFinishedCallback".equals(
+                parameterTypes[2].getName())) {
+            throw new NoSuchMethodException(
+                    "Unexpected back animation arrival signature: " + method);
+        }
+    }
+
+    private static void validatePreparedBackTargetArrivalAdapter(
+            Class<?> adapterClass, Class<?> controllerClass, Class<?> runnerStub)
+            throws ReflectiveOperationException {
+        if (adapterClass.getSuperclass() != runnerStub
+                || adapterClass.getDeclaredField("this$0").getType() != controllerClass) {
+            throw new NoSuchMethodException(
+                    "Unexpected back animation adapter owner: " + adapterClass.getName());
         }
     }
 
@@ -2655,6 +2803,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         Object openingComponent = null;
         SurfaceControl closingLeash = null;
         SurfaceControl openingLeash = null;
+        Object closingChange = null;
+        Object openingChange = null;
         boolean fixedRotationOpening = false;
         int changeIndex = 0;
         for (Object change : (List<?>) changesObject) {
@@ -2703,6 +2853,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     && closingComponent == null) {
                 closingComponent = component;
                 closingLeash = (SurfaceControl) leashObject;
+                closingChange = change;
             } else if (mode == TRANSIT_TO_FRONT && openingComponent == null
                     && (flags == openingFlags
                     || (Build.VERSION.SDK_INT >= ANDROID_17_API_LEVEL
@@ -2710,6 +2861,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                     && flags == (openingFlags & ~FLAG_FILLS_TASK)))) {
                 openingComponent = component;
                 openingLeash = (SurfaceControl) leashObject;
+                openingChange = change;
                 fixedRotationOpening = flags != openingFlags;
             } else {
                 throw new IllegalStateException(
@@ -2728,19 +2880,81 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             if (displayId != 0 || taskBounds.left != 0 || taskBounds.top != 0) {
                 return false;
             }
-            for (Object change : (List<?>) changesObject) {
-                Object activityInfo = invokeAnyMethod(
-                        change, "getActivityTransitionInfo", new Object[0]);
-                if (activityInfo == null || !Integer.valueOf(focusedTaskId).equals(
-                        invokeAnyMethod(activityInfo, "getTaskId", new Object[0]))
-                        || invokeAnyMethod(change, "getParent", new Object[0]) != null
-                        || invokeAnyMethod(change, "getLastParent", new Object[0]) != null) {
-                    return false;
-                }
+            if (!isExactAndroid17FixedRotationPair(
+                    closingChange, openingChange, closingComponent, openingComponent,
+                    closingLeash, openingLeash, focusedTaskId, taskBounds)) {
+                return false;
             }
         }
         return closingComponent != null && openingComponent != null
                 && !surfacesAreSame(closingLeash, openingLeash);
+    }
+
+    private boolean isExactAndroid17FixedRotationPair(
+            Object closingChange, Object openingChange,
+            Object closingComponent, Object openingComponent,
+            SurfaceControl closingLeash, SurfaceControl openingLeash,
+            int focusedTaskId, Rect taskBounds) throws Exception {
+        if (Build.VERSION.SDK_INT < ANDROID_17_API_LEVEL
+                || closingChange == null || openingChange == null
+                || closingLeash == null || openingLeash == null
+                || surfacesAreSame(closingLeash, openingLeash)) {
+            return false;
+        }
+        for (Object change : new Object[]{closingChange, openingChange}) {
+            if (invokeAnyMethod(change, "getParent", new Object[0]) != null
+                    || invokeAnyMethod(change, "getLastParent", new Object[0]) != null
+                    || !taskBounds.equals(readTransitionChangeStartAbsBounds(change))
+                    || !taskBounds.equals(readTransitionChangeEndAbsBounds(change))
+                    || !Integer.valueOf(0).equals(readTransitionChangeStartDisplayId(change))
+                    || !Integer.valueOf(0).equals(readTransitionChangeEndDisplayId(change))) {
+                return false;
+            }
+            Object activityInfo = invokeAnyMethod(
+                    change, "getActivityTransitionInfo", new Object[0]);
+            if (activityInfo == null
+                    || !Integer.valueOf(focusedTaskId).equals(
+                    invokeAnyMethod(activityInfo, "getTaskId", new Object[0]))) {
+                return false;
+            }
+            Object activityComponent = invokeAnyMethod(
+                    activityInfo, "getComponent", new Object[0]);
+            if (!Objects.equals(activityComponent,
+                    change == closingChange ? closingComponent : openingComponent)) {
+                return false;
+            }
+        }
+        int closingStartRotation = readRequiredTransitionInt(
+                closingChange, "getStartRotation");
+        int closingEndRotation = readRequiredTransitionInt(
+                closingChange, "getEndRotation");
+        int closingFixedRotation = readRequiredTransitionInt(
+                closingChange, "getEndFixedRotation");
+        int openingStartRotation = readRequiredTransitionInt(
+                openingChange, "getStartRotation");
+        int openingEndRotation = readRequiredTransitionInt(
+                openingChange, "getEndRotation");
+        int openingFixedRotation = readRequiredTransitionInt(
+                openingChange, "getEndFixedRotation");
+        return closingStartRotation == closingEndRotation
+                && closingFixedRotation == -1
+                && openingFixedRotation >= 0
+                && isQuarterTurnRotation(openingStartRotation, openingEndRotation)
+                && isQuarterTurnRotation(closingEndRotation, openingFixedRotation);
+    }
+
+    private int readRequiredTransitionInt(Object change, String method)
+            throws Exception {
+        Object value = invokeAnyMethod(change, method, new Object[0]);
+        if (!(value instanceof Number)) {
+            throw new IllegalStateException("TransitionInfo " + method + " unavailable");
+        }
+        return ((Number) value).intValue();
+    }
+
+    private static boolean isQuarterTurnRotation(int from, int to) {
+        int delta = Math.floorMod(to - from, 4);
+        return delta == 1 || delta == 3;
     }
 
     protected void hookPreparedBackTransitionDecision(ClassLoader classLoader) {

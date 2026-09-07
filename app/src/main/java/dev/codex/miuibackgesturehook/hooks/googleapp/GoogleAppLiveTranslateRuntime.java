@@ -38,7 +38,6 @@ public abstract class GoogleAppLiveTranslateRuntime extends MiuiHomeHookRuntime 
     private volatile boolean liveTranslatePreferenceFailureLogged;
     private volatile boolean lensAimPreferenceFailureLogged;
     private volatile boolean lensAimScreenCapabilityLogged;
-    private volatile boolean dexKitLibraryLoaded;
     protected final AtomicInteger googleDexResolutionInFlight =
             new AtomicInteger();
     protected volatile String googleAppSourceDir;
@@ -347,18 +346,6 @@ public abstract class GoogleAppLiveTranslateRuntime extends MiuiHomeHookRuntime 
                 resolved = candidate;
             }
             return resolved;
-    }
-
-    private void ensureDexKitLibraryLoaded() {
-        if (dexKitLibraryLoaded) {
-            return;
-        }
-        synchronized (this) {
-            if (!dexKitLibraryLoaded) {
-                System.loadLibrary("dexkit");
-                dexKitLibraryLoaded = true;
-            }
-        }
     }
 
     private void installActionVisibilityHook(Class<?> actionClass) throws Throwable {
