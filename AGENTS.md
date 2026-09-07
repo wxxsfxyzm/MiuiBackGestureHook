@@ -363,6 +363,14 @@ Remote-animation rules:
   to `CHANGE`, preserve the opening Task as `TO_FRONT`, and restate the two native predictive
   leash layers in the existing start transaction. Do not swap targets, transform either leash,
   or apply this rule to freeform, return-to-home, cross-activity, or ambiguous shapes.
+- That Android 17 cross-task correction may include one additional full-task embedded
+  TaskFragment only when it belongs directly to the opening Task and the exact native
+  fragment token, container token, originally hidden state, prepared flags, unanimated
+  fragment Surface, default-display root and unrotated fullscreen bounds all match.
+  Retain both Task predictive adaptors and absolute leash-layer checks. Preserve the child
+  Change's opening mode, parent, flags, leash and stock Shell handling; correct only the
+  closing Task's role. Additional children, independent runners, partial bounds, rotation,
+  reparenting and uncertain identities must preserve the original transition.
 - On Android 17, preserve its mandatory prepared transition for an exact fullscreen
   cross-Activity quarter-turn on the default display. Extend the existing closing-role
   correction only when both immutable Activity/Task identities, native predictive adaptors,

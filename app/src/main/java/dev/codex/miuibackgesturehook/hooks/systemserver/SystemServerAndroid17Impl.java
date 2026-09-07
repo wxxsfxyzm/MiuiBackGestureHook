@@ -1,5 +1,6 @@
 package dev.codex.miuibackgesturehook.hooks.systemserver;
 
+import android.graphics.Point;
 import android.graphics.Rect;
 import android.util.Log;
 import android.view.SurfaceControl;
@@ -31,6 +32,9 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
             TRANSITION_FLAG_BACK_TOP | TRANSITION_FLAG_BACK_GESTURE_ANIMATED;
     private static final int CROSS_TASK_OPENING_FLAGS =
             TRANSITION_FLAG_BACK_GESTURE_ANIMATED | TRANSITION_FLAG_IS_OCCLUDED;
+    private static final int CROSS_TASK_EMBEDDED_OPENING_FLAGS =
+            CROSS_TASK_OPENING_FLAGS | 0x200 /* IN_TASK_WITH_EMBEDDED_ACTIVITY */
+                    | 0x400 /* FILLS_TASK */;
 
     static boolean matches(Class<?> transitionClass) {
         return findCalculateTransitionInfo(transitionClass) != null;
@@ -319,22 +323,20 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
         }
         Object targetsObject = chain.getArg(2);
         if (!(targetsObject instanceof List<?>)
-                || ((List<?>) targetsObject).size() != 2) {
+                || (((List<?>) targetsObject).size() != 2
+                && ((List<?>) targetsObject).size() != 3)) {
             return;
         }
         List<?> targets = (List<?>) targetsObject;
-        Object firstContainer = runtime.readSystemServerPlatformFieldOrNull(
-                targets.get(0), "mContainer");
-        Object secondContainer = runtime.readSystemServerPlatformFieldOrNull(
-                targets.get(1), "mContainer");
-        Object firstTask = firstContainer == null ? null
-                : runtime.invokeSystemServerPlatformMethod(
-                firstContainer, "asTask", new Object[0]);
-        Object secondTask = secondContainer == null ? null
-                : runtime.invokeSystemServerPlatformMethod(
-                secondContainer, "asTask", new Object[0]);
-        if (firstTask != firstContainer || secondTask != secondContainer
-                || firstTask == secondTask) {
+        int taskCount = 0;
+        for (Object target : targets) {
+            Object container = runtime.readSystemServerPlatformFieldOrNull(target, "mContainer");
+            if (container != null && runtime.invokeSystemServerPlatformMethod(
+                    container, "asTask") == container) {
+                taskCount++;
+            }
+        }
+        if (taskCount != 2) {
             return;
         }
         Object changesObject = runtime.readSystemServerPlatformTransitionChanges(result);
@@ -342,7 +344,7 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
                 ? describeChanges(runtime, (List<?>) changesObject)
                 : runtime.describeSystemServerPlatformObject(changesObject);
         boolean normalized = changesObject instanceof List<?>
-                && normalizeCrossTaskPrepareRole(runtime, chain, targets,
+                && normalizeCrossTaskPrepareRole(runtime, chain, result, targets,
                 (List<?>) changesObject);
         String changesAfter = normalized
                 ? describeChanges(runtime, (List<?>) changesObject) : changesBefore;
@@ -358,26 +360,36 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
     private static boolean normalizeCrossTaskPrepareRole(
             SystemServerHookRuntime runtime,
             XposedInterface.Chain chain,
+            Object transitionInfo,
             List<?> targets,
             List<?> changes) throws Exception {
-        if (changes.size() != 2) {
+        if (changes.size() != targets.size()) {
             return false;
         }
         Object closingInfo = null;
         Object openingInfo = null;
+        Object embeddedInfo = null;
         Object closingTask = null;
         Object openingTask = null;
         for (Object target : targets) {
             Object container = runtime.readSystemServerPlatformFieldOrNull(
                     target, "mContainer");
+            if (container == null) {
+                return false;
+            }
+            if (runtime.invokeSystemServerPlatformMethod(container, "asTask") != container) {
+                if (embeddedInfo != null || runtime.invokeSystemServerPlatformMethod(
+                        container, "asTaskFragment") != container) {
+                    return false;
+                }
+                embeddedInfo = target;
+                continue;
+            }
             Object animator = runtime.readSystemServerPlatformFieldOrNull(
                     container, "mSurfaceAnimator");
             Object animation = runtime.readSystemServerPlatformFieldOrNull(
                     animator, "mAnimation");
-            if (container == null
-                    || runtime.invokeSystemServerPlatformMethod(
-                    container, "asTask", new Object[0]) != container
-                    || animation == null
+            if (animation == null
                     || !BACK_WINDOW_ANIMATION_ADAPTOR.equals(
                     animation.getClass().getName())
                     || runtime.readSystemServerPlatformFieldOrNull(
@@ -436,12 +448,15 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
         int openingTaskId = readIntField(runtime, openingTask, "mTaskId", -1);
         Object closingChange = null;
         Object openingChange = null;
+        Object embeddedChange = null;
         for (Object change : changes) {
             Object taskInfo = runtime.readSystemServerPlatformTransitionChangeTaskInfo(change);
             int taskId = readIntField(runtime, taskInfo, "taskId", -1);
-            if (taskId == closingTaskId) {
+            if (taskInfo == null && embeddedInfo != null && embeddedChange == null) {
+                embeddedChange = change;
+            } else if (taskId == closingTaskId && closingChange == null) {
                 closingChange = change;
-            } else if (taskId == openingTaskId) {
+            } else if (taskId == openingTaskId && openingChange == null) {
                 openingChange = change;
             } else {
                 return false;
@@ -469,6 +484,11 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
                 openingChange) != null
                 || runtime.readSystemServerPlatformTransitionChangeLastParent(
                 openingChange) != null) {
+            return false;
+        }
+        if (embeddedInfo != null && !isExactOpeningEmbeddedFragment(runtime, transitionInfo,
+                embeddedInfo, embeddedChange, closingTask, openingTask, closingChange,
+                openingChange, (Rect) openingBoundsObject)) {
             return false;
         }
 
@@ -529,8 +549,82 @@ final class SystemServerAndroid17Impl extends SystemServerPlatformImpl {
                         + ", transitionId=" + chain.getArg(4)
                         + ", closingTaskId=" + closingTaskId
                         + ", openingTaskId=" + openingTaskId
+                        + ", embeddedOpening=" + (embeddedInfo != null)
                         + ", mode=" + TRANSIT_TO_FRONT + "->" + TRANSIT_CHANGE
                         + ", leashLayers=" + closingLayer + "/" + openingLayer);
+        return true;
+    }
+
+    private static boolean isExactOpeningEmbeddedFragment(
+            SystemServerHookRuntime runtime, Object info, Object embeddedInfo,
+            Object embeddedChange, Object closingTask, Object openingTask,
+            Object closingChange, Object openingChange, Rect bounds) throws Exception {
+        Object fragment = runtime.readSystemServerPlatformFieldOrNull(embeddedInfo, "mContainer");
+        Object display = runtime.readSystemServerPlatformFieldOrNull(openingTask, "mDisplayContent");
+        if (embeddedChange == null || display == null
+                || readIntField(runtime, embeddedInfo, "mFlags", -1) != 0x10
+                || !Boolean.FALSE.equals(runtime.readSystemServerPlatformFieldOrNull(
+                embeddedInfo, "mVisible"))
+                || !Boolean.TRUE.equals(runtime.invokeSystemServerPlatformMethod(fragment, "isEmbedded"))
+                || !Boolean.TRUE.equals(runtime.invokeSystemServerPlatformMethod(fragment, "isVisibleRequested"))
+                || runtime.invokeSystemServerPlatformMethod(fragment, "getParent") != openingTask
+                || runtime.invokeSystemServerPlatformMethod(fragment, "getTask") != openingTask
+                || runtime.readSystemServerPlatformFieldOrNull(fragment, "mDisplayContent") != display
+                || readIntResult(runtime, fragment, "getWindowingMode") != WINDOWING_MODE_FULLSCREEN
+                || readIntResult(runtime, closingTask, "getActivityType") != 1
+                || readIntResult(runtime, openingTask, "getActivityType") != 1
+                || readIntResult(runtime, display, "getDisplayId") != 0
+                || !bounds.equals(runtime.invokeSystemServerPlatformMethod(display, "getBounds"))
+                || !bounds.equals(runtime.invokeSystemServerPlatformMethod(fragment, "getBounds"))
+                || readIntResult(runtime, embeddedChange, "getMode") != TRANSIT_TO_FRONT
+                || readIntResult(runtime, embeddedChange, "getFlags") != CROSS_TASK_EMBEDDED_OPENING_FLAGS
+                || runtime.invokeSystemServerPlatformMethod(embeddedChange, "getLastParent") != null
+                || readIntResult(runtime, info, "getRootCount") != 1) {
+            return false;
+        }
+        Object fragmentToken = runtime.invokeSystemServerPlatformMethod(fragment, "getFragmentToken");
+        Object openingToken = runtime.invokeSystemServerPlatformMethod(openingChange, "getContainer");
+        Object animator = runtime.readSystemServerPlatformFieldOrNull(fragment, "mSurfaceAnimator");
+        if (fragmentToken == null || openingToken == null || animator == null
+                || !fragmentToken.equals(runtime.invokeSystemServerPlatformMethod(
+                embeddedChange, "getTaskFragmentToken"))
+                || !openingToken.equals(runtime.invokeSystemServerPlatformMethod(embeddedChange, "getParent"))
+                || runtime.invokeSystemServerPlatformMethod(animator, "getAnimation") != null) {
+            return false;
+        }
+        Object root = runtime.invokeSystemServerPlatformMethod(info, "getRoot", 0);
+        Object rootLeash = runtime.invokeSystemServerPlatformMethod(root, "getLeash");
+        Object offset = runtime.invokeSystemServerPlatformMethod(root, "getOffset");
+        if (!(rootLeash instanceof SurfaceControl) || !((SurfaceControl) rootLeash).isValid()
+                || readIntResult(runtime, root, "getDisplayId") != 0
+                || !(offset instanceof Point) || ((Point) offset).x != 0 || ((Point) offset).y != 0) {
+            return false;
+        }
+        // The third Change is a full-task child of the opening Task, not a third runner.
+        // Keep its mode, parent, flags and native Shell handling intact.
+        Object[] containers = {closingTask, openingTask, fragment};
+        Object[] changes = {closingChange, openingChange, embeddedChange};
+        IdentityHashMap<Object, Boolean> leashes = new IdentityHashMap<>();
+        for (int index = 0; index < containers.length; index++) {
+            Object container = containers[index];
+            Object change = changes[index];
+            Object token = runtime.invokeSystemServerPlatformMethod(
+                    runtime.readSystemServerPlatformFieldOrNull(container, "mRemoteToken"),
+                    "toWindowContainerToken");
+            Object leash = runtime.readSystemServerPlatformTransitionChangeLeash(change);
+            if (token == null || !token.equals(runtime.invokeSystemServerPlatformMethod(change, "getContainer"))
+                    || !(leash instanceof SurfaceControl) || !((SurfaceControl) leash).isValid()
+                    || leash != runtime.invokeSystemServerPlatformMethod(container, "getSurfaceControl")
+                    || leash == rootLeash || leashes.put(leash, Boolean.TRUE) != null
+                    || !bounds.equals(runtime.readSystemServerPlatformTransitionChangeStartAbsBounds(change))
+                    || !bounds.equals(runtime.readSystemServerPlatformTransitionChangeEndAbsBounds(change))
+                    || readIntResult(runtime, change, "getStartDisplayId") != 0
+                    || readIntResult(runtime, change, "getEndDisplayId") != 0
+                    || readIntResult(runtime, change, "getStartRotation") != 0
+                    || readIntResult(runtime, change, "getEndRotation") != 0) {
+                return false;
+            }
+        }
         return true;
     }
 
