@@ -31,8 +31,32 @@ public abstract class GoogleAppLiveTranslateRuntime extends MiuiHomeHookRuntime 
     private static final int LIVE_TRANSLATE_ACTION_ID = 271520;
     private static final String GOOGLE_LENS_USER_NAMESPACE =
             "com.google.android.apps.search.lens.user";
+    /** Read by the Lensient model factory on the currently verified Google App builds. */
+    private static final String GOOGLE_LENS_AIM_MODEL_SIBLING_FLAG = "45710957";
     private static final String GOOGLE_LENS_AIM_SEARCHBOX_FLAG = "45781832";
     private static final String GOOGLE_LENS_AIM_SCREEN_CONTEXT_FLAG = "45765529";
+
+    /**
+     * Stable literal sets for the Lensient AIM model factory, strictest first. Google moved the
+     * searchbox flag read out of the factory in a later build, so keep the feature resolver
+     * anchored to the screen-context flag without accepting an arbitrary method by name.
+     */
+    private static final String[][] GOOGLE_LENS_AIM_FACTORY_ANCHORS = {
+        {
+            GOOGLE_LENS_USER_NAMESPACE,
+            GOOGLE_LENS_AIM_SCREEN_CONTEXT_FLAG,
+            GOOGLE_LENS_AIM_MODEL_SIBLING_FLAG
+        },
+        {
+            GOOGLE_LENS_USER_NAMESPACE,
+            GOOGLE_LENS_AIM_SCREEN_CONTEXT_FLAG,
+            GOOGLE_LENS_AIM_SEARCHBOX_FLAG
+        },
+        {
+            GOOGLE_LENS_USER_NAMESPACE,
+            GOOGLE_LENS_AIM_SCREEN_CONTEXT_FLAG
+        }
+    };
 
     private volatile SharedPreferences liveTranslatePreferences;
     private volatile boolean liveTranslatePreferenceFailureLogged;
@@ -141,97 +165,110 @@ public abstract class GoogleAppLiveTranslateRuntime extends MiuiHomeHookRuntime 
                         ? Log.INFO : Log.WARN,
                 TAG, "Prepared native Google Lens screen capability"
                         + ", executable=" + target.capability
+                        + ", factory=" + target.factorySign
                         + ", callersDeoptimized=" + deoptimized
                         + "/" + (target.callers.size() + 1));
     }
 
     private GoogleLensScreenCapabilityTarget resolveGoogleLensScreenCapabilityTarget(
             ClassLoader classLoader, DexKitBridge bridge) throws Throwable {
-            MethodData consumer = findUniqueLensAimModelConsumer(bridge);
-            if (consumer == null) {
-                return null;
-            }
-            MethodData modelConstructor = findConstructedReturnType(consumer);
-            if (modelConstructor == null
-                    || modelConstructor.getParamTypeNames().size() <= 6) {
-                return null;
-            }
+        LensAimModelFactory factory = findLensAimModelFactory(bridge);
+        if (factory == null) {
+            return null;
+        }
+        MethodData consumer = factory.method;
+        MethodData modelConstructor = findConstructedReturnType(consumer);
+        if (modelConstructor == null
+                || modelConstructor.getParamTypeNames().size() <= 6) {
+            return null;
+        }
 
-            String coordinatorName = modelConstructor.getParamTypeNames().get(6);
-            Class<?> coordinatorClass = Class.forName(
-                    coordinatorName, false, classLoader);
-            FindMethod constructorQuery = FindMethod.create().matcher(
-                    MethodMatcher.create()
-                            .declaredClass(coordinatorClass)
-                            .name("<init>"));
-            MethodData coordinatorConstructorData = null;
-            MethodData capabilityData = null;
-            for (MethodData candidate : bridge.findMethod(constructorQuery)) {
-                MethodData constructorCapability = null;
-                for (MethodData invoke : candidate.getInvokes()) {
-                    if (!invoke.isMethod()
-                            || invoke.getParamCount() != 0
-                            || !"boolean".equals(invoke.getReturnTypeName())
-                            || coordinatorName.equals(invoke.getDeclaredClassName())) {
-                        continue;
-                    }
-                    if (constructorCapability != null
-                            && !constructorCapability.equals(invoke)) {
-                        constructorCapability = null;
-                        break;
-                    }
-                    constructorCapability = invoke;
-                }
-                if (constructorCapability == null) {
-                    continue;
-                }
-                if (coordinatorConstructorData != null
-                        && (!coordinatorConstructorData.equals(candidate)
-                        || !capabilityData.equals(constructorCapability))) {
-                    return null;
-                }
-                coordinatorConstructorData = candidate;
-                capabilityData = constructorCapability;
-            }
-            if (coordinatorConstructorData == null || capabilityData == null) {
-                return null;
-            }
-
-            List<Method> callers = new ArrayList<>();
-            for (MethodData caller : capabilityData.getCallers()) {
-                if (!caller.isMethod()) {
-                    continue;
-                }
-                Method method = caller.getMethodInstance(classLoader);
-                if (!callers.contains(method)) {
-                    callers.add(method);
-                }
-            }
-            return new GoogleLensScreenCapabilityTarget(
-                    capabilityData.getMethodInstance(classLoader),
-                    coordinatorConstructorData.getConstructorInstance(classLoader),
-                    callers);
-    }
-
-    private static MethodData findUniqueLensAimModelConsumer(DexKitBridge bridge) {
-        FindMethod query = FindMethod.create().matcher(
+        String coordinatorName = modelConstructor.getParamTypeNames().get(6);
+        Class<?> coordinatorClass = Class.forName(
+                coordinatorName, false, classLoader);
+        FindMethod constructorQuery = FindMethod.create().matcher(
                 MethodMatcher.create()
-                        .paramCount(0)
-                        .usingEqStrings(
-                                GOOGLE_LENS_USER_NAMESPACE,
-                                GOOGLE_LENS_AIM_SEARCHBOX_FLAG,
-                                GOOGLE_LENS_AIM_SCREEN_CONTEXT_FLAG));
-        MethodData resolved = null;
-        for (MethodData candidate : bridge.findMethod(query)) {
-            if ("void".equals(candidate.getReturnTypeName())) {
+                        .declaredClass(coordinatorClass)
+                        .name("<init>"));
+        MethodData coordinatorConstructorData = null;
+        MethodData capabilityData = null;
+        for (MethodData candidate : bridge.findMethod(constructorQuery)) {
+            MethodData constructorCapability = null;
+            for (MethodData invoke : candidate.getInvokes()) {
+                if (!invoke.isMethod()
+                        || invoke.getParamCount() != 0
+                        || !"boolean".equals(invoke.getReturnTypeName())
+                        || coordinatorName.equals(invoke.getDeclaredClassName())) {
+                    continue;
+                }
+                if (constructorCapability != null
+                        && !constructorCapability.equals(invoke)) {
+                    constructorCapability = null;
+                    break;
+                }
+                constructorCapability = invoke;
+            }
+            if (constructorCapability == null) {
                 continue;
             }
-            if (resolved != null && !resolved.equals(candidate)) {
+            if (coordinatorConstructorData != null
+                    && (!coordinatorConstructorData.equals(candidate)
+                    || !capabilityData.equals(constructorCapability))) {
                 return null;
             }
-            resolved = candidate;
+            coordinatorConstructorData = candidate;
+            capabilityData = constructorCapability;
         }
-        return resolved;
+        if (coordinatorConstructorData == null || capabilityData == null) {
+            return null;
+        }
+
+        List<Method> callers = new ArrayList<>();
+        for (MethodData caller : capabilityData.getCallers()) {
+            if (!caller.isMethod()) {
+                continue;
+            }
+            Method method = caller.getMethodInstance(classLoader);
+            if (!callers.contains(method)) {
+                callers.add(method);
+            }
+        }
+        return new GoogleLensScreenCapabilityTarget(
+                capabilityData.getMethodInstance(classLoader),
+                coordinatorConstructorData.getConstructorInstance(classLoader),
+                callers,
+                factory.sign);
+    }
+
+    /**
+     * Locates the Lensient AIM model factory by shape and stable literals. An anchor set is
+     * accepted only when it produces exactly one non-void method; ambiguity at one level may
+     * fall through to another verified set, while no unique match fails closed.
+     */
+    private static LensAimModelFactory findLensAimModelFactory(DexKitBridge bridge) {
+        for (String[] anchors : GOOGLE_LENS_AIM_FACTORY_ANCHORS) {
+            FindMethod query = FindMethod.create().matcher(
+                    MethodMatcher.create()
+                            .paramCount(0)
+                            .usingEqStrings(anchors));
+            MethodData resolved = null;
+            for (MethodData candidate : bridge.findMethod(query)) {
+                if ("void".equals(candidate.getReturnTypeName())) {
+                    continue;
+                }
+                if (resolved != null) {
+                    resolved = null;
+                    break;
+                }
+                resolved = candidate;
+            }
+            if (resolved != null) {
+                return new LensAimModelFactory(
+                        resolved,
+                        resolved.getDeclaredClassName() + "#" + resolved.getName());
+            }
+        }
+        return null;
     }
 
     private static MethodData findConstructedReturnType(MethodData consumer) {
@@ -270,14 +307,27 @@ public abstract class GoogleAppLiveTranslateRuntime extends MiuiHomeHookRuntime 
         final Method capability;
         final Constructor<?> coordinatorConstructor;
         final List<Method> callers;
+        final String factorySign;
 
         GoogleLensScreenCapabilityTarget(
                 Method capability,
                 Constructor<?> coordinatorConstructor,
-                List<Method> callers) {
+                List<Method> callers,
+                String factorySign) {
             this.capability = capability;
             this.coordinatorConstructor = coordinatorConstructor;
             this.callers = callers;
+            this.factorySign = factorySign;
+        }
+    }
+
+    private static final class LensAimModelFactory {
+        final MethodData method;
+        final String sign;
+
+        LensAimModelFactory(MethodData method, String sign) {
+            this.method = method;
+            this.sign = sign;
         }
     }
 
