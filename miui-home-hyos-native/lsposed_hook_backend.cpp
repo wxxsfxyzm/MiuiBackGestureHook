@@ -30,7 +30,6 @@ constexpr size_t kInlinePatchGuardSpan = 32u;
 
 const NativeAPIEntries* g_lsposed_api = nullptr;
 using MadviseFn = int (*)(void*, size_t, int);
-MadviseFn g_original_madvise = madvise;
 MadviseFn g_direct_madvise_backup = nullptr;
 MadviseFn g_archive_madvise_backup = nullptr;
 volatile uint32_t g_madvise_guard_state = 0u;
@@ -113,8 +112,13 @@ bool AddProtectedPage(uintptr_t address) {
     return true;
 }
 
-int GuardedMadvise(void* address, size_t length, int advice) {
-    MadviseFn original = __atomic_load_n(&g_original_madvise, __ATOMIC_ACQUIRE);
+// Shared body for every madvise slot this module installs.  `original` is the
+// backup LSPlt returned for that specific slot, which is the previous module's
+// guard (or libc madvise when this module is first in the chain).  Calling the
+// backup instead of libc keeps the GOT chain intact when several modules hook
+// the same runtime.
+int GuardedMadviseWith(MadviseFn original, void* address, size_t length,
+                       int advice) {
     if (original == nullptr) {
         errno = ENOSYS;
         return -1;
@@ -162,6 +166,19 @@ int GuardedMadvise(void* address, size_t length, int advice) {
                         "preserved hook page in MADV_DONTNEED range %p-%p",
                         address, reinterpret_cast<void*>(end));
     return 0;
+}
+
+// One wrapper per hooked slot so each one forwards to its own backup.
+int GuardedMadviseDirect(void* address, size_t length, int advice) {
+    return GuardedMadviseWith(
+            __atomic_load_n(&g_direct_madvise_backup, __ATOMIC_ACQUIRE),
+            address, length, advice);
+}
+
+int GuardedMadviseArchive(void* address, size_t length, int advice) {
+    return GuardedMadviseWith(
+            __atomic_load_n(&g_archive_madvise_backup, __ATOMIC_ACQUIRE),
+            address, length, advice);
 }
 
 bool RangeInImage(const Image& image, uintptr_t address, size_t size,
@@ -373,7 +390,7 @@ bool RegisterDirectMadviseGuard(const Image& image) {
     if (!ResolveDirectHookIdentity(image, &dev, &inode) ||
             !lsplt::RegisterHook(
                     dev, inode, "madvise",
-                    reinterpret_cast<void*>(GuardedMadvise),
+                    reinterpret_cast<void*>(GuardedMadviseDirect),
                     reinterpret_cast<void**>(&g_direct_madvise_backup)) ||
             !lsplt::CommitHook() || g_direct_madvise_backup == nullptr) {
         __atomic_store_n(&g_direct_madvise_guard_state, uint32_t{3},
@@ -407,7 +424,7 @@ bool RegisterArchiveMadviseGuard(const Image& image) {
     if (!ResolveArchiveHookTarget(image, &target) ||
             !lsplt::RegisterHook(
                     target.dev, target.inode, target.offset, target.size,
-                    "madvise", reinterpret_cast<void*>(GuardedMadvise),
+                    "madvise", reinterpret_cast<void*>(GuardedMadviseArchive),
                     reinterpret_cast<void**>(&g_archive_madvise_backup)) ||
             !lsplt::CommitHook() || g_archive_madvise_backup == nullptr) {
         __atomic_store_n(&g_archive_madvise_guard_state, uint32_t{3},
