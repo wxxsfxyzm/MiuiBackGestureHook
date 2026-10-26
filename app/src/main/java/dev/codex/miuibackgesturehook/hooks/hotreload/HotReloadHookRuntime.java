@@ -192,6 +192,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         unregisterMiuiHomeOpenBreakCommandReceiver();
         unregisterMiuiHomeInputArbiterReceiver();
         releaseMiuiHomeGestureTriggerPreferenceListener();
+        releaseSideTriggerExclusionPreferenceListener();
         Object[][] inputState = new Object[nativeInputMonitors.size()][2];
         int index = 0;
         for (Map.Entry<Object, NativeBackInputMonitor> entry
@@ -422,6 +423,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (!oldHookIds.contains("server_return_home_touch_occlusion")) {
                     hookReturnHomeTouchOcclusion(serverClassLoader);
                 }
+                hookSideTriggerExclusion(serverClassLoader, oldHookIds);
                 if (!oldHookIds.contains("server_predictive_opt_in_metadata")
                         && !oldHookIds.contains("predictive_opt_in_system_server")) {
                     hookPredictiveBackOptInMetadata(serverClassLoader);

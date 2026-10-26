@@ -19,6 +19,11 @@ The fullscreen back behavior dropdown shares a settings card with Side trigger a
 first immersive side gesture use the existing back pipeline, even if system bars appear
 during it. Changes apply to the next gesture without a restart.
 
+Side trigger area limits back gestures to a vertical band on both edges. Touches outside the
+band reach the application below. On Android 17, system_server publishes the rows outside the
+band as system gesture exclusion, so MiuiHome redirects those touches through its own native
+path instead of keeping them in the full-height edge windows.
+
 The HyperOS back indicator has an optional Advanced material switch, off by default.
 It uses Xiaomi's system material APIs within the live indicator silhouette, keeps the arrow
 sharp, and falls back to the original bitmap background when the APIs are unavailable or
