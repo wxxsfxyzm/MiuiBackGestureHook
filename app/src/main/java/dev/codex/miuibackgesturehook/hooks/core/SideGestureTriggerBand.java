@@ -1,22 +1,23 @@
-package dev.codex.miuibackgesturehook.hooks.systemserver;
+package dev.codex.miuibackgesturehook.hooks.core;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
 /**
  * Maps the shared side trigger preferences onto the vertical span of a system gesture frame.
- * SystemUI accepts a DOWN when {@code top <= rawY < top + height} using the same float math,
- * so the integer edges here round up to exclude exactly the rows SystemUI rejects.
+ * Android 17 uses these same integer boundaries in SystemUI and WMS. A Region cannot
+ * represent fractional pixels; comparing rawY with the unrounded float band would disagree
+ * with the launcher's exclusion near either boundary.
  */
-final class SideTriggerExclusionBand {
-    private SideTriggerExclusionBand() {
+public final class SideGestureTriggerBand {
+    private SideGestureTriggerBand() {
     }
 
     /**
      * Returns {@code {bandTop, bandBottom}} in frame coordinates, or {@code null} when the
      * preferences keep the native full-height area or the frame has no vertical extent.
      */
-    static int[] resolve(int frameTop, int frameBottom, int heightPercent,
-                         int positionPercent) {
+    public static int[] resolve(int frameTop, int frameBottom, int heightPercent,
+                                int positionPercent) {
         if (heightPercent < PredictiveBackPreferences.MIN_GESTURE_TRIGGER_HEIGHT_PERCENT
                 || heightPercent > PredictiveBackPreferences.MAX_GESTURE_TRIGGER_HEIGHT_PERCENT
                 || positionPercent < PredictiveBackPreferences.MIN_GESTURE_TRIGGER_POSITION_PERCENT

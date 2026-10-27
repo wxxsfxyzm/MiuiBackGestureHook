@@ -53,6 +53,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 import dev.codex.miuibackgesturehook.hooks.core.HookRuntimeCore;
+import dev.codex.miuibackgesturehook.hooks.core.SideGestureTriggerBand;
 
 import dev.codex.miuibackgesturehook.hooks.systemui.indicator.MiuiHapticFeedbackHelper;
 import dev.codex.miuibackgesturehook.hooks.systemui.indicator.MiuiStyleBackArrowOverlay;
@@ -1418,12 +1419,29 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         }
                     }
                 }
-                int heightPercent = preferences.getInt(
-                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
-                        PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT);
-                int positionPercent = preferences.getInt(
-                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
-                        PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT);
+                int heightPercent;
+                int positionPercent;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+                    Map<String, ?> values = preferences.getAll();
+                    Object heightValue = values.get(
+                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT);
+                    Object positionValue = values.get(
+                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT);
+                    heightPercent = heightValue == null
+                            ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT
+                            : (Integer) heightValue;
+                    positionPercent = positionValue == null
+                            ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT
+                            : (Integer) positionValue;
+                } else {
+                    // Preserve the Android 16 path paired with the Java launcher window hooks.
+                    heightPercent = preferences.getInt(
+                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
+                            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT);
+                    positionPercent = preferences.getInt(
+                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
+                            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT);
+                }
                 if (heightPercent < PredictiveBackPreferences.MIN_GESTURE_TRIGGER_HEIGHT_PERCENT
                         || heightPercent
                         > PredictiveBackPreferences.MAX_GESTURE_TRIGGER_HEIGHT_PERCENT
@@ -1441,6 +1459,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     return true;
                 }
                 float displayHeight = currentDisplayHeight();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+                    int[] band = SideGestureTriggerBand.resolve(
+                            0, (int) displayHeight, heightPercent, positionPercent);
+                    return band == null || (event.getRawY() >= band[0]
+                            && event.getRawY() < band[1]);
+                }
                 float configuredHeight = displayHeight * heightPercent / 100.0f;
                 float availableTravel = Math.max(0.0f, displayHeight - configuredHeight);
                 float top = availableTravel * positionPercent / 100.0f;

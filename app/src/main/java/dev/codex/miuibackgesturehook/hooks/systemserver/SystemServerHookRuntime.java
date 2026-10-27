@@ -34,12 +34,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
+import dev.codex.miuibackgesturehook.hooks.core.SideGestureTriggerBand;
 import dev.codex.miuibackgesturehook.hooks.miuihome.MiuiHomeHookRuntime;
 import io.github.libxposed.api.XposedInterface;
 
@@ -95,41 +96,40 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     protected static final String SERVER_SIDE_TRIGGER_EXCLUSION = "server_side_trigger_exclusion";
     private static final String DISPLAY_CONTENT = "com.android.server.wm.DisplayContent";
     private static final long SIDE_TRIGGER_PREFERENCE_RETRY_MS = 5000L;
-    private final Object sideTriggerExclusionPreferenceLock = new Object();
-    private volatile SharedPreferences sideTriggerExclusionPreferences;
-    private volatile int sideTriggerHeightPercent =
-            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT;
-    private volatile int sideTriggerPositionPercent =
-            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT;
+    private final Object sideTriggerExclusionLifecycleLock = new Object();
+    private final Object sideTriggerExclusionCallbackToken = new Object();
+    private final AtomicBoolean sideTriggerExclusionRefreshPending = new AtomicBoolean();
+    private volatile boolean sideTriggerExclusionRetired;
+    private volatile Handler sideTriggerExclusionHandler;
     private volatile long sideTriggerExclusionPreferenceRetryUptime;
-    private volatile boolean sideTriggerExclusionPreferenceFailureLogged;
     private volatile boolean sideTriggerExclusionFailureLogged;
+    private boolean sideTriggerExclusionLimitLogged;
     private volatile Method sideTriggerExclusionUpdateMethod;
+    private volatile Method sideTriggerDisplayContentMethod;
     private volatile Field sideTriggerFrameLeftField;
     private volatile Field sideTriggerFrameRightField;
     private volatile Field sideTriggerDisplayIdField;
     private final Map<Integer, int[]> sideTriggerPublishedStates = new ConcurrentHashMap<>();
     private volatile WeakReference<Object> sideTriggerExclusionWindowManager =
             new WeakReference<>(null);
-    private final SharedPreferences.OnSharedPreferenceChangeListener
-            sideTriggerExclusionPreferenceListener = (preferences, key) -> {
-        if (key != null
-                && !PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT.equals(key)
-                && !PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT.equals(key)) {
-            return;
-        }
-        try {
-            readSideTriggerExclusionPreferences(preferences);
-        } catch (Throwable throwable) {
-            moduleLog(Log.WARN, TAG, "Failed to read side trigger preferences", throwable);
-            return;
-        }
-        moduleLog(Log.INFO, TAG, "Side trigger preference changed"
-                + ", key=" + key
-                + ", height=" + sideTriggerHeightPercent
-                + "%, position=" + sideTriggerPositionPercent + "%");
-        requestSideTriggerExclusionRefresh("preference:" + key);
-    };
+    private final SideTriggerPreferences sideTriggerPreferences =
+            new SideTriggerPreferences(new SideTriggerPreferences.Host() {
+                @Override
+                public SharedPreferences preferences() {
+                    return getRemotePreferences(PredictiveBackPreferences.GROUP);
+                }
+
+                @Override
+                public void changed() {
+                    requestSideTriggerExclusionRefresh("preferences");
+                }
+
+                @Override
+                public void failed(Throwable failure) {
+                    moduleLog(Log.WARN, TAG,
+                            "Side trigger preferences unavailable; restoring native exclusion", failure);
+                }
+            });
 
     protected void installSystemServerHooks(ClassLoader classLoader) {
         try {
@@ -171,7 +171,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected void hookServerBarLifetime(ClassLoader loader, Set<String> present) {
-        if (Build.VERSION.SDK_INT != 37) return;
+        if (Build.VERSION.SDK_INT != Build.VERSION_CODES.CINNAMON_BUN) return;
         try {
             Class<?> controller = Class.forName("com.android.server.wm.MiuiStatusBarController", false, loader);
             Method feature = Class.forName("com.android.server.wm.BarFollowAnimationUtils", false, loader)
@@ -191,12 +191,13 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             java.util.ArrayList<Method> nativeWrites = new java.util.ArrayList<>();
             for (String name : writes) {
                 Method resolved = null;
-                for (Method method : controller.getDeclaredMethods()) if (method.getName().equals(name)) {
-                    if (resolved != null || method.getReturnType() != void.class
-                            || java.lang.reflect.Modifier.isStatic(method.getModifiers()))
-                        throw new NoSuchMethodException("Ambiguous native bar mutation " + name);
-                    resolved = method;
-                }
+                for (Method method : controller.getDeclaredMethods())
+                    if (method.getName().equals(name)) {
+                        if (resolved != null || method.getReturnType() != void.class
+                                || java.lang.reflect.Modifier.isStatic(method.getModifiers()))
+                            throw new NoSuchMethodException("Ambiguous native bar mutation " + name);
+                        resolved = method;
+                    }
                 if (resolved == null) throw new NoSuchMethodException(name);
                 nativeWrites.add(resolved);
             }
@@ -222,7 +223,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             Method[] stateCalls = new Method[stateMethods.length];
             for (int i = 0; i < stateCalls.length; i++) {
                 stateCalls[i] = controller.getDeclaredMethod(stateMethods[i], i < 2 ? new Class<?>[]{int.class} : new Class<?>[0]);
-                if (stateCalls[i].getReturnType() != void.class) throw new NoSuchMethodException(stateMethods[i]);
+                if (stateCalls[i].getReturnType() != void.class)
+                    throw new NoSuchMethodException(stateMethods[i]);
             }
             if (!listener.getSuperclass().getName().equals("miuix.animation.listener.TransitionListener")
                     || listener.getDeclaredField("this$0").getType() != controller
@@ -232,8 +234,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     || impl.getDeclaredField("mStatusBarController").getType() != controller
                     || update.getReturnType() != void.class || run.getReturnType() != void.class)
                 throw new NoSuchMethodException("Native bar lifetime contract changed");
-            if (!present.contains(SERVER_BAR_LISTENER_CREATE)) recordHookHandle(hook(listenerConstructor)
-                    .setId(SERVER_BAR_LISTENER_CREATE).intercept(this::createServerBarListener));
+            if (!present.contains(SERVER_BAR_LISTENER_CREATE))
+                recordHookHandle(hook(listenerConstructor)
+                        .setId(SERVER_BAR_LISTENER_CREATE).intercept(this::createServerBarListener));
             if (!present.contains(SERVER_BAR_LISTENER_UPDATE)) recordHookHandle(hook(update)
                     .setId(SERVER_BAR_LISTENER_UPDATE).intercept(this::dispatchServerBarListener));
             if (!present.contains(SERVER_BAR_START_CREATE)) recordHookHandle(hook(startConstructor)
@@ -244,9 +247,10 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     .setId(SERVER_BAR_STATE_CREATE).intercept(this::createServerBarStart));
             if (!present.contains(SERVER_BAR_STATE_RUN)) recordHookHandle(hook(stateRun)
                     .setId(SERVER_BAR_STATE_RUN).intercept(this::dispatchServerBarState));
-            for (int i = 0; i < stateCalls.length; i++) if (!present.contains(SERVER_BAR_STATE_PREFIX + stateMethods[i]))
-                recordHookHandle(hook(stateCalls[i]).setId(SERVER_BAR_STATE_PREFIX + stateMethods[i])
-                        .intercept(this::dispatchServerBarStateCall));
+            for (int i = 0; i < stateCalls.length; i++)
+                if (!present.contains(SERVER_BAR_STATE_PREFIX + stateMethods[i]))
+                    recordHookHandle(hook(stateCalls[i]).setId(SERVER_BAR_STATE_PREFIX + stateMethods[i])
+                            .intercept(this::dispatchServerBarStateCall));
             // Only these verified allocation sites create the fenced objects.
             Class<?> ease = Class.forName("miuix.animation.utils.EaseManager$EaseStyle", false, loader);
             boolean ready = deoptimize(controller.getDeclaredMethod("animateStatusBarTo", float.class, float.class, ease, ease));
@@ -269,9 +273,11 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             }
             // Native controller helpers are inlined into each other and the
             // verified bar implementation. Recompile neither while a lease owns writes.
-            for (Class<?> owner : new Class<?>[]{controller, impl}) for (Method method : owner.getDeclaredMethods())
-                if (!java.lang.reflect.Modifier.isAbstract(method.getModifiers())
-                        && !java.lang.reflect.Modifier.isNative(method.getModifiers())) ready &= deoptimize(method);
+            for (Class<?> owner : new Class<?>[]{controller, impl})
+                for (Method method : owner.getDeclaredMethods())
+                    if (!java.lang.reflect.Modifier.isAbstract(method.getModifiers())
+                            && !java.lang.reflect.Modifier.isNative(method.getModifiers()))
+                        ready &= deoptimize(method);
             serverBarLifetimeHooksReady = ready;
             Method systemReady = impl.getDeclaredMethod("systemReady",
                     Class.forName("com.android.server.wm.WindowManagerService", false, loader));
@@ -348,9 +354,11 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             if (permit == null) return null;
             ServerBarWindowBridge bridge = serverBarWindowBridge;
             String operation = chain.getExecutable().getName();
-            if (bridge != null) bridge.recordDecision(chain.getThisObject(), operation, "before", chain.getArgs());
+            if (bridge != null)
+                bridge.recordDecision(chain.getThisObject(), operation, "before", chain.getArgs());
             Object result = chain.proceed();
-            if (bridge != null) bridge.recordDecision(chain.getThisObject(), operation, "after", chain.getArgs());
+            if (bridge != null)
+                bridge.recordDecision(chain.getThisObject(), operation, "after", chain.getArgs());
             return result;
         }
     }
@@ -382,11 +390,13 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected void restoreServerBarOwnerAfterHotReload(ClassLoader loader) {
-        if (Build.VERSION.SDK_INT != 37 || !serverBarLifetimeHooksReady) return;
+        if (Build.VERSION.SDK_INT != Build.VERSION_CODES.CINNAMON_BUN || !serverBarLifetimeHooksReady)
+            return;
         try {
             Object instance = Class.forName("com.android.server.wm.BarFollowAnimationStub", false, loader)
                     .getMethod("getInstance").invoke(null);
-            if (readField(instance, "mContext") == null || readField(instance, "mWmService") == null) return;
+            if (readField(instance, "mContext") == null || readField(instance, "mWmService") == null)
+                return;
             installServerBarWindowBridge(instance);
             repairServerNavigationPolicy(instance);
         } catch (Throwable failure) {
@@ -413,7 +423,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             Object wms = readField(impl, "mWmService");
             Object display = readField(impl, "mDisplayContent");
             if (navigation == null || wms == null || display == null
-                    || !navigation.getClass().getName().equals("com.android.server.wm.MiuiNavigationBarController")) return;
+                    || !navigation.getClass().getName().equals("com.android.server.wm.MiuiNavigationBarController"))
+                return;
             Object lock = readField(wms, "mGlobalLock");
             android.os.Handler handler = (android.os.Handler) readField(wms, "mAnimationHandler");
             Method retire = impl.getClass().getDeclaredMethod("destroyMiuiNavigationBarController",
@@ -431,7 +442,8 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                         if (serverNavigationPolicyEpoch.get() != epoch
                                 || readField(impl, "mWmService") != wms
                                 || readField(impl, "mDisplayContent") != display
-                                || readField(impl, "mNavigationBarController") != navigation) return;
+                                || readField(impl, "mNavigationBarController") != navigation)
+                            return;
                         // Stock teardown restores the real NavigationBar in the WMS
                         // pending transaction and retires the obsolete controller on
                         // its own Handler. No module Surface/flag writes are needed.
@@ -462,7 +474,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                 if (failure == null) moduleLog(Log.INFO, TAG, message);
                 else moduleLog(Log.WARN, TAG, message, failure);
             });
-        } catch (Throwable failure) { moduleLog(Log.WARN, TAG, "WMS bar window bridge unavailable", failure); }
+        } catch (Throwable failure) {
+            moduleLog(Log.WARN, TAG, "WMS bar window bridge unavailable", failure);
+        }
     }
 
     protected boolean reserveServerBarReload() {
@@ -474,7 +488,10 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             return false;
         }
         serverNavigationPolicyEpoch.incrementAndGet();
-        if (bridge != null) { bridge.close(); serverBarWindowBridge = null; }
+        if (bridge != null) {
+            bridge.close();
+            serverBarWindowBridge = null;
+        }
         boolean retired = serverBarFollowLifecycle.reserveReload();
         boolean ready = false;
         try {
@@ -486,7 +503,9 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             long remainingMillis = Math.max(0L, java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                     deadline - System.nanoTime()));
             ready = retired && (bridge == null || bridge.awaitClose(remainingMillis));
-        } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
         if (!ready) {
             if (bridge != null) bridge.recoverAfterRejectedReload(() -> {
                 serverBarFollowLifecycle.cancelReloadReservation();
@@ -499,18 +518,23 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         }
         return ready;
     }
+
     protected Object[] saveServerBarRetiredOwners() {
         return new Object[]{serverBarFollowLifecycle.retiredControllers(), serverBarFollowLifecycle.retiredCallbacks()};
     }
+
     protected void restoreServerBarRetiredOwners(Object saved) {
         if (!(saved instanceof Object[])) return;
         Object[] state = (Object[]) saved;
         if (state.length <= 17 || !(state[17] instanceof Object[])) return;
         Object[] barState = (Object[]) state[17];
-        if (barState.length != 2 || !(barState[0] instanceof Object[]) || !(barState[1] instanceof Object[][])) return;
+        if (barState.length != 2 || !(barState[0] instanceof Object[]) || !(barState[1] instanceof Object[][]))
+            return;
         java.util.ArrayList<Object> owners = new java.util.ArrayList<>();
-        for (Object candidate : (Object[]) barState[0]) if (candidate != null
-                && candidate.getClass().getName().equals("com.android.server.wm.MiuiStatusBarController")) owners.add(candidate);
+        for (Object candidate : (Object[]) barState[0])
+            if (candidate != null
+                    && candidate.getClass().getName().equals("com.android.server.wm.MiuiStatusBarController"))
+                owners.add(candidate);
         serverBarFollowLifecycle.restoreRetiredControllers(owners.toArray());
         serverBarFollowLifecycle.restoreRetiredCallbacks((Object[][]) barState[1]);
     }
@@ -777,7 +801,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             Object application = ActivityThread.currentApplication();
             Context context = application instanceof Context ? (Context) application : null;
             if (context == null) {
-                    Object activityThread = activityThreadClass
+                Object activityThread = activityThreadClass
                         .getDeclaredMethod("currentActivityThread")
                         .invoke(null);
                 if (activityThread != null) {
@@ -2029,40 +2053,56 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
      */
     protected void hookSideTriggerExclusion(ClassLoader classLoader,
                                             Set<String> existingHookIds) {
-        if (Build.VERSION.SDK_INT < 37) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN) return;
         try {
             Class<?> displayContentClass = Class.forName(DISPLAY_CONTENT, false, classLoader);
             Method calculate = displayContentClass.getDeclaredMethod(
                     "calculateSystemGestureExclusion", Region.class, Region.class);
             Method update = displayContentClass.getDeclaredMethod(
                     "updateSystemGestureExclusion");
+            Method getDisplay = Class.forName("com.android.server.wm.RootWindowContainer", false,
+                    classLoader).getDeclaredMethod("getDisplayContent", int.class);
             Field frameLeft = displayContentClass.getDeclaredField("mSystemGestureFrameLeft");
             Field frameRight = displayContentClass.getDeclaredField("mSystemGestureFrameRight");
             Field displayId = displayContentClass.getDeclaredField("mDisplayId");
             if (calculate.getReturnType() != boolean.class
                     || update.getReturnType() != boolean.class
+                    || getDisplay.getReturnType() != displayContentClass
                     || frameLeft.getType() != Rect.class
                     || frameRight.getType() != Rect.class
                     || displayId.getType() != int.class) {
                 throw new IllegalStateException("Unexpected DisplayContent exclusion shape");
             }
             update.setAccessible(true);
+            getDisplay.setAccessible(true);
             frameLeft.setAccessible(true);
             frameRight.setAccessible(true);
             displayId.setAccessible(true);
             sideTriggerExclusionUpdateMethod = update;
+            sideTriggerDisplayContentMethod = getDisplay;
             sideTriggerFrameLeftField = frameLeft;
             sideTriggerFrameRightField = frameRight;
             sideTriggerDisplayIdField = displayId;
+            // Install/reload runs outside WMS's calculation lock. Never connect to remote
+            // preferences from calculateSystemGestureExclusion itself.
             ensureSideTriggerExclusionPreferences();
             if (!existingHookIds.contains(SERVER_SIDE_TRIGGER_EXCLUSION)) {
                 calculate.setAccessible(true);
                 recordHookHandle(hook(calculate)
                         .setId(SERVER_SIDE_TRIGGER_EXCLUSION)
                         .intercept(this::appendSideTriggerExclusion));
-                moduleLog(Log.INFO, TAG, "Hooked side trigger exclusion publication"
-                        + ", height=" + sideTriggerHeightPercent
-                        + "%, position=" + sideTriggerPositionPercent + "%");
+                moduleLog(Log.INFO, TAG, "Hooked side trigger exclusion publication");
+            }
+            // On hot reload there may be no layout or input until the user next touches an
+            // edge. Recover only the already-published local WMS binder, then refresh now.
+            Class<?> serviceManager = Class.forName("android.os.ServiceManager");
+            Object windowManager = serviceManager.getMethod("checkService", String.class)
+                    .invoke(null, "window");
+            Class<?> windowManagerClass = Class.forName(
+                    "com.android.server.wm.WindowManagerService", false, classLoader);
+            if (windowManagerClass.isInstance(windowManager)) {
+                bindSideTriggerExclusionWindowManager(windowManager);
+                requestSideTriggerExclusionRefresh("install/reload");
             }
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG,
@@ -2075,47 +2115,73 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         Object result = chain.proceed();
         Object displayContent = chain.getThisObject();
         try {
+            if (sideTriggerExclusionRetired || sideTriggerDisplayIdField == null) return result;
             if (sideTriggerExclusionWindowManager.get() == null) {
-                sideTriggerExclusionWindowManager = new WeakReference<>(
-                        readField(displayContent, "mWmService"));
+                bindSideTriggerExclusionWindowManager(readField(displayContent, "mWmService"));
             }
-            if (sideTriggerExclusionPreferences == null) {
-                // This runs on every layout pass under mGlobalLock; retry a failed remote
-                // preference connection occasionally rather than on each traversal.
-                long now = SystemClock.uptimeMillis();
-                if (now >= sideTriggerExclusionPreferenceRetryUptime) {
-                    sideTriggerExclusionPreferenceRetryUptime =
-                            now + SIDE_TRIGGER_PREFERENCE_RETRY_MS;
-                    ensureSideTriggerExclusionPreferences();
-                }
+            if (!sideTriggerPreferences.connected()
+                    && SystemClock.uptimeMillis() >= sideTriggerExclusionPreferenceRetryUptime) {
+                requestSideTriggerExclusionRefresh("preference retry");
             }
-            int heightPercent = sideTriggerHeightPercent;
-            int positionPercent = sideTriggerPositionPercent;
-            if (heightPercent == PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT
-                    && positionPercent
-                    == PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT) {
-                if (!sideTriggerPublishedStates.isEmpty()) {
-                    int displayId = sideTriggerDisplayIdField.getInt(displayContent);
-                    if (sideTriggerPublishedStates.remove(displayId) != null) {
-                        moduleLog(Log.INFO, TAG, "Restored native side trigger exclusion"
-                                + ", display=" + displayId);
+            synchronized (sideTriggerExclusionLifecycleLock) {
+                if (sideTriggerExclusionRetired) return result;
+                // Xiaomi's interceptGestureExclusion handles GestureStub windows only on display
+                // zero. Do not publish a launcher redirect policy on rear/external displays.
+                int displayId = sideTriggerDisplayIdField.getInt(displayContent);
+                if (displayId != 0) return result;
+                SideTriggerPreferences.Configuration configuration =
+                        sideTriggerPreferences.configuration();
+                int heightPercent = configuration.height;
+                int positionPercent = configuration.position;
+                if (heightPercent == PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT
+                        && positionPercent
+                        == PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT) {
+                    sideTriggerExclusionLimitLogged = false;
+                    if (!sideTriggerPublishedStates.isEmpty()) {
+                        if (sideTriggerPublishedStates.remove(displayId) != null) {
+                            moduleLog(Log.INFO, TAG, "Restored native side trigger exclusion"
+                                    + ", display=" + displayId);
+                        }
                     }
+                    return result;
                 }
-                return result;
+                // Xiaomi's interceptGestureExclusion widens these frames to the live GestureStub
+                // width during the traversal that just completed, so they cover the edge windows.
+                Rect left = (Rect) sideTriggerFrameLeftField.get(displayContent);
+                Rect right = (Rect) sideTriggerFrameRightField.get(displayContent);
+                // SystemUI uses raw display Y. An offset frame is not a proven matching geometry.
+                if ((left != null && left.top != 0) || (right != null && right.top != 0))
+                    return result;
+                Region restricted = (Region) chain.getArg(0);
+                Region unrestricted = (Region) chain.getArg(1);
+                Region additions = new Region();
+                int[] leftBand = appendOutsideSideTriggerBand(left, heightPercent, positionPercent,
+                        additions);
+                int[] rightBand = appendOutsideSideTriggerBand(right, heightPercent,
+                        positionPercent, additions);
+                if (additions.isEmpty()) {
+                    sideTriggerPublishedStates.remove(displayId);
+                    sideTriggerExclusionLimitLogged = false;
+                    return result;
+                }
+                if (!SideTriggerExclusionUpdate.apply(restricted, unrestricted, additions)) {
+                    // chain.proceed() already recomputed the original regions. Returning them
+                    // lets WMS replace any previously published module strips normally.
+                    sideTriggerPublishedStates.remove(displayId);
+                    if (!sideTriggerExclusionLimitLogged) {
+                        sideTriggerExclusionLimitLogged = true;
+                        moduleLog(Log.WARN, TAG, "Side trigger exclusion exceeds native rectangle limit"
+                                + ", display=" + displayId
+                                + ", limit=" + SideTriggerExclusionUpdate.MAX_RECTANGLES
+                                + "; keeping this traversal's native regions without truncation");
+                    }
+                    return result;
+                }
+                sideTriggerExclusionLimitLogged = false;
+                reportSideTriggerExclusion(sideTriggerDisplayIdField.getInt(displayContent),
+                        heightPercent, positionPercent, left, leftBand, right, rightBand);
+                sideTriggerExclusionFailureLogged = false;
             }
-            // Xiaomi's interceptGestureExclusion widens these frames to the live GestureStub
-            // width during the traversal that just completed, so they cover the edge windows.
-            Rect left = (Rect) sideTriggerFrameLeftField.get(displayContent);
-            Rect right = (Rect) sideTriggerFrameRightField.get(displayContent);
-            Region restricted = (Region) chain.getArg(0);
-            Region unrestricted = (Region) chain.getArg(1);
-            int[] leftBand = appendOutsideSideTriggerBand(left, heightPercent, positionPercent,
-                    restricted, unrestricted);
-            int[] rightBand = appendOutsideSideTriggerBand(right, heightPercent,
-                    positionPercent, restricted, unrestricted);
-            reportSideTriggerExclusion(sideTriggerDisplayIdField.getInt(displayContent),
-                    heightPercent, positionPercent, left, leftBand, right, rightBand);
-            sideTriggerExclusionFailureLogged = false;
         } catch (Throwable throwable) {
             if (!sideTriggerExclusionFailureLogged) {
                 sideTriggerExclusionFailureLogged = true;
@@ -2127,24 +2193,20 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
         return result;
     }
 
-    /** Returns the accepted band for this frame, or null when the frame stays native. */
+    /**
+     * Returns the accepted band for this frame, or null when the frame stays native.
+     */
     private static int[] appendOutsideSideTriggerBand(Rect frame, int heightPercent,
-                                                      int positionPercent, Region restricted,
-                                                      Region unrestricted) {
+                                                      int positionPercent, Region additions) {
         if (frame == null || frame.isEmpty()) return null;
-        int[] band = SideTriggerExclusionBand.resolve(frame.top, frame.bottom,
+        int[] band = SideGestureTriggerBand.resolve(frame.top, frame.bottom,
                 heightPercent, positionPercent);
         if (band == null) return null;
-        // The limit-free unrestricted copy must carry the same strips, otherwise a listener
-        // that prefers it whenever an app was clipped would lose the configured band.
-        for (Region region : new Region[]{restricted, unrestricted}) {
-            if (region == null) continue;
-            if (band[0] > frame.top) {
-                region.op(frame.left, frame.top, frame.right, band[0], Region.Op.UNION);
-            }
-            if (band[1] < frame.bottom) {
-                region.op(frame.left, band[1], frame.right, frame.bottom, Region.Op.UNION);
-            }
+        if (band[0] > frame.top) {
+            additions.op(frame.left, frame.top, frame.right, band[0], Region.Op.UNION);
+        }
+        if (band[1] < frame.bottom) {
+            additions.op(frame.left, band[1], frame.right, frame.bottom, Region.Op.UNION);
         }
         return band;
     }
@@ -2180,47 +2242,33 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     }
 
     protected void ensureSideTriggerExclusionPreferences() {
-        synchronized (sideTriggerExclusionPreferenceLock) {
-            if (sideTriggerExclusionPreferences != null) return;
-            try {
-                SharedPreferences preferences = getRemotePreferences(
-                        PredictiveBackPreferences.GROUP);
-                preferences.registerOnSharedPreferenceChangeListener(
-                        sideTriggerExclusionPreferenceListener);
-                sideTriggerExclusionPreferences = preferences;
-                readSideTriggerExclusionPreferences(preferences);
-                sideTriggerExclusionPreferenceFailureLogged = false;
-            } catch (Throwable throwable) {
-                if (!sideTriggerExclusionPreferenceFailureLogged) {
-                    sideTriggerExclusionPreferenceFailureLogged = true;
-                    moduleLog(Log.WARN, TAG,
-                            "Side trigger preferences unavailable; preserving native exclusion",
-                            throwable);
-                }
-            }
-        }
-    }
-
-    private void readSideTriggerExclusionPreferences(SharedPreferences preferences) {
-        sideTriggerHeightPercent = preferences.getInt(
-                PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
-                PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT);
-        sideTriggerPositionPercent = preferences.getInt(
-                PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
-                PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT);
+        if (sideTriggerExclusionRetired || sideTriggerPreferences.connected()) return;
+        sideTriggerExclusionPreferenceRetryUptime =
+                SystemClock.uptimeMillis() + SIDE_TRIGGER_PREFERENCE_RETRY_MS;
+        sideTriggerPreferences.connect();
     }
 
     protected void releaseSideTriggerExclusionPreferenceListener() {
-        synchronized (sideTriggerExclusionPreferenceLock) {
-            SharedPreferences preferences = sideTriggerExclusionPreferences;
-            sideTriggerExclusionPreferences = null;
-            if (preferences != null) {
-                try {
-                    preferences.unregisterOnSharedPreferenceChangeListener(
-                            sideTriggerExclusionPreferenceListener);
-                } catch (Throwable ignored) {
-                }
-            }
+        Handler handler;
+        synchronized (sideTriggerExclusionLifecycleLock) {
+            sideTriggerExclusionRetired = true;
+            handler = sideTriggerExclusionHandler;
+            sideTriggerExclusionHandler = null;
+            sideTriggerExclusionWindowManager = new WeakReference<>(null);
+            sideTriggerPublishedStates.clear();
+        }
+        sideTriggerPreferences.close();
+        if (handler != null) handler.removeCallbacksAndMessages(sideTriggerExclusionCallbackToken);
+        sideTriggerExclusionRefreshPending.set(false);
+    }
+
+    private void bindSideTriggerExclusionWindowManager(Object windowManager) throws Throwable {
+        if (windowManager == null) return;
+        Handler handler = (Handler) readField(windowManager, "mH");
+        synchronized (sideTriggerExclusionLifecycleLock) {
+            if (sideTriggerExclusionRetired) return;
+            sideTriggerExclusionHandler = handler;
+            sideTriggerExclusionWindowManager = new WeakReference<>(windowManager);
         }
     }
 
@@ -2232,40 +2280,50 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
     protected void requestSideTriggerExclusionRefresh(String reason) {
         Object windowManager = sideTriggerExclusionWindowManager.get();
         Method update = sideTriggerExclusionUpdateMethod;
-        if (windowManager == null || update == null) return;
+        Method getDisplay = sideTriggerDisplayContentMethod;
+        Handler handler = sideTriggerExclusionHandler;
+        if (sideTriggerExclusionRetired || windowManager == null || update == null || getDisplay == null
+                || handler == null || !sideTriggerExclusionRefreshPending.compareAndSet(false, true))
+            return;
         try {
-            Handler handler = (Handler) readField(windowManager, "mH");
             Object lock = readField(windowManager, "mGlobalLock");
             Object root = readField(windowManager, "mRoot");
-            Method forAllDisplays = root.getClass().getMethod(
-                    "forAllDisplays", Consumer.class);
-            forAllDisplays.setAccessible(true);
-            handler.post(() -> {
+            Runnable refresh = () -> {
+                sideTriggerExclusionRefreshPending.set(false);
+                if (sideTriggerExclusionRetired
+                        || sideTriggerExclusionWindowManager.get() != windowManager) return;
+                if (SystemClock.uptimeMillis() >= sideTriggerExclusionPreferenceRetryUptime) {
+                    ensureSideTriggerExclusionPreferences();
+                }
                 try {
-                    int[] displays = {0, 0};
+                    boolean dispatched;
                     synchronized (lock) {
-                        forAllDisplays.invoke(root, (Consumer<Object>) display -> {
-                            try {
-                                displays[0]++;
-                                if (Boolean.TRUE.equals(update.invoke(display))) displays[1]++;
-                            } catch (Throwable throwable) {
-                                moduleLog(Log.WARN, TAG,
-                                        "Failed to refresh side trigger exclusion"
-                                                + ", display=" + shortObject(display),
-                                        throwable);
-                            }
-                        });
+                        synchronized (sideTriggerExclusionLifecycleLock) {
+                            if (sideTriggerExclusionRetired
+                                    || sideTriggerExclusionWindowManager.get() != windowManager)
+                                return;
+                            Object display = getDisplay.invoke(root, 0);
+                            if (display == null) return;
+                            dispatched = Boolean.TRUE.equals(update.invoke(display));
+                        }
                     }
                     moduleLog(Log.INFO, TAG, "Refreshed side trigger exclusion"
                             + ", reason=" + reason
-                            + ", displays=" + displays[0]
-                            + ", dispatched=" + displays[1]);
+                            + ", display=0, dispatched=" + dispatched);
                 } catch (Throwable throwable) {
                     moduleLog(Log.WARN, TAG, "Failed to refresh side trigger exclusion"
                             + ", reason=" + reason, throwable);
                 }
-            });
+            };
+            // Closing the runtime invalidates in-flight work and removes queued callbacks.
+            synchronized (sideTriggerExclusionLifecycleLock) {
+                if (sideTriggerExclusionRetired || !handler.postAtTime(refresh,
+                        sideTriggerExclusionCallbackToken, SystemClock.uptimeMillis())) {
+                    sideTriggerExclusionRefreshPending.set(false);
+                }
+            }
         } catch (Throwable throwable) {
+            sideTriggerExclusionRefreshPending.set(false);
             moduleLog(Log.WARN, TAG, "Cannot schedule side trigger exclusion refresh"
                     + ", reason=" + reason, throwable);
         }

@@ -20,9 +20,12 @@ first immersive side gesture use the existing back pipeline, even if system bars
 during it. Changes apply to the next gesture without a restart.
 
 Side trigger area limits back gestures to a vertical band on both edges. Touches outside the
-band reach the application below. On Android 17, system_server publishes the rows outside the
-band as system gesture exclusion, so MiuiHome redirects those touches through its own native
-path instead of keeping them in the full-height edge windows.
+band reach the application below. On Android 17, system_server publishes the main display's
+rows outside the band as system gesture exclusion, so MiuiHome redirects those touches through
+its own native path instead of keeping them in the full-height edge windows. Pass-through
+restores touch delivery; application gestures still follow their own policies and window
+configuration. If adding the strips would exceed MiuiHome's 64-rectangle callback limit,
+the original application exclusion regions are preserved and the optional strips are skipped.
 
 The HyperOS back indicator has an optional Advanced material switch, off by default.
 It uses Xiaomi's system material APIs within the live indicator silhouette, keeps the arrow

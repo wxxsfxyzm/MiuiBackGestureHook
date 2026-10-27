@@ -1,12 +1,10 @@
 package dev.codex.miuibackgesturehook.hooks.hotreload;
 
-import dev.codex.miuibackgesturehook.hooks.core.MiuiHomePackages;
-
 import static dev.codex.miuibackgesturehook.hooks.googleapp.GoogleAppRuntime.GOOGLE_APP;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.annotation.SuppressLint;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -20,6 +18,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 
+import dev.codex.miuibackgesturehook.hooks.core.MiuiHomePackages;
 import dev.codex.miuibackgesturehook.hooks.googleapp.GoogleAppRuntime;
 import dev.codex.miuibackgesturehook.hooks.systemserver.SystemServerHookRuntime;
 import io.github.libxposed.api.XposedInterface;
@@ -837,13 +836,18 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         if (googleHooker != null) return googleHooker;
         if (hookId.startsWith(SERVER_BAR_STATE_PREFIX)) return this::dispatchServerBarStateCall;
         if (hookId.startsWith(SERVER_BAR_MUTATION_PREFIX)) return this::dispatchServerBarMutation;
-        if (hookId.startsWith(SERVER_BAR_CALLBACK_CREATE_PREFIX)) return this::createServerBarSynthetic;
-        if (hookId.startsWith(SERVER_BAR_CALLBACK_RUN_PREFIX)) return this::dispatchServerBarSynthetic;
+        if (hookId.startsWith(SERVER_BAR_CALLBACK_CREATE_PREFIX))
+            return this::createServerBarSynthetic;
+        if (hookId.startsWith(SERVER_BAR_CALLBACK_RUN_PREFIX))
+            return this::dispatchServerBarSynthetic;
         switch (hookId) {
-            case SERVER_BAR_BRIDGE_READY: return this::serverBarBridgeReady;
-            case SERVER_BAR_FEATURE: return this::serverBarOwnedFeature;
+            case SERVER_BAR_BRIDGE_READY:
+                return this::serverBarBridgeReady;
+            case SERVER_BAR_FEATURE:
+                return this::serverBarOwnedFeature;
             // Retired speculative routing override; restore native A16/A17 policy.
-            case SERVER_BAR_APPEARANCE_OWNER: return XposedInterface.Chain::proceed;
+            case SERVER_BAR_APPEARANCE_OWNER:
+                return XposedInterface.Chain::proceed;
             case "systemui_recents_bar_follow_prepare":
                 // Retired Hyper-only entry: the common entry now owns preparation.
                 return XposedInterface.Chain::proceed;
@@ -999,11 +1003,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             case SERVER_BAR_LISTENER_UPDATE:
                 return this::dispatchServerBarListener;
             case SERVER_BAR_START_CREATE:
+            case SERVER_BAR_STATE_CREATE:
                 return this::createServerBarStart;
             case SERVER_BAR_START_RUN:
                 return this::dispatchServerBarStart;
-            case SERVER_BAR_STATE_CREATE:
-                return this::createServerBarStart;
             case SERVER_BAR_STATE_RUN:
                 return this::dispatchServerBarState;
             case "server_back_window_start_animation":
@@ -1018,6 +1021,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::cleanupSkippedRemoteAnimationOnNavigationDone;
             case "server_return_home_touch_occlusion":
                 return this::allowCommittedReturnHomeTouchThrough;
+            case SERVER_SIDE_TRIGGER_EXCLUSION:
+                return this::appendSideTriggerExclusion;
             case "server_predictive_opt_in_metadata":
             case "predictive_opt_in_system_server":
                 return this::injectSelectedPredictiveBackMetadata;

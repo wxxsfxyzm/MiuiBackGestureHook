@@ -29,12 +29,20 @@ component, so launcher-owned settings do not become idle Home by package-name in
   decisions. SystemUI's monitor remains a spy until its pending DOWN exactly matches the
   launcher's accepted event identity, display, edge and arbiter generation.
 - On Android 17 the Side trigger area reaches MiuiHome only as system gesture exclusion:
-  system_server adds the side-frame rows outside the configured band to both the restricted and
-  unrestricted regions after the native calculation, outside the per-window exclusion limit.
+  system_server adds the main-display side-frame rows outside the configured band to both the
+  restricted and unrestricted regions after the native calculation, outside the per-window exclusion limit.
   MiuiHome keeps its edge windows and performs the redirect itself; SystemUI applies the same
   band with matching rounding. Immersive side swipes outside the band follow the same exclusion,
   so they reach the application without requesting transient bars. Default preferences leave the
-  native region untouched.
+  native region untouched. SystemUI and WMS share integer band boundaries and read height/position
+  from one preference snapshot. Remote preference connection/retries run outside the WMS global
+  lock; unreadable state restores native exclusion. Hot reload retires the listener and queued
+  refreshes, replaces the calculation hook, and refreshes the current local WMS owner immediately.
+  Optional strips are prepared on copies and published only when both resulting regions fit
+  MiuiHome's 64-rectangle callback limit. Rejected preparation leaves this traversal's native
+  output intact; never truncate app exclusions or reuse a previous module region. An originally
+  oversized native region retains Xiaomi's own behavior and is not repaired by this extension.
+  Pass-through changes delivery only; it does not override application gesture feature policies.
 - Existing admission uses an 8dp outward threshold with non-terminal direction qualification:
   outward motion at least half the absolute vertical motion. A vertical-leading sample can
   still qualify later. Callback progress uses display width, not the old fixed 220dp distance.
