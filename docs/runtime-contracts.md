@@ -92,6 +92,20 @@ component, so launcher-owned settings do not become idle Home by package-name in
 - Launcher OPEN uses a distinct native remote-animation owner. Availability is published only
   after its native state is current, and commands revalidate the same generation at commit.
   Missing/rejected commands receive only the existing one-BACK fallback; cancellation sends none.
+- Native Recents task reuse may display an expanding app while Home remains the top task.
+  Admit this interval only from a live Shell-owned controller/task/transition receipt for its
+  current App direction, independently of bar-follow preferences. Revalidate on Shell before
+  pilfer/start and null-navigation fallback; Home direction, target replacement, cleanup and
+  reload revoke opening admission. Only a successful native finish WCT placing that exact task
+  on top may hand an already accepted attempt to the same foreground task/token/component;
+  cancellation or a successor cannot authorize that handoff. Preserve matching accepted-DOWN.
+  A new LAUNCH_FROM_HOME OPEN may already have its app on top and finish with an empty WCT;
+  its exact opening participant/native App direction and successful finish callback replace
+  the pending-reorder proof, while the same final foreground identity checks still apply.
+- If that Recents OPEN ends while an admitted stream is held over a retained Activity stack,
+  wait for Shell idle, cancel only its exact null-navigation probe without BACK, then reuse
+  the accumulated-coordinate Shell start. A released, cancelled, replaced or stale attempt
+  cannot restart. Root-task OPEN retains its existing release behavior.
 - Preserve all four navigation families: callback, cross-Activity, cross-Task and return-to-Home.
   Restore backed registry/runner wiring before inventing animation code. Missing native objects
   or unreadable shape/state do not authorize guessed Surfaces or broad compatibility rules.

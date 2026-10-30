@@ -21,8 +21,9 @@ import io.github.libxposed.api.XposedInterface;
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
 import dev.codex.miuibackgesturehook.hooks.systemui.SystemUiInputRuntime;
+import dev.codex.miuibackgesturehook.hooks.systemui.RecentsOpenSession;
 
-/** OS4 recents visual adaptation. Never enables the incomplete native multi-bar mode. */
+/** OS4 Recents lifecycle and optional bar adaptation. Never enables native multi-bar mode. */
 public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     protected final java.util.concurrent.atomic.AtomicInteger systemUiDexResolutionInFlight =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -32,6 +33,9 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     protected static final String BAR_REUSE_BIND = "systemui_recents_bar_reuse_bind";
     protected static final String BAR_REUSE_DIRECTION = "systemui_recents_bar_reuse_direction";
     protected static final String BAR_REUSE_TARGETS = "systemui_recents_bar_reuse_appeared_targets";
+    protected static final String RECENTS_OPEN_FINISH = "systemui_recents_open_native_finish";
+    protected static final String RECENTS_OPEN_FINISH_START = "systemui_recents_open_native_finish_start";
+    protected static final String RECENTS_OPEN_FINISH_CONSUMED = "systemui_recents_open_native_finish_consumed";
     protected static final String BAR_FOLME_UPDATE = "systemui_bar_folme_update";
     protected static final String BAR_FOLME_COMPLETE = "systemui_bar_folme_complete";
     protected static final String BAR_FOLME_CANCEL = "systemui_bar_folme_cancel";
@@ -83,6 +87,12 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     private volatile boolean barHooksReady;
     private final Object barReuseLock = new Object();
     private RecentsBarReuseSession barReuseSession;
+    // Independent of bar preferences/callback delivery. Shell owns these task identities.
+    private volatile RecentsOpenSession recentsOpenSession;
+    private RecentsOpenSession recentsOpenGeneration;
+    private RecentsOpenSession.Attempt pendingRecentsOpenFinish;
+    private final Object recentsOpenLock = new Object();
+    private boolean recentsOpenHooksActive;
     private volatile boolean nativeBarWindowActive;
     private final RecentsBarFollowController recentsBars = new RecentsBarFollowController(
             (message, failure) -> {
@@ -204,6 +214,8 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
         direction.setAccessible(true);
         if (!present.contains(BAR_REUSE_DIRECTION)) recordHookHandle(hook(direction).setId(BAR_REUSE_DIRECTION)
                 .intercept(this::handoffRecentsBarReuse));
+        hookRecentsOpenFinish(loader, controller, present);
+        synchronized (recentsOpenLock) { recentsOpenHooksActive = true; }
         try { hookRecentsBarTargets(loader, controller, present); }
         catch (Throwable failure) {
             moduleLog(Log.WARN, TAG, "Recents accepted-target observation unavailable; preserving original task path", failure);
@@ -261,6 +273,50 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
             if (!present.contains(BAR_REUSE_TARGETS)) recordHookHandle(hook(method).setId(BAR_REUSE_TARGETS)
                     .intercept(this::observeRecentsBarTargets));
         } finally { systemUiDexResolutionInFlight.decrementAndGet(); }
+    }
+
+    private void hookRecentsOpenFinish(ClassLoader loader, Class<?> controller, Set<String> present)
+            throws Throwable {
+        Class<?> transitions = Class.forName("com.android.wm.shell.transition.Transitions", false, loader);
+        Class<?> pending = Class.forName(controller.getName() + "$PendingFinishTransitionHandler", false, loader);
+        if (pending.getDeclaredField("this$1").getType() != controller)
+            throw new NoSuchFieldException("Owned Recents finish handler");
+        Method start = requireExactDeclaredMethod(transitions, "startTransition", "android.os.IBinder",
+                "int", "android.window.WindowContainerTransaction",
+                "com.android.wm.shell.transition.Transitions$TransitionHandler");
+        Method consumed = requireExactDeclaredMethod(pending, "onTransitionConsumed", "void",
+                "android.os.IBinder", "boolean", "android.view.SurfaceControl$Transaction");
+        Method finish = requireExactDeclaredMethod(controller, "onFinishInner", "void",
+                "android.window.WindowContainerTransaction");
+        systemUiDexResolutionInFlight.incrementAndGet();
+        try (DexKitBridge dex = DexKitBridge.create(resolveBarFollowDexContainer(controller))) {
+            java.util.List<MethodData> matches = dex.findMethod(FindMethod.create().matcher(
+                    MethodMatcher.create().declaredClass(controller.getName()).name(finish.getName()).paramCount(1)));
+            if (matches.size() != 1) throw new NoSuchMethodException("Recents finish DEX identity");
+            MethodData target = matches.get(0);
+            boolean cleanup = false, callback = false;
+            for (MethodData invoked : target.getInvokes()) {
+                if (invoked.getDeclaredClassName().equals(controller.getName())
+                        && invoked.getName().equals("cleanUp")) cleanup = true;
+                if (invoked.getDeclaredClassName().equals(
+                        "com.android.wm.shell.transition.Transitions$TransitionFinishCallback")
+                        && invoked.getName().equals("onTransitionFinished")) callback = true;
+            }
+            if (!cleanup || !callback) throw new NoSuchMethodException("Recents finish no longer owns cleanup/callback");
+            for (MethodData caller : target.getCallers()) {
+                if (!deoptimize(caller.getMethodInstance(loader)))
+                    throw new IllegalStateException("Recents finish caller not deoptimized");
+                for (MethodData dispatcher : caller.getCallers())
+                    if (!deoptimize(dispatcher.getMethodInstance(loader)))
+                        throw new IllegalStateException("Recents finish dispatcher not deoptimized");
+            }
+        } finally { systemUiDexResolutionInFlight.decrementAndGet(); }
+        if (!present.contains(RECENTS_OPEN_FINISH)) recordHookHandle(hook(finish).setId(RECENTS_OPEN_FINISH)
+                .intercept(this::observeRecentsOpenFinish));
+        if (!present.contains(RECENTS_OPEN_FINISH_START)) recordHookHandle(hook(start).setId(RECENTS_OPEN_FINISH_START)
+                .intercept(this::observeRecentsOpenFinishStart));
+        if (!present.contains(RECENTS_OPEN_FINISH_CONSUMED)) recordHookHandle(hook(consumed).setId(RECENTS_OPEN_FINISH_CONSUMED)
+                .intercept(this::observeRecentsOpenFinishConsumed));
     }
 
     protected abstract String resolveBarFollowDexContainer(Class<?> target) throws Throwable;
@@ -348,19 +404,255 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     }
 
     private boolean liveBarReuseOwner(Object owner, Object controller, Object token) throws Throwable {
-        if (!nativeBarWindowActive || token == null
+        return nativeBarWindowActive && liveRecentsOpenOwner(owner, controller, token);
+    }
+
+    private boolean liveRecentsOpenOwner(Object owner, Object controller, Object token) throws Throwable {
+        return liveRecentsOpenOwner(owner, controller, token, false);
+    }
+
+    private boolean liveRecentsOpenOwner(Object owner, Object controller, Object token,
+            boolean finishing) throws Throwable {
+        if (token == null
                 || invokeAnyMethod(owner, "findController", new Object[]{token}) != controller
                 || !Integer.valueOf(0).equals(readField(controller, "mDisplayId"))
                 || readField(controller, "mFinishCB") == null || readField(controller, "mListener") == null
                 || !Boolean.FALSE.equals(readField(controller, "mAwaitingCancelCompletion"))
                 || !Boolean.FALSE.equals(readField(controller, "mKeyguardLocked"))
                 || readField(controller, "mTakeoverHandler") != null
-                || readField(controller, "mPendingFinishTransition") != null) return false;
+                || (!finishing && readField(controller, "mPendingFinishTransition") != null)) return false;
         return true;
+    }
+
+    private void bindRecentsOpen(Object owner, Object token, Object info) {
+        synchronized (recentsOpenLock) {
+            invalidateRecentsOpen();
+            if (!recentsOpenHooksActive) return;
+            try {
+                invokeAnyMethod(readField(owner, "mExecutor"), "assertCurrentThread", new Object[0]);
+                Object controller = invokeAnyMethod(owner, "findController", new Object[]{token});
+                if (controller == null || readField(controller, "mInfo") != info
+                        || !liveRecentsOpenOwner(owner, controller, token)) return;
+                Object task = singleBarReuseTask(controller);
+                if (task == null) return;
+                android.app.ActivityManager.RunningTaskInfo taskInfo =
+                        (android.app.ActivityManager.RunningTaskInfo) readField(task, "mTaskInfo");
+                Object taskToken = readField(task, "mToken");
+                if (taskToken == null || taskInfo.topActivity == null) return;
+                Object type = readField(controller, "mRemoteToRecentType");
+                Object opening = readField(controller, "mOpeningTasks");
+                boolean launchFromHome = type instanceof Enum
+                        && "LAUNCH_FROM_HOME".equals(((Enum<?>) type).name())
+                        && ((TransitionInfo) info).getType() == 1
+                        && opening instanceof java.util.List && ((java.util.List<?>) opening).contains(task);
+                recentsOpenSession = new RecentsOpenSession(owner, controller, token, info, task,
+                        taskInfo.taskId, taskToken, taskInfo.topActivity, launchFromHome);
+                recentsOpenGeneration = recentsOpenSession;
+                if (launchFromHome && Boolean.FALSE.equals(readField(controller, "mWillFinishToHome")))
+                    observeRecentsOpenDirection(controller, false);
+            } catch (Throwable failure) {
+                moduleLog(Log.WARN, TAG, "Native Recents OPEN binding unavailable", failure);
+            }
+        }
+    }
+
+    private void invalidateRecentsOpen() {
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession session = recentsOpenSession;
+            if (session != null) session.close();
+            recentsOpenAttempt = null;
+            recentsOpenSession = null;
+            recentsOpenGeneration = null;
+            pendingRecentsOpenFinish = null;
+        }
+    }
+
+    @Override
+    protected boolean isRecentsOpenCompletionCurrentOnOwner(RecentsOpenSession.Attempt attempt)
+            throws Throwable {
+        synchronized (recentsOpenLock) {
+            invokeAnyMethod(readField(attempt.session.owner, "mExecutor"), "assertCurrentThread", new Object[0]);
+            return recentsOpenHooksActive && attempt.isCompletedToApp()
+                    && recentsOpenGeneration == attempt.session;
+        }
+    }
+
+    protected Object observeRecentsOpenFinish(XposedInterface.Chain chain) throws Throwable {
+        RecentsOpenSession.Attempt attempt = null;
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession.Attempt current = recentsOpenAttempt;
+            try {
+                if (current != null && current.session.controller == chain.getThisObject()
+                        && isRecentsOpenAttemptCurrentOnOwner(current, true)
+                        && (finishesRecentsTaskToTop(chain.getArg(0), current.session.taskToken)
+                        || (chain.getArg(0) == null && current.hasPendingFinish(
+                        readField(chain.getThisObject(), "mPendingFinishTransition")))
+                        || (current.session.launchFromHome
+                        && readField(chain.getThisObject(), "mPendingFinishTransition") == null
+                        && (chain.getArg(0) == null || Boolean.TRUE.equals(
+                        invokeAnyMethod(chain.getArg(0), "isEmpty", new Object[0])))))) {
+                    attempt = current;
+                    pendingRecentsOpenFinish = current;
+                }
+            } catch (Throwable failure) {
+                moduleLog(Log.WARN, TAG, "Native Recents completion proof unavailable", failure);
+            }
+        }
+        Object result;
+        try { result = chain.proceed(); } // Native owns WCT submission, surfaces and cleanup.
+        catch (Throwable failure) {
+            synchronized (recentsOpenLock) {
+                if (attempt != null && recentsOpenGeneration == attempt.session) invalidateRecentsOpen();
+            }
+            throw failure;
+        }
+        RecentsOpenSession.Attempt completed = null;
+        synchronized (recentsOpenLock) {
+            if (attempt != null && pendingRecentsOpenFinish == attempt
+                    && recentsOpenGeneration == attempt.session && recentsOpenHooksActive) {
+                attempt.completedToApp();
+                completed = attempt;
+                pendingRecentsOpenFinish = null;
+                moduleLog(Log.INFO, TAG, "Native Recents OPEN completed to its original task"
+                        + ", task=" + attempt.session.taskId);
+            }
+        }
+        if (completed != null) {
+            RecentsOpenSession.Attempt receipt = completed;
+            try {
+                // Finish observers run inside transition consumption. Wait for Shell's
+                // real idle boundary before starting the next navigation; never poll.
+                Object transitions = readField(receipt.session.owner, "mTransitions");
+                invokeAnyMethod(transitions, "runOnIdle", new Object[]{(Runnable) () -> {
+                    try {
+                        if (isRecentsOpenCompletionCurrentOnOwner(receipt)) notifyRecentsOpenCompleted(receipt);
+                    } catch (Throwable failure) {
+                        moduleLog(Log.WARN, TAG, "Recents OPEN completion notification retired", failure);
+                    }
+                }});
+            } catch (Throwable failure) {
+                moduleLog(Log.WARN, TAG, "Recents OPEN idle progress handoff unavailable", failure);
+            }
+        }
+        return result;
+    }
+
+    private boolean finishesRecentsTaskToTop(Object transaction, Object token) throws Throwable {
+        if (transaction == null) return false;
+        Object operations = invokeAnyMethod(transaction, "getHierarchyOps", new Object[0]);
+        if (!(operations instanceof java.util.List)) return false;
+        Object binder = invokeAnyMethod(token, "asBinder", new Object[0]);
+        int matches = 0;
+        for (Object op : (java.util.List<?>) operations) {
+            Object reorder = readStaticField(op.getClass(), "HIERARCHY_OP_TYPE_REORDER");
+            if (!reorder.equals(invokeAnyMethod(op, "getType", new Object[0]))) continue;
+            Object container = invokeAnyMethod(op, "getContainer", new Object[0]);
+            boolean toTop = Boolean.TRUE.equals(invokeAnyMethod(op, "getToTop", new Object[0]));
+            if (binder.equals(container)) {
+                if (!toTop || ++matches != 1) return false;
+            } else if (toTop) return false;
+        }
+        return matches == 1;
+    }
+
+    protected Object observeRecentsOpenFinishStart(XposedInterface.Chain chain) throws Throwable {
+        RecentsOpenSession.Attempt attempt = null;
+        Object handler = chain.getArg(2);
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession.Attempt current = recentsOpenAttempt;
+            try {
+                if (current != null && handler != null
+                        && handler.getClass().getName().equals(
+                        current.session.controller.getClass().getName() + "$PendingFinishTransitionHandler")
+                        && readField(handler, "this$1") == current.session.controller
+                        && readField(current.session.owner, "mTransitions") == chain.getThisObject()
+                        && isRecentsOpenAttemptCurrentOnOwner(current)
+                        && finishesRecentsTaskToTop(chain.getArg(1), current.session.taskToken)) attempt = current;
+            } catch (Throwable failure) {
+                moduleLog(Log.WARN, TAG, "Native Recents pending finish proof unavailable", failure);
+            }
+        }
+        Object result = chain.proceed();
+        synchronized (recentsOpenLock) {
+            if (attempt != null && attempt == recentsOpenAttempt
+                    && attempt.session == recentsOpenGeneration && result instanceof IBinder
+                    && attempt.bindPendingFinish(handler, result))
+                moduleLog(Log.INFO, TAG, "Bound native Recents OPEN finish transaction"
+                        + ", task=" + attempt.session.taskId + ", token=" + shortObject(result));
+        }
+        return result;
+    }
+
+    protected Object observeRecentsOpenFinishConsumed(XposedInterface.Chain chain) throws Throwable {
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession.Attempt current = recentsOpenAttempt;
+            try {
+                if (current != null && readField(chain.getThisObject(), "this$1") == current.session.controller
+                        && (!current.matchesPendingFinish(chain.getThisObject(), chain.getArg(0))
+                        || Boolean.TRUE.equals(chain.getArg(1)))) invalidateRecentsOpen();
+            } catch (Throwable failure) {
+                invalidateRecentsOpen();
+                moduleLog(Log.WARN, TAG, "Native Recents finish consumption identity unavailable", failure);
+            }
+        }
+        return chain.proceed();
+    }
+
+    @Override
+    protected boolean isRecentsOpenAttemptCurrentOnOwner(RecentsOpenSession.Attempt attempt)
+            throws Throwable {
+        return isRecentsOpenAttemptCurrentOnOwner(attempt, false);
+    }
+
+    private boolean isRecentsOpenAttemptCurrentOnOwner(RecentsOpenSession.Attempt attempt,
+            boolean finishing) throws Throwable {
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession session = attempt.session;
+            invokeAnyMethod(readField(session.owner, "mExecutor"), "assertCurrentThread", new Object[0]);
+            if (!recentsOpenHooksActive || session != recentsOpenSession || attempt != recentsOpenAttempt
+                    || !attempt.isActive()
+                    || !liveRecentsOpenOwner(session.owner, session.controller, session.transition, finishing)
+                    || !Boolean.FALSE.equals(readField(session.controller, "mWillFinishToHome"))) return false;
+            Object closing = readField(session.controller, "mClosingTasks");
+            if (!(closing instanceof java.util.List) || !((java.util.List<?>) closing).isEmpty()) return false;
+            Object task = singleBarReuseTask(session.controller);
+            if (task == null) return false;
+            int id = ((android.app.ActivityManager.RunningTaskInfo) readField(task, "mTaskInfo")).taskId;
+            return attempt.matches(session.owner, session.controller,
+                    readField(session.controller, "mTransition"), readField(session.controller, "mInfo"), task, id);
+        }
+    }
+
+    private void observeRecentsOpenDirection(Object controller, boolean toHome) {
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession session = recentsOpenSession;
+            if (!recentsOpenHooksActive || session == null || session.controller != controller) return;
+            try {
+                invokeAnyMethod(readField(session.owner, "mExecutor"), "assertCurrentThread", new Object[0]);
+                if (toHome) {
+                    session.toHome();
+                    recentsOpenAttempt = null;
+                    return;
+                }
+                RecentsOpenSession.Attempt attempt = session.toApp();
+                recentsOpenAttempt = attempt;
+                if (attempt == null || !isRecentsOpenAttemptCurrentOnOwner(attempt)) {
+                    invalidateRecentsOpen();
+                    return;
+                }
+                moduleLog(Log.INFO, TAG, "Native Recents task-reuse OPEN active"
+                        + ", task=" + session.taskId + ", transition=" + shortObject(session.transition));
+            } catch (Throwable failure) {
+                invalidateRecentsOpen();
+                moduleLog(Log.WARN, TAG, "Native Recents OPEN direction unavailable", failure);
+            }
+        }
     }
 
     protected Object observeRecentsBarTargets(XposedInterface.Chain chain) throws Throwable {
         Object controller = chain.getThisObject();
+        if (recentsOpenSession != null && recentsOpenSession.controller == controller)
+            invalidateRecentsOpen();
         RecentsBarReuseSession session;
         Object update = null;
         RecentsBarNativeTarget captured = null;
@@ -479,6 +771,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
 
     protected Object handoffRecentsBarReuse(XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed(); // Xiaomi owns the direction; never override it.
+        observeRecentsOpenDirection(chain.getThisObject(), (Boolean) chain.getArg(0));
         synchronized (barReuseLock) {
             RecentsBarReuseSession session = barReuseSession;
             try {
@@ -1233,6 +1526,8 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
         try {
             Object result = chain.proceed();
             recentsBars.started(session, Boolean.TRUE.equals(result));
+            if (Boolean.TRUE.equals(result)) bindRecentsOpen(chain.getThisObject(),
+                    chain.getArg(0), chain.getArg(1));
             if (Boolean.TRUE.equals(result)) bindStartedRecentsBarReuse(chain.getThisObject(),
                     chain.getArg(0), chain.getArg(1));
             return result;
@@ -1243,6 +1538,16 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     }
 
     protected Object cleanupRecentsBarFollow(XposedInterface.Chain chain) throws Throwable {
+        synchronized (recentsOpenLock) {
+            RecentsOpenSession opening = recentsOpenSession;
+            if (opening != null && opening.controller == chain.getThisObject()) {
+                if (pendingRecentsOpenFinish != null && pendingRecentsOpenFinish.session == opening) {
+                    opening.close();
+                    recentsOpenSession = null;
+                    recentsOpenAttempt = null;
+                } else invalidateRecentsOpen();
+            }
+        }
         synchronized (barReuseLock) {
             if (barReuseSession != null && barReuseSession.controller == chain.getThisObject()) {
                 barReuseSession.close();
@@ -1406,6 +1711,10 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     }
 
     protected void detachRecentsBarFollow() {
+        synchronized (recentsOpenLock) {
+            recentsOpenHooksActive = false;
+            invalidateRecentsOpen();
+        }
         barFeatureState.suspend();
         barFollowRestartPending = false;
         barFollowClassLoader = null;
