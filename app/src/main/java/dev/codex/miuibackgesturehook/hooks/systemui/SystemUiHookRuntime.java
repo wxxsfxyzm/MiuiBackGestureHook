@@ -7082,6 +7082,10 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                     + ", drawerStateReady=" + drawerStateReady
                     + ", overviewStateReady=" + overviewStateReady
                     + ", editingStateReady=" + editingStateReady
+                    + ", xiaoaiStateReady=" + (nativeReply != null
+                            && nativeReply.getBooleanExtra("status_native_xiaoai_state_ready", false))
+                    + ", xiaoaiCandidates=" + (nativeReply == null ? 0
+                            : nativeReply.getIntExtra("status_native_xiaoai_candidates", 0))
                     + ", reason=" + reason);
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to publish module runtime status reply",

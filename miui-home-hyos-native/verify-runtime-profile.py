@@ -599,27 +599,63 @@ def decode_conditional_branch(
     return target if image.contains(target, 4, PF_R | PF_X) else None
 
 
+def is_bundle_string_wrapper(image: LoadedElf, helper: int) -> bool:
+    prefix = (
+        0xD101C3FF, 0xA9057BFD, 0xF90033F3, 0x910143FD,
+        0xAA0003F3, 0x9100A3E8, 0xAA0103E0, 0xAA0203E1, 0xAA0303E2,
+    )
+    if not image.contains(helper, 0x34, PF_R | PF_X):
+        return False
+    missing = decode_conditional_branch(image, helper + 0x30, 0)
+    return (
+        all(image.u32(helper + i * 4) == code for i, code in enumerate(prefix))
+        and call_targets(image, helper + 0x24, "Bundle_get_string")
+        and image.u32(helper + 0x28) == 0x3940A3E8
+        and image.u32(helper + 0x2C) == 0x7100051F
+        and missing is not None
+        and image.contains(missing, 8, PF_R | PF_X)
+        and image.u32(missing) == 0x92800008
+        and image.u32(missing + 4) == 0xF9000268
+    )
+
+
+def is_xiaoai_string_call(image: LoadedElf, call: int) -> bool:
+    key = decode_address_pair(image, call - 0x14, 1)
+    if (
+        image.u32(call - 8) == 0xAA1403E0
+        and image.u32(call - 4) == 0x52800122
+        and call_targets(image, call, "Bundle_get_string")
+        and key is not None
+        and image.contains(key, 9, PF_R, PF_W)
+        and image.image[key : key + 9] == b"type_from"
+    ):
+        return True
+    key = decode_address_pair(image, call - 0x14, 2)
+    helper = decode_bl(image, call)
+    return (
+        image.u32(call - 8) == 0xAA1403E1
+        and image.u32(call - 4) == 0x52800123
+        and key is not None
+        and image.contains(key, 9, PF_R, PF_W)
+        and image.image[key : key + 9] == b"type_from"
+        and image.u32(call - 0x0C) & 0xFFC003FF == 0xD10003A0
+        and helper is not None
+        and is_bundle_string_wrapper(image, helper)
+    )
+
+
 def resolve_xiaoai_visibility(image: LoadedElf) -> int:
     matches: list[int] = []
     for call in image.executable_offsets(0x28):
         if call < 0x14 or not image.contains(call - 0x14, 0x3C, PF_R | PF_X):
             continue
-        type_key = decode_address_pair(image, call - 0x14, 1)
-        if (
-            image.u32(call - 8) != 0xAA1403E0
-            or image.u32(call - 4) != 0x52800122
-            or not call_targets(image, call, "Bundle_get_string")
-            or type_key is None
-            or not image.contains(type_key, 9, PF_R, PF_W)
-            or image.image[type_key : type_key + 9] != b"type_from"
-        ):
+        if not is_xiaoai_string_call(image, call):
             continue
         local: list[int] = []
         for boolean_call in range(call + 4, call + 0x184, 4):
             if not image.contains(boolean_call - 0x10, 0x38, PF_R | PF_X):
                 break
             key = decode_address_pair(image, boolean_call - 0x10, 1)
-            state = decode_address_pair(image, boolean_call + 0x0C, 9)
             changed = decode_conditional_branch(image, boolean_call + 0x24, 1)
             if (
                 image.u32(boolean_call - 8) != 0xAA1403E0
@@ -630,17 +666,31 @@ def resolve_xiaoai_visibility(image: LoadedElf) -> int:
                 or image.image[key : key + 7] != b"isEnter"
                 or image.u32(boolean_call + 4) != 0x53082008
                 or image.u32(boolean_call + 8) != 0x7200001F
-                or state is None
-                or not image.contains(state, 1, PF_R | PF_W, PF_X)
-                or image.u32(boolean_call + 0x14) != 0x1A8813E8
-                or image.u32(boolean_call + 0x18) & 0xFFC003FF != 0x390003E8
-                or image.u32(boolean_call + 0x1C) != 0x08DFFD2A
-                or image.u32(boolean_call + 0x20) != 0x6B0A011F
                 or changed is None
-                or image.u32(changed) != 0x089FFD28
             ):
                 continue
-            local.append(boolean_call + 4)
+            state = decode_address_pair(image, boolean_call + 0x0C, 9)
+            legacy = (
+                state is not None
+                and image.contains(state, 1, PF_R | PF_W, PF_X)
+                and image.u32(boolean_call + 0x14) == 0x1A8813E8
+                and image.u32(boolean_call + 0x18) & 0xFFC003FF == 0x390003E8
+                and image.u32(boolean_call + 0x1C) == 0x08DFFD2A
+                and image.u32(boolean_call + 0x20) == 0x6B0A011F
+                and image.u32(changed) == 0x089FFD28
+            )
+            state = decode_address_pair(image, boolean_call + 0x10, 8)
+            wrapped = (
+                state is not None
+                and image.contains(state, 1, PF_R | PF_W, PF_X)
+                and image.u32(boolean_call + 0x0C) == 0x1A8813F7
+                and image.u32(boolean_call + 0x18) & 0xFFC003FF == 0x390003B7
+                and image.u32(boolean_call + 0x1C) == 0x08DFFD09
+                and image.u32(boolean_call + 0x20) == 0x6B0902FF
+                and image.u32(changed) == 0x089FFD17
+            )
+            if legacy or wrapped:
+                local.append(boolean_call + 4)
         if len(local) == 1:
             matches.append(local[0])
     if len(matches) != 1:

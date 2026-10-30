@@ -74,6 +74,10 @@ component, so launcher-owned settings do not become idle Home by package-name in
   A completed native Home publication can also end that owner's stale Overview observation.
 - State publication caches what was actually sent, including its owner/generation. An A -> B -> A
   update during a send still needs corrective A after B; do not mark unsent live state delivered.
+- XiaoAi visibility observes the exact native provider's `isEnter` decode. Resolve its
+  `type_from` read through either the direct import or a proven owned-string adapter,
+  and prove the matching boolean/state compare and release store. Missing or ambiguous
+  graphs disable only this observation; they never admit idle Home or bypass Shell callbacks.
 - NavigationBar/Taskbar lifecycle changes reconcile real and module-owned headless listeners;
   never forge lifecycle booleans or introduce another touchable shield.
 
