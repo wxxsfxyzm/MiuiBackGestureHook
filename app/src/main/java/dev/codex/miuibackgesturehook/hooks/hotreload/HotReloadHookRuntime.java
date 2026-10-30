@@ -859,6 +859,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::updateAppBarDrip;
             case BAR_VIEW_FACTORY:
                 return this::configureAppBarViewFactory;
+            case BAR_HOME_BOUND:
+                return this::homeBarBound;
             case BAR_DARK_STATE:
                 return this::provideAppBarDarkState;
             case BAR_APP_APPEARANCE:

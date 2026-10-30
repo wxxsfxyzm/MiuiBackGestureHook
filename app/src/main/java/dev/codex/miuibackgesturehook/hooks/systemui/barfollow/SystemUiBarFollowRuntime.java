@@ -42,6 +42,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     protected static final String BAR_VIEW_INIT = "systemui_app_bar_view_init";
     protected static final String BAR_VIEW_DRIP = "systemui_app_bar_view_drip";
     protected static final String BAR_VIEW_FACTORY = "systemui_app_bar_view_factory";
+    protected static final String BAR_HOME_BOUND = "systemui_app_bar_home_bound";
     protected static final String BAR_DARK_STATE = "systemui_app_bar_dark_state";
     protected static final String BAR_APP_APPEARANCE = "systemui_app_bar_window_appearance";
     protected static final String BAR_APP_TINT_ANIMATION = "systemui_app_bar_tint_animation";
@@ -62,6 +63,8 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     private boolean barFollowPreferenceFailureLogged;
     private final AppBarFeatureState barFeatureState = new AppBarFeatureState();
     private final android.os.Handler barPreferenceHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final AppBarStartupRecovery barStartupRecovery =
+            new AppBarStartupRecovery(barFeatureState, barPreferenceHandler::post);
     private ClassLoader barFollowClassLoader;
     private boolean barFollowRestartPending;
     private boolean appBarRetiring;
@@ -137,6 +140,10 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
                 moduleLog(Log.WARN, TAG, "App bar task event hooks unavailable", failure);
             }
             hookAppBarViewRole(loader, present);
+            try { hookHomeBarReady(loader, present); }
+            catch (Throwable failure) {
+                moduleLog(Log.WARN, TAG, "Home status-bar startup recovery unavailable; retaining existing activation", failure);
+            }
             hookBarFolmeProbe(loader, present);
             inspectNativeBarContentContracts(loader);
             barHooksReady = true;
@@ -536,6 +543,39 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
         }
     }
 
+    private void hookHomeBarReady(ClassLoader loader, Set<String> present) throws Throwable {
+        Class<?> binder = Class.forName(
+                "com.android.systemui.statusbar.pipeline.shared.ui.binder.HomeStatusBarViewBinderImpl",
+                false, loader);
+        Method bind = binder.getDeclaredMethod("bind",
+                Class.forName("com.android.systemui.statusbar.phone.PhoneStatusBarView", false, loader),
+                Class.forName("com.android.systemui.statusbar.pipeline.shared.ui.viewmodel.HomeStatusBarViewModel", false, loader),
+                Class.forName("kotlin.jvm.functions.Function1", false, loader),
+                Class.forName("kotlin.jvm.functions.Function1", false, loader));
+        if (bind.getReturnType() != void.class || !binder.getDeclaredField("mInjector").getType()
+                .getName().equals("com.android.systemui.statusbar.pipeline.shared.ui.binder.HomeStatusBarViewBinderInjector"))
+            throw new NoSuchMethodException("Native Home status-bar bind contract changed");
+        systemUiDexResolutionInFlight.incrementAndGet();
+        try {
+            ensureDexKitLibraryLoaded();
+            try (DexKitBridge dex = DexKitBridge.create(resolveBarFollowDexContainer(binder))) {
+                java.util.List<MethodData> matches = dex.findMethod(FindMethod.create().matcher(
+                        MethodMatcher.create().declaredClass(binder.getName()).name("bind").paramCount(4)));
+                if (matches.size() != 1 || !matches.get(0).getMethodInstance(loader).equals(bind))
+                    throw new NoSuchMethodException("Native Home bind DEX identity changed");
+                java.util.List<MethodData> callers = matches.get(0).getCallers();
+                if (callers.isEmpty()) throw new NoSuchMethodException("Native Home bind caller missing");
+                for (MethodData caller : callers) {
+                    if (!deoptimize(caller.getMethodInstance(loader)))
+                        throw new IllegalStateException("Native Home bind caller could not be deoptimized");
+                }
+            }
+        } finally { systemUiDexResolutionInFlight.decrementAndGet(); }
+        if (!present.contains(BAR_HOME_BOUND)) recordHookHandle(hook(bind).setId(BAR_HOME_BOUND)
+                .intercept(this::homeBarBound));
+        moduleLog(Log.INFO, TAG, "Native Home status-bar bind readiness hook ready");
+    }
+
     private void hookAppBarViewRole(ClassLoader loader, Set<String> present) throws ReflectiveOperationException {
         Class<?> light = Class.forName("com.android.systemui.statusbar.phone.LightBarControllerImpl", false, loader);
         Class<?> regionArray = java.lang.reflect.Array.newInstance(Class.forName(
@@ -744,6 +784,35 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
         long generation = barFeatureState.generation();
         ClassLoader loader = barFollowClassLoader;
         barPreferenceHandler.post(() -> runBarFolmeProbe(loader, generation));
+    }
+
+    protected Object homeBarBound(XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        // Native bind publishes mInjector and initializes its children before returning.
+        // Queue recovery after that call stack, never from an App/successor binder.
+        if (!barFeatureState.enabled() || !barPreferenceHandler.getLooper().isCurrentThread()) return result;
+        ClassLoader loader = barFollowClassLoader;
+        if (loader == null) return result;
+        try {
+            Object binder = chain.getThisObject();
+            Object injector = readField(binder, "mInjector");
+            Object view = chain.getArg(0);
+            if (AppBarContentPreparation.isCurrentHomeBinding(loader, binder, injector, view)) {
+                barStartupRecovery.homeReady(() -> {
+                    if (barFollowClassLoader != loader) return;
+                    try {
+                        if (!AppBarContentPreparation.isCurrentHomeBinding(loader, binder, injector, view)) return;
+                        moduleLog(Log.INFO, TAG, "Home status bar bound; reconciling status-bar following");
+                        reconcileBarFollowPreference();
+                    } catch (Throwable failure) {
+                        moduleLog(Log.WARN, TAG, "Home status-bar readiness unavailable; preserving native bars", failure);
+                    }
+                });
+            }
+        } catch (Throwable failure) {
+            moduleLog(Log.WARN, TAG, "Home status-bar readiness unavailable; preserving native bars", failure);
+        }
+        return result;
     }
 
     protected Object initializeAppBarView(XposedInterface.Chain chain) throws Throwable {

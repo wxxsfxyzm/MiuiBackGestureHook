@@ -119,6 +119,10 @@ component, so launcher-owned settings do not become idle Home by package-name in
   appearance across cancellation and target replacement. Experimental slide, indicator,
   haptic and material options keep their feature gates and native lifecycle; visual-only
   overlays are non-touchable and cannot select commit, change routing or force platform support.
+- Status-bar follow retries a missed startup after the native Home binder completes binding.
+  Recovery runs on the View owner, revalidates the exact current Home binder/injector/View,
+  and respects preference/reload generations and existing App-window retirement. It never
+  assumes readiness from elapsed time or replaces an active App window for a repeated bind.
 
 ## Circle to Search and Google features
 

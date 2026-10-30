@@ -75,18 +75,10 @@ final class AppBarContentPreparation implements AutoCloseable {
         java.util.Objects.requireNonNull(onFailure, "App content requires a failure owner");
         if (Class.forName("com.miui.utils.configs.MiuiConfigs", false, loader).getField("IS_PAD").getBoolean(null))
             throw new IllegalStateException("App View role initialization currently requires the native phone branch");
-        // Same native component route used by the existing A17 BackPanel factory.
-        Object dependency = Class.forName("com.android.systemui.Dependency", false, loader)
-                .getField("sDependency").get(null);
-        Object navigation = call(read(dependency, "mNavigationBarController"), "get");
-        Object component = read(read(navigation, "mNavigationBarComponentFactory"),
-                "referenceSysUIComponentImpl");
-        requireType(component, DAGGER + "ReferenceSysUIComponentImpl");
-        Object repository = call(read(component, "provideDisplayComponentRepositoryProvider"), "get");
-        Object display = call(repository, "get", new Class<?>[]{int.class}, 0);
-        requireType(display, DAGGER + "ReferenceSysUIDisplaySubcomponentImpl");
-        Object root = call(display, "getStatusBarRootFactory");
-        requireType(root, CONTENT + "composable.StatusBarRootFactory");
+        PrimaryHome home = new PrimaryHome(loader);
+        Object component = home.component;
+        Object display = home.display;
+        Object root = home.root;
         AppBarContentPreparation prepared = new AppBarContentPreparation(loader, component, display, root);
         // Publish ownership before any registration. A failed cleanup must stay
         // reachable by the runtime rather than disappear with a failed factory.
@@ -393,6 +385,39 @@ final class AppBarContentPreparation implements AutoCloseable {
         int id = primaryView.getResources().getIdentifier(name, type, "com.android.systemui");
         if (id == 0) throw new IllegalStateException("Missing native SystemUI resource: " + type + "/" + name);
         return id;
+    }
+
+    /** A bind return is relevant only while its exact Home binder, injector and View remain current. */
+    static boolean isCurrentHomeBinding(ClassLoader loader, Object binder, Object injector,
+                                        Object view) throws ReflectiveOperationException {
+        requireMain();
+        if (binder == null || injector == null || view == null) return false;
+        PrimaryHome home = new PrimaryHome(loader);
+        return read(home.root, "homeStatusBarViewBinder") == binder
+                && read(binder, "mInjector") == injector
+                && injector.getClass().getName().equals(CONTENT + "binder.HomeStatusBarViewBinderInjector")
+                && read(injector, "rootView") == view;
+    }
+
+    private static final class PrimaryHome {
+        final Object component;
+        final Object display;
+        final Object root;
+
+        PrimaryHome(ClassLoader loader) throws ReflectiveOperationException {
+            // Same native component route used by the existing A17 BackPanel factory.
+            Object dependency = Class.forName("com.android.systemui.Dependency", false, loader)
+                    .getField("sDependency").get(null);
+            Object navigation = call(read(dependency, "mNavigationBarController"), "get");
+            component = read(read(navigation, "mNavigationBarComponentFactory"),
+                    "referenceSysUIComponentImpl");
+            requireType(component, DAGGER + "ReferenceSysUIComponentImpl");
+            Object repository = call(read(component, "provideDisplayComponentRepositoryProvider"), "get");
+            display = call(repository, "get", new Class<?>[]{int.class}, 0);
+            requireType(display, DAGGER + "ReferenceSysUIDisplaySubcomponentImpl");
+            root = call(display, "getStatusBarRootFactory");
+            requireType(root, CONTENT + "composable.StatusBarRootFactory");
+        }
     }
 
     private AppBarContentPreparation(ClassLoader loader, Object component, Object display,
