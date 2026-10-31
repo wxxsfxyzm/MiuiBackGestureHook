@@ -99,7 +99,10 @@ component, so launcher-owned settings do not become idle Home by package-name in
   reload revoke opening admission. Only a successful native finish WCT placing that exact task
   on top may hand an already accepted attempt to the same foreground task/token/component;
   cancellation or a successor cannot authorize that handoff. Preserve matching accepted-DOWN.
-  A new LAUNCH_FROM_HOME OPEN may already have its app on top and finish with an empty WCT;
+  A new LAUNCH_FROM_HOME OPEN may already have its app on top and finish with an empty WCT
+  or one restoreTransientOrder operation for its exact closing fullscreen Home participant
+  with at most that Home's default or native closing-leaf do-not-PiP Change (all instance
+  fields equal to a reference built through the current framework API) and no other operation;
   its exact opening participant/native App direction and successful finish callback replace
   the pending-reorder proof, while the same final foreground identity checks still apply.
 - If that Recents OPEN ends while an admitted stream is held over a retained Activity stack,

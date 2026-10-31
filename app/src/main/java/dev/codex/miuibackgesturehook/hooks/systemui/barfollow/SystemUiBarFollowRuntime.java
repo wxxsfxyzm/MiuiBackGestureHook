@@ -91,6 +91,9 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     private volatile RecentsOpenSession recentsOpenSession;
     private RecentsOpenSession recentsOpenGeneration;
     private RecentsOpenSession.Attempt pendingRecentsOpenFinish;
+    private Object emptyRecentsFinishChange;
+    private Object doNotPipRecentsFinishChange;
+    private java.lang.reflect.Field[] recentsFinishChangeFields;
     private final Object recentsOpenLock = new Object();
     private boolean recentsOpenHooksActive;
     private volatile boolean nativeBarWindowActive;
@@ -490,7 +493,8 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
                         || (current.session.launchFromHome
                         && readField(chain.getThisObject(), "mPendingFinishTransition") == null
                         && (chain.getArg(0) == null || Boolean.TRUE.equals(
-                        invokeAnyMethod(chain.getArg(0), "isEmpty", new Object[0])))))) {
+                        invokeAnyMethod(chain.getArg(0), "isEmpty", new Object[0]))
+                        || finishesRecentsRestoringOnlyHome(chain.getArg(0), current.session))))) {
                     attempt = current;
                     pendingRecentsOpenFinish = current;
                 }
@@ -553,6 +557,91 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
             } else if (toTop) return false;
         }
         return matches == 1;
+    }
+
+    private boolean finishesRecentsRestoringOnlyHome(Object transaction, RecentsOpenSession session)
+            throws Throwable {
+        Object changes = invokeAnyMethod(transaction, "getChanges", new Object[0]);
+        Object operations = invokeAnyMethod(transaction, "getHierarchyOps", new Object[0]);
+        if (!(changes instanceof java.util.Map) || !(operations instanceof java.util.List)) return false;
+        java.util.Map<?, ?> changeMap = (java.util.Map<?, ?>) changes;
+        java.util.List<?> ops = (java.util.List<?>) operations;
+        if (ops.size() != 1) return false;
+        Object op = ops.get(0);
+        Object restore = readStaticField(op.getClass(), "HIERARCHY_OP_TYPE_RESTORE_TRANSIENT_ORDER");
+        if (!restore.equals(invokeAnyMethod(op, "getType", new Object[0]))) return false;
+        Object container = invokeAnyMethod(op, "getContainer", new Object[0]);
+        Object paused = readField(session.controller, "mPausingTasks");
+        if (!(paused instanceof java.util.List) || ((java.util.List<?>) paused).size() != 1) return false;
+        Object home = ((java.util.List<?>) paused).get(0);
+        Object homeInfo = readField(home, "mTaskInfo");
+        Object homeToken = readField(home, "mToken");
+        if (homeInfo == null || homeToken == null
+                || !Integer.valueOf(2).equals(invokeAnyMethod(homeInfo, "getActivityType", new Object[0]))
+                || !Integer.valueOf(0).equals(readField(homeInfo, "displayId"))
+                || !Integer.valueOf(1).equals(invokeAnyMethod(homeInfo, "getWindowingMode", new Object[0]))
+                || !matchesClosingHomeChange(session.controller, home, homeInfo)
+                || !invokeAnyMethod(homeToken, "asBinder", new Object[0]).equals(container)) return false;
+        if (!changeMap.isEmpty() && (changeMap.size() != 1
+                || !changeMap.containsKey(container)
+                || !isExpectedRecentsHomeFinishChange(changeMap.get(container), transaction, homeToken))) return false;
+        moduleLog(Log.INFO, TAG, "Verified native OPEN finish restoring only its closing Home"
+                + ", task=" + session.taskId + ", transition=" + shortObject(session.transition));
+        return true;
+    }
+
+    private boolean isExpectedRecentsHomeFinishChange(Object change, Object transaction, Object homeToken)
+            throws Throwable {
+        if (change == null || !change.getClass().getName().equals(
+                "android.window.WindowContainerTransaction$Change")) return false;
+        if (emptyRecentsFinishChange == null || emptyRecentsFinishChange.getClass() != change.getClass()) {
+            // Current framework's constructor creates only an inert default Change /
+            // Configuration. Compare every instance field, including Xiaomi additions,
+            // rather than trusting toString() or a subset of modification masks.
+            java.lang.reflect.Constructor<?> constructor = change.getClass().getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Object baseline = constructor.newInstance();
+            java.util.List<java.lang.reflect.Field> fields = new java.util.ArrayList<>();
+            for (Class<?> type = change.getClass(); type != Object.class; type = type.getSuperclass()) {
+                for (java.lang.reflect.Field field : type.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                    field.setAccessible(true);
+                    fields.add(field);
+                }
+            }
+            recentsFinishChangeFields = fields.toArray(new java.lang.reflect.Field[0]);
+            emptyRecentsFinishChange = baseline;
+            doNotPipRecentsFinishChange = null;
+        }
+        if (matchesRecentsFinishChange(change, emptyRecentsFinishChange)) return true;
+        if (doNotPipRecentsFinishChange == null) {
+            // Shell cleanUpPausingOrClosingTask marks its closing leaf Home do-not-PiP.
+            // Generate that exact shape through the current framework API, without
+            // submitting the reference transaction or mutating the native transaction.
+            java.lang.reflect.Constructor<?> constructor = transaction.getClass().getDeclaredConstructor();
+            constructor.setAccessible(true);
+            Object reference = constructor.newInstance();
+            invokeAnyMethod(reference, "setDoNotPip", new Object[]{homeToken});
+            Object changes = invokeAnyMethod(reference, "getChanges", new Object[0]);
+            if (!(changes instanceof java.util.Map)) return false;
+            Object expected = ((java.util.Map<?, ?>) changes).get(
+                    invokeAnyMethod(homeToken, "asBinder", new Object[0]));
+            if (expected == null || expected.getClass() != change.getClass()) return false;
+            doNotPipRecentsFinishChange = expected;
+        }
+        if (matchesRecentsFinishChange(change, doNotPipRecentsFinishChange)) {
+            moduleLog(Log.INFO, TAG, "Verified native closing Home do-not-PiP finish change");
+            return true;
+        }
+        moduleLog(Log.INFO, TAG, "Rejected unexpected native Home finish change");
+        return false;
+    }
+
+    private boolean matchesRecentsFinishChange(Object change, Object expected) throws IllegalAccessException {
+        for (java.lang.reflect.Field field : recentsFinishChangeFields) {
+            if (!java.util.Objects.deepEquals(field.get(change), field.get(expected))) return false;
+        }
+        return true;
     }
 
     protected Object observeRecentsOpenFinishStart(XposedInterface.Chain chain) throws Throwable {
