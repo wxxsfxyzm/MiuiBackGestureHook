@@ -27,8 +27,10 @@ final class GoogleAppLensRuntime {
     private static final String THUMBNAIL = "google_lens_screen_thumbnail_retention";
     private static final String ELIGIBILITY = "google_lens_aim_eligibility_bridge";
     private static final String HINT = "google_lens_aim_hint_bridge";
-    private static final String HINT_MARKER =
-            "updateAimCsbHintText should not be called when enableAimCsbHintText is false.";
+    private static final String[] HINT_MARKERS = {
+            "updateAimCsbHintText should not be called when enableAimCsbHintText is false.",
+            "updateAimCsbContextualHintText should not be called when enableAimCsbHintText is false."
+    };
     private final GoogleAppRuntime.Host host;
     private volatile SharedPreferences preferences;
     private volatile boolean preferenceFailureLogged;
@@ -80,13 +82,20 @@ final class GoogleAppLensRuntime {
     }
 
     private Targets resolveTargets(ClassLoader loader, DexKitBridge bridge, Method thumbnail) throws Throwable {
-        MethodDataList markers = bridge.findMethod(FindMethod.create().matcher(
-                MethodMatcher.create().paramCount(1).usingEqStrings(HINT_MARKER)));
+        // Google renamed the contextual-hint diagnostic. Accept either exact marker,
+        // deduplicating callbacks that contain both, and validate the same owner graph.
+        Map<String, MethodData> markers = new LinkedHashMap<>();
+        for (String text : HINT_MARKERS) {
+            for (MethodData candidate : bridge.findMethod(FindMethod.create().matcher(
+                    MethodMatcher.create().paramCount(1).usingEqStrings(text)))) {
+                markers.put(candidate.getDescriptor(), candidate);
+            }
+        }
         if (markers.size() != 1) {
             host.log(Log.WARN, "Ask Screen hint marker matches=" + markers.size());
             return null;
         }
-        MethodData marker = markers.get(0);
+        MethodData marker = markers.values().iterator().next();
         int accessors = 0, hints = 0, readers = 0, gates = 0, entries = 0;
         Map<String, Targets> matches = new LinkedHashMap<>();
         // The same callback selects Google's native AIM hint and invokes the model's
