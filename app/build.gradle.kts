@@ -69,7 +69,7 @@ android {
         minSdk = 36
         targetSdk = 37
         versionCode = gitVersionCode.get()
-        versionName = "0.12.7"
+        versionName = "0.12.8"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -144,6 +144,8 @@ dependencies {
     implementation(libs.compose.material.icons.extended)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.miuix.blur.android)
+    implementation(libs.miuix.glass.android)
+    implementation(libs.miuix.glass.icons.android)
     implementation(libs.miuix.icons.android)
     implementation(libs.miuix.preference.android)
     implementation(libs.miuix.ui.android)

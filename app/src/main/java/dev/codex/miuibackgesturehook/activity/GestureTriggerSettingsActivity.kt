@@ -7,7 +7,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,10 +21,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,15 +36,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import dev.codex.miuibackgesturehook.ModuleApplication
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
-import dev.codex.miuibackgesturehook.util.miuixBlurEffect
+import dev.codex.miuibackgesturehook.util.SettingsProgressiveAppBarSurface
 import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
 import kotlinx.coroutines.Dispatchers
@@ -54,15 +56,15 @@ import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.glass.GlassIconButton
+import top.yukonga.miuix.kmp.glass.GlassTopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.glass.ChevronBackward
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
@@ -153,6 +155,9 @@ private fun GestureTriggerSettingsScreen(
     }
     val writeMutex = remember(preferences) { Mutex() }
     val lazyListState = rememberLazyListState()
+    val isContentScrolled by remember(lazyListState) {
+        derivedStateOf { lazyListState.canScrollBackward }
+    }
     val scrollBehavior = MiuixScrollBehavior()
     val horizontalSafeInsets = WindowInsets.safeDrawing
         .only(WindowInsetsSides.Horizontal)
@@ -285,98 +290,111 @@ private fun GestureTriggerSettingsScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    modifier = Modifier
-                        .miuixBlurEffect(topBarBackdrop)
-                        .background(Color.Transparent),
-                    color = Color.Transparent,
-                    scrollBehavior = scrollBehavior,
-                    title = stringResource(R.string.gesture_trigger_title),
-                    navigationIcon = {
-                        IconButton(onClick = onClose) {
-                            Icon(
-                                imageVector = MiuixIcons.Regular.Back,
-                                contentDescription = stringResource(R.string.back),
-                            )
-                        }
-                    },
-                )
-            },
-        ) { paddingValues ->
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .consumeWindowInsets(paddingValues)
-                    .layerBackdrop(topBarBackdrop)
-                    .scrollEndHaptic()
-                    .overScrollVertical()
-                    .nestedScroll(scrollBehavior.nestedScrollConnection),
-                state = lazyListState,
-                contentPadding = PaddingValues(
-                    start = horizontalSafeInsets.calculateLeftPadding(
-                        LocalLayoutDirection.current,
-                    ),
-                    top = paddingValues.calculateTopPadding() + 8.dp,
-                    end = horizontalSafeInsets.calculateRightPadding(
-                        LocalLayoutDirection.current,
-                    ),
-                    bottom = paddingValues.calculateBottomPadding(),
-                ),
-                overscrollEffect = null,
-            ) {
-                item(key = "sliders") {
-                    GestureTriggerSliderCard(
-                        heightPercent = heightPercent,
-                        positionPercent = positionPercent,
-                        enabled = configurationEnabled,
-                        onHeightChange = { heightPercent = it },
-                        onHeightChangeFinished = {
-                            persistIntPreference(
-                                PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
-                                heightPercent,
-                                { heightPercent = it },
-                                { confirmedHeightPercent },
-                                { confirmedHeightPercent = it },
-                            )
+                SettingsProgressiveAppBarSurface(backdrop = topBarBackdrop) {
+                    GlassTopAppBar(
+                        backdrop = topBarBackdrop,
+                        isContentScrolled = isContentScrolled,
+                        backgroundAlpha = { 0f },
+                        scrollBehavior = scrollBehavior,
+                        title = stringResource(R.string.gesture_trigger_title),
+                        navigationIcon = {
+                            val layoutDirection = LocalLayoutDirection.current
+                            GlassIconButton(onClick = onClose) {
+                                Icon(
+                                    imageVector = MiuixIcons.Glass.ChevronBackward,
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .graphicsLayer {
+                                            if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                        },
+                                    tint = MiuixTheme.colorScheme.onSurface,
+                                    contentDescription = stringResource(R.string.back),
+                                )
+                            }
                         },
-                        onPositionChange = { positionPercent = it },
-                        onPositionChangeFinished = {
-                            persistIntPreference(
-                                PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
-                                positionPercent,
-                                { positionPercent = it },
-                                { confirmedPositionPercent },
-                                { confirmedPositionPercent = it },
-                            )
-                        },
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 8.dp),
                     )
                 }
-                item(key = "apply_note") {
-                    Card(
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 8.dp)
-                            .fillMaxWidth(),
-                        insideMargin = PaddingValues(16.dp),
-                    ) {
-                        Text(
-                            text = stringResource(R.string.gesture_trigger_apply_note),
-                            style = MiuixTheme.textStyles.body2,
-                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                        )
-                    }
-                }
-                if (statusMessage != null) {
-                    item(key = "status") {
-                        GestureTriggerStatusCard(
-                            status = statusMessage,
+            },
+        ) { paddingValues ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .layerBackdrop(topBarBackdrop),
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .consumeWindowInsets(paddingValues)
+                        .scrollEndHaptic()
+                        .overScrollVertical()
+                        .nestedScroll(scrollBehavior.nestedScrollConnection),
+                    state = lazyListState,
+                    contentPadding = PaddingValues(
+                        start = horizontalSafeInsets.calculateLeftPadding(
+                            LocalLayoutDirection.current,
+                        ),
+                        top = paddingValues.calculateTopPadding() + 8.dp,
+                        end = horizontalSafeInsets.calculateRightPadding(
+                            LocalLayoutDirection.current,
+                        ),
+                        bottom = paddingValues.calculateBottomPadding(),
+                    ),
+                    overscrollEffect = null,
+                ) {
+                    item(key = "sliders") {
+                        GestureTriggerSliderCard(
+                            heightPercent = heightPercent,
+                            positionPercent = positionPercent,
+                            enabled = configurationEnabled,
+                            onHeightChange = { heightPercent = it },
+                            onHeightChangeFinished = {
+                                persistIntPreference(
+                                    PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
+                                    heightPercent,
+                                    { heightPercent = it },
+                                    { confirmedHeightPercent },
+                                    { confirmedHeightPercent = it },
+                                )
+                            },
+                            onPositionChange = { positionPercent = it },
+                            onPositionChangeFinished = {
+                                persistIntPreference(
+                                    PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
+                                    positionPercent,
+                                    { positionPercent = it },
+                                    { confirmedPositionPercent },
+                                    { confirmedPositionPercent = it },
+                                )
+                            },
                             modifier = Modifier
                                 .padding(horizontal = 12.dp)
                                 .padding(bottom = 8.dp),
                         )
+                    }
+                    item(key = "apply_note") {
+                        Card(
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp)
+                                .padding(bottom = 8.dp)
+                                .fillMaxWidth(),
+                            insideMargin = PaddingValues(16.dp),
+                        ) {
+                            Text(
+                                text = stringResource(R.string.gesture_trigger_apply_note),
+                                style = MiuixTheme.textStyles.body2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            )
+                        }
+                    }
+                    if (statusMessage != null) {
+                        item(key = "status") {
+                            GestureTriggerStatusCard(
+                                status = statusMessage,
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .padding(bottom = 8.dp),
+                            )
+                        }
                     }
                 }
             }

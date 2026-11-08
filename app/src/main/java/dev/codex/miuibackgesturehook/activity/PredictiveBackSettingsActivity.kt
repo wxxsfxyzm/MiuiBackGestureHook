@@ -18,7 +18,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +45,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -69,7 +69,7 @@ import dev.codex.miuibackgesturehook.NativeHookStatusProtocol
 import dev.codex.miuibackgesturehook.NativeHookStatusUiState
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
-import dev.codex.miuibackgesturehook.util.miuixBlurEffect
+import dev.codex.miuibackgesturehook.util.SettingsProgressiveAppBarSurface
 import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
 import kotlinx.coroutines.Dispatchers
@@ -79,20 +79,20 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
-import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
+import top.yukonga.miuix.kmp.glass.GlassIconButton
+import top.yukonga.miuix.kmp.glass.GlassTopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.extended.Close
+import top.yukonga.miuix.kmp.icon.glass.Close
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
-import top.yukonga.miuix.kmp.preference.WindowSpinnerPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
@@ -567,6 +567,9 @@ private fun PredictiveBackSettingsScreen(
     }
     val writeMutex = remember(preferences) { Mutex() }
     val lazyListState = rememberLazyListState()
+    val isContentScrolled by remember(lazyListState) {
+        derivedStateOf { lazyListState.canScrollBackward }
+    }
     val scrollBehavior = MiuixScrollBehavior()
     val layoutDirection = LocalLayoutDirection.current
     val horizontalSafeInsets = WindowInsets.safeDrawing
@@ -898,135 +901,144 @@ private fun PredictiveBackSettingsScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                modifier = Modifier
-                    .miuixBlurEffect(topBarBackdrop)
-                    .background(Color.Transparent),
-                color = Color.Transparent,
-                scrollBehavior = scrollBehavior,
-                title = stringResource(R.string.predictive_back_title),
-                subtitle = "v${BuildConfig.VERSION_NAME}",
-                navigationIcon = {
-                    IconButton(onClick = onClose) {
-                        Icon(
-                            imageVector = MiuixIcons.Regular.Close,
-                            contentDescription = stringResource(R.string.back),
-                        )
-                    }
-                },
-            )
+            SettingsProgressiveAppBarSurface(backdrop = topBarBackdrop) {
+                GlassTopAppBar(
+                    backdrop = topBarBackdrop,
+                    isContentScrolled = isContentScrolled,
+                    backgroundAlpha = { 0f },
+                    scrollBehavior = scrollBehavior,
+                    title = stringResource(R.string.predictive_back_title),
+                    subtitle = "v${BuildConfig.VERSION_NAME}",
+                    navigationIcon = {
+                        GlassIconButton(onClick = onClose) {
+                            Icon(
+                                imageVector = MiuixIcons.Glass.Close,
+                                modifier = Modifier.size(24.dp),
+                                tint = MiuixTheme.colorScheme.onSurface,
+                                contentDescription = stringResource(R.string.back),
+                            )
+                        }
+                    },
+                )
+            }
         },
     ) { paddingValues ->
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .consumeWindowInsets(paddingValues)
-                .layerBackdrop(topBarBackdrop)
-                .scrollEndHaptic()
-                .overScrollVertical()
-                .nestedScroll(scrollBehavior.nestedScrollConnection),
-            state = lazyListState,
-            contentPadding = PaddingValues(
-                start = horizontalSafeInsets.calculateLeftPadding(layoutDirection),
-                top = paddingValues.calculateTopPadding() + 8.dp,
-                end = horizontalSafeInsets.calculateRightPadding(layoutDirection),
-                bottom = paddingValues.calculateBottomPadding(),
-            ),
-            overscrollEffect = null,
+                .layerBackdrop(topBarBackdrop),
         ) {
-            item(key = "native_hook_runtime_status") {
-                NativeHookRuntimeStatusCard(
-                    state = if (serviceStateObserved && service == null) {
-                        NativeHookStatusUiState(NativeHookStatusKind.LsPosedUnavailable)
-                    } else {
-                        nativeHookStatus
-                    },
-                    onRefresh = onRefreshNativeHookStatus,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp),
-                )
-            }
-            item(key = "side_gesture_title") {
-                SmallTitle(text = stringResource(R.string.side_gesture_group_title))
-            }
-            item(key = "side_gesture") {
-                SideGestureGroupCard(
-                    hyperOsIndicator = hyperOsIndicator,
-                    hyperOsIndicatorBlur = hyperOsIndicatorBlur,
-                    gestureHapticEffect = gestureHapticEffect,
-                    hyperOsHapticsEnhanced = hyperOsHapticsEnhanced,
-                    hyperOsSlideAnimation = hyperOsSlideAnimation,
-                    oneUiCrossTaskAnimation = oneUiCrossTaskAnimation,
-                    fullscreenDirectBack = fullscreenDirectBack,
-                    configurationEnabled = configurationEnabled,
-                    onHyperOsIndicatorToggle = persistHyperOsIndicator,
-                    onHyperOsIndicatorBlurToggle = persistHyperOsIndicatorBlur,
-                    onGestureHapticEffectChange = persistGestureHapticEffect,
-                    onHyperOsHapticsEnhancedToggle = persistHyperOsHapticsEnhanced,
-                    onHyperOsSlideAnimationToggle = persistHyperOsSlideAnimation,
-                    onOneUiCrossTaskAnimationToggle = persistOneUiCrossTaskAnimation,
-                    onFullscreenDirectBackToggle = persistFullscreenDirectBack,
-                    onOpenGestureTriggerSettings = onOpenGestureTriggerSettings,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp)
-                        .fillMaxWidth(),
-                )
-            }
-            item(key = "gesture_handle_title") {
-                SmallTitle(text = stringResource(R.string.gesture_handle_group_title))
-            }
-            item(key = "contextual_search") {
-                ContextualSearchNavigationCard(
-                    onClick = onOpenContextualSearchSettings,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp),
-                )
-            }
-            if (Build.VERSION.SDK_INT == 37) {
-                item(key = "status_bar_title") {
-                    SmallTitle(text = stringResource(R.string.status_bar_group_title))
-                }
-                item(key = "status_bar") {
-                    StatusBarGroupCard(
-                        enabled = restoreStatusBarFollow,
-                        configurationEnabled = configurationEnabled,
-                        onToggle = persistRestoreStatusBarFollow,
-                        modifier = Modifier
-                            .padding(horizontal = 12.dp)
-                            .padding(bottom = 12.dp),
-                    )
-                }
-            }
-            item(key = "app_list_navigation") {
-                AppListNavigationCard(
-                    onClick = onOpenAppList,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp),
-                )
-            }
-            item(key = "module_logging") {
-                ModuleLoggingCard(
-                    moduleLogging = moduleLogging,
-                    configurationEnabled = configurationEnabled,
-                    onModuleLoggingToggle = persistModuleLogging,
-                    modifier = Modifier
-                        .padding(horizontal = 12.dp)
-                        .padding(bottom = 8.dp),
-                )
-            }
-            if (statusMessage != null) {
-                item(key = "configuration_status") {
-                    StatusCard(
-                        message = statusMessage.text,
-                        severity = statusMessage.severity,
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .consumeWindowInsets(paddingValues)
+                    .scrollEndHaptic()
+                    .overScrollVertical()
+                    .nestedScroll(scrollBehavior.nestedScrollConnection),
+                state = lazyListState,
+                contentPadding = PaddingValues(
+                    start = horizontalSafeInsets.calculateLeftPadding(layoutDirection),
+                    top = paddingValues.calculateTopPadding() + 8.dp,
+                    end = horizontalSafeInsets.calculateRightPadding(layoutDirection),
+                    bottom = paddingValues.calculateBottomPadding(),
+                ),
+                overscrollEffect = null,
+            ) {
+                item(key = "native_hook_runtime_status") {
+                    NativeHookRuntimeStatusCard(
+                        state = if (serviceStateObserved && service == null) {
+                            NativeHookStatusUiState(NativeHookStatusKind.LsPosedUnavailable)
+                        } else {
+                            nativeHookStatus
+                        },
+                        onRefresh = onRefreshNativeHookStatus,
                         modifier = Modifier
                             .padding(horizontal = 12.dp)
                             .padding(bottom = 8.dp),
                     )
+                }
+                item(key = "side_gesture_title") {
+                    SmallTitle(text = stringResource(R.string.side_gesture_group_title))
+                }
+                item(key = "side_gesture") {
+                    SideGestureGroupCard(
+                        hyperOsIndicator = hyperOsIndicator,
+                        hyperOsIndicatorBlur = hyperOsIndicatorBlur,
+                        gestureHapticEffect = gestureHapticEffect,
+                        hyperOsHapticsEnhanced = hyperOsHapticsEnhanced,
+                        hyperOsSlideAnimation = hyperOsSlideAnimation,
+                        oneUiCrossTaskAnimation = oneUiCrossTaskAnimation,
+                        fullscreenDirectBack = fullscreenDirectBack,
+                        configurationEnabled = configurationEnabled,
+                        onHyperOsIndicatorToggle = persistHyperOsIndicator,
+                        onHyperOsIndicatorBlurToggle = persistHyperOsIndicatorBlur,
+                        onGestureHapticEffectChange = persistGestureHapticEffect,
+                        onHyperOsHapticsEnhancedToggle = persistHyperOsHapticsEnhanced,
+                        onHyperOsSlideAnimationToggle = persistHyperOsSlideAnimation,
+                        onOneUiCrossTaskAnimationToggle = persistOneUiCrossTaskAnimation,
+                        onFullscreenDirectBackToggle = persistFullscreenDirectBack,
+                        onOpenGestureTriggerSettings = onOpenGestureTriggerSettings,
+                        backdrop = topBarBackdrop,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp)
+                            .fillMaxWidth(),
+                    )
+                }
+                item(key = "gesture_handle_title") {
+                    SmallTitle(text = stringResource(R.string.gesture_handle_group_title))
+                }
+                item(key = "contextual_search") {
+                    ContextualSearchNavigationCard(
+                        onClick = onOpenContextualSearchSettings,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp),
+                    )
+                }
+                if (Build.VERSION.SDK_INT == 37) {
+                    item(key = "status_bar_title") {
+                        SmallTitle(text = stringResource(R.string.status_bar_group_title))
+                    }
+                    item(key = "status_bar") {
+                        StatusBarGroupCard(
+                            enabled = restoreStatusBarFollow,
+                            configurationEnabled = configurationEnabled,
+                            onToggle = persistRestoreStatusBarFollow,
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp)
+                                .padding(bottom = 12.dp),
+                        )
+                    }
+                }
+                item(key = "app_list_navigation") {
+                    AppListNavigationCard(
+                        onClick = onOpenAppList,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp),
+                    )
+                }
+                item(key = "module_logging") {
+                    ModuleLoggingCard(
+                        moduleLogging = moduleLogging,
+                        configurationEnabled = configurationEnabled,
+                        onModuleLoggingToggle = persistModuleLogging,
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp)
+                            .padding(bottom = 8.dp),
+                    )
+                }
+                if (statusMessage != null) {
+                    item(key = "configuration_status") {
+                        StatusCard(
+                            message = statusMessage.text,
+                            severity = statusMessage.severity,
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp)
+                                .padding(bottom = 8.dp),
+                        )
+                    }
                 }
             }
         }
@@ -1079,6 +1091,7 @@ private fun SideGestureGroupCard(
     onOneUiCrossTaskAnimationToggle: (Boolean) -> Unit,
     onFullscreenDirectBackToggle: (Boolean) -> Unit,
     onOpenGestureTriggerSettings: () -> Unit,
+    backdrop: Backdrop,
     modifier: Modifier = Modifier,
 ) {
     val hyperOsHaptics = gestureHapticEffect == PredictiveBackPreferences.GESTURE_HAPTIC_HYPEROS
@@ -1086,16 +1099,11 @@ private fun SideGestureGroupCard(
         modifier = modifier,
         insideMargin = PaddingValues(0.dp),
     ) {
-        WindowSpinnerPreference(
+        GlassDropdownPreference(
+            backdrop = backdrop,
             items = listOf(
-                DropdownItem(
-                    text = stringResource(R.string.back_indicator_style_aosp),
-                    summary = stringResource(R.string.back_indicator_style_aosp_summary),
-                ),
-                DropdownItem(
-                    text = stringResource(R.string.back_indicator_style_hyperos),
-                    summary = stringResource(R.string.back_indicator_style_hyperos_summary),
-                ),
+                stringResource(R.string.back_indicator_style_aosp),
+                stringResource(R.string.back_indicator_style_hyperos),
             ),
             selectedIndex = if (hyperOsIndicator) 1 else 0,
             title = stringResource(R.string.back_indicator_style_title),
@@ -1120,20 +1128,12 @@ private fun SideGestureGroupCard(
                 onCheckedChange = onHyperOsIndicatorBlurToggle,
             )
         }
-        WindowSpinnerPreference(
+        GlassDropdownPreference(
+            backdrop = backdrop,
             items = listOf(
-                DropdownItem(
-                    text = stringResource(R.string.haptic_feedback_effect_aosp),
-                    summary = stringResource(R.string.haptic_feedback_effect_aosp_summary),
-                ),
-                DropdownItem(
-                    text = stringResource(R.string.haptic_feedback_effect_hyperos),
-                    summary = stringResource(R.string.haptic_feedback_effect_hyperos_summary),
-                ),
-                DropdownItem(
-                    text = stringResource(R.string.haptic_feedback_effect_disabled),
-                    summary = stringResource(R.string.haptic_feedback_effect_disabled_summary),
-                ),
+                stringResource(R.string.haptic_feedback_effect_aosp),
+                stringResource(R.string.haptic_feedback_effect_hyperos),
+                stringResource(R.string.haptic_feedback_effect_disabled),
             ),
             selectedIndex = gestureHapticEffect,
             title = stringResource(R.string.haptic_feedback_effect_title),
@@ -1179,16 +1179,11 @@ private fun SideGestureGroupCard(
             summary = stringResource(R.string.gesture_trigger_entry_summary),
             onClick = onOpenGestureTriggerSettings,
         )
-        WindowSpinnerPreference(
+        GlassDropdownPreference(
+            backdrop = backdrop,
             items = listOf(
-                DropdownItem(
-                    text = stringResource(R.string.fullscreen_back_show_bars),
-                    summary = stringResource(R.string.fullscreen_back_show_bars_summary),
-                ),
-                DropdownItem(
-                    text = stringResource(R.string.fullscreen_back_direct),
-                    summary = stringResource(R.string.fullscreen_back_direct_summary),
-                ),
+                stringResource(R.string.fullscreen_back_show_bars),
+                stringResource(R.string.fullscreen_back_direct),
             ),
             selectedIndex = if (fullscreenDirectBack) 1 else 0,
             title = stringResource(R.string.fullscreen_back_behavior_title),
