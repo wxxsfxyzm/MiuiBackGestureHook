@@ -192,6 +192,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         unregisterMiuiHomeInputArbiterReceiver();
         releaseMiuiHomeGestureTriggerPreferenceListener();
         releaseSideTriggerExclusionPreferenceListener();
+        releaseGestureTriggerAreaPreferenceListener();
+        releaseModuleLoggingPreferenceListener();
         Object[][] inputState = new Object[nativeInputMonitors.size()][2];
         int index = 0;
         for (Map.Entry<Object, NativeBackInputMonitor> entry
@@ -263,6 +265,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                             + ", oldHooksRemoved=" + unhooked);
             return;
         }
+        // onModuleLoaded is not replayed for this generation.
+        initializeModuleLoggingPreference();
         int replaced = 0;
         Set<String> oldHookIds = new java.util.HashSet<>();
         boolean hadServerHook = false;

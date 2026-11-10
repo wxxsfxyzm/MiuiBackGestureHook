@@ -19,6 +19,7 @@ keystore/
 app/build/
 logs/
 reports/
+docs/plans/
 out/
 
 # Local-only Xiaomi/vendor references and reverse-engineering outputs.

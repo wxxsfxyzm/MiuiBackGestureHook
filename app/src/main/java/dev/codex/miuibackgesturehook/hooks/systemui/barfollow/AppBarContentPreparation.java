@@ -8,7 +8,8 @@ import android.widget.FrameLayout;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
+
+import dev.codex.miuibackgesturehook.hooks.core.ReflectionCache;
 
 /**
  * Allocates the private portion of an A17 App-bar content graph through native
@@ -603,8 +604,9 @@ final class AppBarContentPreparation implements AutoCloseable {
 
     boolean isClosed() { return closed; }
 
-    void observeAppearance(java.util.function.BiConsumer<String, Throwable> log) throws ReflectiveOperationException {
-        modeBinding.observeAppearance(log);
+    void observeAppearance(java.util.function.BooleanSupplier enabled,
+                           java.util.function.BiConsumer<String, Throwable> log) throws ReflectiveOperationException {
+        modeBinding.observeAppearance(enabled, log);
     }
 
     String appearanceDiagnostic() throws ReflectiveOperationException {
@@ -664,27 +666,32 @@ final class AppBarContentPreparation implements AutoCloseable {
             throw new IllegalStateException("Missing exact native content type: " + name);
     }
 
+    // Shared by the status-bar bindings; lookups keep their original exact-class and
+    // public-method semantics, only resolution is cached.
+    private static final ReflectionCache REFLECTION = new ReflectionCache(null);
+    private static final Class<?>[] NO_TYPES = new Class<?>[0];
+
+    /** Field declared on exactly {@code owner.getClass()}. */
     static Object read(Object owner, String name) throws ReflectiveOperationException {
-        Field field = owner.getClass().getDeclaredField(name);
-        field.setAccessible(true);
-        return field.get(owner);
+        return REFLECTION.declaredField(owner.getClass(), name).get(owner);
+    }
+
+    /** Field declared on the owner's class or the nearest superclass declaring it. */
+    static Object readInherited(Object owner, String name) throws ReflectiveOperationException {
+        return REFLECTION.field(owner.getClass(), name).get(owner);
     }
 
     static void write(Object owner, String name, Object value) throws ReflectiveOperationException {
-        Field field = owner.getClass().getDeclaredField(name);
-        field.setAccessible(true);
-        field.set(owner, value);
+        REFLECTION.declaredField(owner.getClass(), name).set(owner, value);
     }
 
     static Object call(Object owner, String name) throws ReflectiveOperationException {
-        return call(owner, name, new Class<?>[0]);
+        return call(owner, name, NO_TYPES);
     }
 
     static Object call(Object owner, String name, Class<?>[] types, Object... args)
             throws ReflectiveOperationException {
-        Method method = owner.getClass().getMethod(name, types);
-        method.setAccessible(true);
-        return method.invoke(owner, args);
+        return REFLECTION.exactMethod(owner.getClass(), name, types).invoke(owner, args);
     }
 
     private static void requireMain() {

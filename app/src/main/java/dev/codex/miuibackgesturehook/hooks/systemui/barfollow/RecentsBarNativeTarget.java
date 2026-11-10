@@ -6,7 +6,6 @@ import android.os.IInterface;
 import android.view.SurfaceControl;
 import android.window.TransitionInfo;
 
-import java.lang.reflect.Field;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -171,14 +170,7 @@ final class RecentsBarNativeTarget {
 
     private static boolean valid(SurfaceControl surface) { return surface != null && surface.isValid(); }
     private static Object read(Object owner, String name) throws ReflectiveOperationException {
-        for (Class<?> type = owner.getClass(); type != null; type = type.getSuperclass()) {
-            try {
-                Field field = type.getDeclaredField(name);
-                field.setAccessible(true);
-                return field.get(owner);
-            } catch (NoSuchFieldException absent) { }
-        }
-        throw new NoSuchFieldException(owner.getClass().getName() + "." + name);
+        return AppBarContentPreparation.readInherited(owner, name);
     }
     private static boolean same(SurfaceControl first, SurfaceControl second) throws ReflectiveOperationException {
         return valid(first) && valid(second) && (first == second || Boolean.TRUE.equals(call(first,

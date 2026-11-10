@@ -53,6 +53,16 @@ hook fingerprints remain fail-closed.
 
 ## Build
 
+Local prerequisites:
+
+- A locally rebuilt 16 KB LSPlt AAR at
+  `../LSPlt/build-android-arm64-v8a-16kb/lsplt-standalone-2.1-16kb.aar`. Builds fail
+  before compiling without it; Gradle sync and configuration-only tasks still work.
+- The miuix snapshot resolves from GitHub Packages, which requires `gpr.user` and
+  `gpr.key` (a token with `read:packages`) in `~/.gradle/gradle.properties`, or
+  `GITHUB_ACTOR`/`GITHUB_TOKEN`. To build against a local miuix checkout instead, pass
+  `-PmiuixSourceDir=<path>` (or set `miuixSourceDir` in `~/.gradle/gradle.properties`).
+
 Build the LSPosed release APK:
 
 Linux/macOS:

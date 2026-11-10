@@ -12,7 +12,6 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.SystemClock;
 import android.util.Log;
-import android.util.Pair;
 import android.util.SparseArray;
 import android.view.IRemoteAnimationFinishedCallback;
 import android.view.IRemoteAnimationRunner;
@@ -28,9 +27,7 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -484,14 +481,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected final List<XposedInterface.HookHandle> hookHandles = new ArrayList<>();
     protected final ConcurrentHashMap<Object, OpenTransitionSnapshot> runningOpenTransitions =
             new ConcurrentHashMap<>();
-    protected final ConcurrentHashMap<Pair<Class<?>, String>, Field> reflectedFields =
-            new ConcurrentHashMap<>();
-    protected final ConcurrentHashMap<Pair<Class<?>, String>, Method> reflectedAnyMethods =
-            new ConcurrentHashMap<>();
-    protected final ConcurrentHashMap<Pair<Class<?>, String>, Method> reflectedExactMethods =
-            new ConcurrentHashMap<>();
-    protected final Set<Pair<Class<?>, String>> missingReflectedMembers =
-            ConcurrentHashMap.newKeySet();
+    private final ReflectionCache reflectionCache =
+            new ReflectionCache(this::logAmbiguousReflectedMethod);
     protected final Object legacyBackGuardLock = new Object();
     protected final AtomicLong legacyBackAttemptIds = new AtomicLong();
     protected final AtomicLong openSnapshotGeneration = new AtomicLong();
@@ -575,12 +566,12 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile String pendingMiuiHomeReturnHomeReason;
     protected volatile boolean miuiHomeSystemUiInputArbiterReady;
     protected volatile long miuiHomeSystemUiInputArbiterGeneration;
-    protected volatile SharedPreferences predictiveBackPreferences;
     protected volatile boolean predictiveBackPreferencesFailureLogged;
     protected volatile boolean predictiveBackApplicationMetadataFailureLogged;
     protected volatile boolean moduleLoggingEnabled =
             PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
     protected volatile SharedPreferences moduleLoggingPreferences;
+    private volatile SharedPreferences modulePreferences;
     private final SharedPreferences.OnSharedPreferenceChangeListener
             moduleLoggingPreferenceListener = (preferences, key) -> {
                 if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)) {
@@ -1116,10 +1107,32 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
+    /**
+     * The module's single remote preference group. Opened once per generation; callers keep
+     * their own fail-closed handling because opening or reading can still throw.
+     */
+    protected final SharedPreferences modulePreferences() {
+        SharedPreferences preferences = modulePreferences;
+        if (preferences == null) {
+            synchronized (this) {
+                preferences = modulePreferences;
+                if (preferences == null) {
+                    preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+                    modulePreferences = preferences;
+                }
+            }
+        }
+        return preferences;
+    }
+
+    /**
+     * Hot reload does not replay onModuleLoaded, so each generation registers its own listener
+     * here and the retiring generation must release it through
+     * {@link #releaseModuleLoggingPreferenceListener()}.
+     */
     protected final synchronized void initializeModuleLoggingPreference() {
         try {
-            SharedPreferences preferences = getRemotePreferences(
-                    PredictiveBackPreferences.GROUP);
+            SharedPreferences preferences = modulePreferences();
             SharedPreferences previous = moduleLoggingPreferences;
             if (previous != preferences) {
                 if (previous != null) {
@@ -1138,8 +1151,32 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
     }
 
+    /** Keeps the last logging policy; only the retiring generation's callback is removed. */
+    protected final synchronized void releaseModuleLoggingPreferenceListener() {
+        SharedPreferences preferences = moduleLoggingPreferences;
+        moduleLoggingPreferences = null;
+        if (preferences == null) {
+            return;
+        }
+        try {
+            preferences.unregisterOnSharedPreferenceChangeListener(
+                    moduleLoggingPreferenceListener);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to unregister module logging preference listener", throwable);
+        }
+    }
+
+    /**
+     * Whether {@link #moduleLog} would emit at this priority. Guard diagnostics whose message
+     * needs reflection, Handler posts or flow collection so they cost nothing while disabled.
+     */
+    protected final boolean moduleLogEnabled(int priority) {
+        return priority >= Log.WARN || moduleLoggingEnabled;
+    }
+
     protected final void moduleLog(int priority, String tag, String message) {
-        if (priority < Log.WARN && !moduleLoggingEnabled) {
+        if (!moduleLogEnabled(priority)) {
             return;
         }
         super.log(priority, tag, message);
@@ -1147,7 +1184,7 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected final void moduleLog(int priority, String tag, String message,
                                    Throwable throwable) {
-        if (priority < Log.WARN && !moduleLoggingEnabled) {
+        if (!moduleLogEnabled(priority)) {
             return;
         }
         super.log(priority, tag, message, throwable);
@@ -1455,6 +1492,14 @@ public abstract class HookRuntimeCore extends XposedModule {
         return field.get(null);
     }
 
+    /**
+     * Despite the name, a failed read does not return null: it returns a fresh
+     * {@code "error:<Exception>"} String. Callers rely on that marker being non-null and
+     * never identical to another read, so identity checks such as
+     * {@code read(a, f) == read(b, f)} or {@code read(x, f) != captured} stay unequal when the
+     * field is missing (fail closed), and {@code instanceof} checks reject it. Do not return
+     * null here, and do not use a null check to detect a missing field.
+     */
     protected Object readFieldOrNull(Object target, String fieldName) {
         if (target == null) {
             return null;
@@ -1534,28 +1579,24 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected Field findCachedField(Class<?> ownerClass, String fieldName)
             throws NoSuchFieldException {
-        Pair<Class<?>, String> key = Pair.create(
-                ownerClass, "field:" + fieldName);
-        Field cached = reflectedFields.get(key);
-        if (cached != null) {
-            return cached;
-        }
-        if (missingReflectedMembers.contains(key)) {
-            throw new NoSuchFieldException(ownerClass.getName() + "." + fieldName);
-        }
-        Class<?> current = ownerClass;
-        while (current != null) {
-            try {
-                Field resolved = current.getDeclaredField(fieldName);
-                resolved.setAccessible(true);
-                Field raced = reflectedFields.putIfAbsent(key, resolved);
-                return raced == null ? resolved : raced;
-            } catch (NoSuchFieldException ignored) {
-                current = current.getSuperclass();
+        return reflectionCache.field(ownerClass, fieldName);
+    }
+
+    private void logAmbiguousReflectedMethod(Class<?> owner, String methodName, int argCount,
+                                             Method selected, List<Method> candidates) {
+        StringBuilder signatures = new StringBuilder();
+        for (Method candidate : candidates) {
+            if (signatures.length() > 0) {
+                signatures.append("; ");
             }
+            signatures.append(candidate.toGenericString());
         }
-        missingReflectedMembers.add(key);
-        throw new NoSuchFieldException(ownerClass.getName() + "." + fieldName);
+        moduleLog(Log.WARN, TAG, "Ambiguous reflected method lookup"
+                + ", owner=" + owner.getName()
+                + ", method=" + methodName
+                + ", argCount=" + argCount
+                + ", selected=" + selected.toGenericString()
+                + ", candidates=[" + signatures + "]");
     }
 
     protected static String shortObject(Object object) {
@@ -1719,49 +1760,14 @@ public abstract class HookRuntimeCore extends XposedModule {
 
     protected Object invokeMethod(Object target, String methodName,
                                   Class<?>[] parameterTypes, Object[] args) throws Exception {
-        Class<?> owner = target.getClass();
-        Pair<Class<?>, String> key = Pair.create(owner,
-                "exact:" + methodName + Arrays.toString(parameterTypes));
-        Method method = reflectedExactMethods.get(key);
-        if (method == null) {
-            if (missingReflectedMembers.contains(key)) {
-                throw new NoSuchMethodException(owner.getName() + "." + methodName);
-            }
-            try {
-                Method resolved = owner.getMethod(methodName, parameterTypes);
-                resolved.setAccessible(true);
-                Method raced = reflectedExactMethods.putIfAbsent(key, resolved);
-                method = raced == null ? resolved : raced;
-            } catch (NoSuchMethodException exception) {
-                missingReflectedMembers.add(key);
-                throw exception;
-            }
-        }
-        return method.invoke(target, args);
+        return reflectionCache.exactMethod(target.getClass(), methodName, parameterTypes)
+                .invoke(target, args);
     }
 
     protected Object invokeAnyMethod(Object target, String methodName, Object[] args)
             throws Exception {
-        Class<?> owner = target.getClass();
-        Pair<Class<?>, String> key = Pair.create(owner,
-                "any:" + methodName + "/" + args.length);
-        Method best = reflectedAnyMethods.get(key);
-        if (best == null && missingReflectedMembers.contains(key)) {
-            throw new NoSuchMethodException(owner.getName() + "." + methodName);
-        }
-        if (best == null) {
-            Method resolved = findAnyMethod(owner, methodName, args.length);
-            if (resolved != null) {
-                resolved.setAccessible(true);
-                Method raced = reflectedAnyMethods.putIfAbsent(key, resolved);
-                best = raced == null ? resolved : raced;
-            }
-        }
-        if (best == null) {
-            missingReflectedMembers.add(key);
-            throw new NoSuchMethodException(owner.getName() + "." + methodName);
-        }
-        return best.invoke(target, args);
+        return reflectionCache.anyMethod(target.getClass(), methodName, args.length)
+                .invoke(target, args);
     }
 
     protected String readNativeAnimationType(Object windowElement) throws Exception {
@@ -1775,22 +1781,6 @@ public abstract class HookRuntimeCore extends XposedModule {
     }
 
     protected static Method findAnyMethod(Class<?> type, String methodName, int argCount) {
-        Class<?> current = type;
-        while (current != null) {
-            for (Method method : current.getDeclaredMethods()) {
-                if (methodName.equals(method.getName())
-                        && method.getParameterCount() == argCount) {
-                    return method;
-                }
-            }
-            current = current.getSuperclass();
-        }
-        for (Method method : type.getMethods()) {
-            if (methodName.equals(method.getName())
-                    && method.getParameterCount() == argCount) {
-                return method;
-            }
-        }
-        return null;
+        return ReflectionCache.findAnyMethod(type, methodName, argCount);
     }
 }

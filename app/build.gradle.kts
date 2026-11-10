@@ -16,10 +16,21 @@ val gitVersionCode = gitCommitCount.map { count ->
 
 val localLspltAar = rootProject.file(
     "../LSPlt/build-android-arm64-v8a-16kb/lsplt-standalone-2.1-16kb.aar",
-).also { aar ->
-    require(aar.isFile) {
-        "Missing locally rebuilt 16KB LSPlt AAR: ${aar.absolutePath}"
+)
+
+// Check at execution time so configuration-only tasks (sync, clean, tasks) still work
+// without the sibling LSPlt checkout; every build still fails before compiling.
+val verifyLocalLsplt by tasks.registering {
+    val aar = localLspltAar
+    doLast {
+        require(aar.isFile) {
+            "Missing locally rebuilt 16KB LSPlt AAR: ${aar.absolutePath}"
+        }
     }
+}
+
+tasks.named("preBuild") {
+    dependsOn(verifyLocalLsplt)
 }
 
 val keystoreProperties = Properties()

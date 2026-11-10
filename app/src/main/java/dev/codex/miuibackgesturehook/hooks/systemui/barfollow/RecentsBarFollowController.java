@@ -19,7 +19,6 @@ import android.view.WindowManager;
 import android.window.TransitionInfo;
 
 import java.lang.ref.WeakReference;
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -781,8 +780,6 @@ final class RecentsBarFollowController {
     }
 
     private static Object field(Object owner, String name) throws Exception {
-        Field field = owner.getClass().getDeclaredField(name);
-        field.setAccessible(true);
-        return field.get(owner);
+        return AppBarContentPreparation.read(owner, name);
     }
 }

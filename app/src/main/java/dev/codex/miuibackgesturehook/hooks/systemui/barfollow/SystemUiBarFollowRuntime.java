@@ -1081,6 +1081,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
             }
         }
         Object result = chain.proceed();
+        if (!moduleLogEnabled(Log.INFO)) return result;
         try {
             String diagnostic = AppBarModeBinding.nativeAppearanceDiagnostic(chain.getThisObject());
             if (diagnostic != null) moduleLog(Log.INFO, TAG, "BarAppearance native App update " + diagnostic);
@@ -1119,7 +1120,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     private void ensureBarFollowPreferenceListener(ClassLoader loader) {
         try {
             if (barFollowPreferences == null) {
-                SharedPreferences preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+                SharedPreferences preferences = modulePreferences();
                 preferences.registerOnSharedPreferenceChangeListener(barFollowPreferenceListener);
                 barFollowPreferences = preferences;
             }
@@ -1286,7 +1287,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
     protected Object observeShadeBarEvent(XposedInterface.Chain chain) throws Throwable {
         AppBarContentPreparation content = pendingAppContentCleanup;
         String event = chain.getExecutable().getName();
-        if (content != null) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+        if (content != null && moduleLogEnabled(Log.INFO)) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
             if (pendingAppContentCleanup != content) return;
             try { moduleLog(Log.INFO, TAG, "BarAppearance transition=" + event + " " + content.appearanceDiagnostic()); }
             catch (Throwable failure) { moduleLog(Log.WARN, TAG, "BarAppearance diagnostic failed", failure); }
@@ -1403,7 +1404,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
                     + " two create/close cycles restored native registrations and main owners");
             AppBarContentPreparation attached = AppBarContentPreparation.create(loader,
                     owner -> pendingAppContentCleanup = owner, this::appBarModeFailed);
-            attached.observeAppearance((message, failure) -> moduleLog(
+            attached.observeAppearance(() -> moduleLogEnabled(Log.INFO), (message, failure) -> moduleLog(
                     failure == null ? Log.INFO : Log.WARN, TAG, message, failure));
             attached.attachWindowProbe(() -> {
                 if (pendingAppContentCleanup != attached) return;
@@ -1651,8 +1652,11 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
                     barCallbackSession = null;
                 }
             }
-            traceBarIdentity("cleanup", barTraceSequence.incrementAndGet(),
-                    readField(controller, "this$0"), null, readField(controller, "mTransition"));
+            if (moduleLogEnabled(Log.INFO)) {
+                traceBarIdentity("cleanup", barTraceSequence.incrementAndGet(),
+                        readField(controller, "this$0"), null,
+                        readField(controller, "mTransition"));
+            }
         } catch (Throwable failure) {
             moduleLog(Log.WARN, TAG, "RecentsBarTrace: cleanup identity unreadable", failure);
         }
@@ -1732,6 +1736,7 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
 
     private void traceBarIdentity(String phase, long event, Object owner,
                                   Object callback, Object token) {
+        if (!moduleLogEnabled(Log.INFO)) return;
         try {
             Object latest = owner == null ? null : readField(owner, "mGestureStateUpdateCallback");
             Object original = callback == null ? null : readField(callback, "val$original");
@@ -1746,10 +1751,13 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
         }
     }
 
+    // Only MiuiHome is accepted: hookRecentsBarFollow installs on Android 17 alone, where
+    // POCO Launcher has no supported Java or native path. If POCO ever gains Android 17
+    // support, bind this to the process's selected launcher package (miuiHomePackage)
+    // instead of trusting either package.
     private boolean authenticBarCaller(int uid) {
         try {
-            android.app.Application app = (android.app.Application) Class.forName("android.app.ActivityThread")
-                    .getMethod("currentApplication").invoke(null);
+            android.app.Application app = android.app.ActivityThread.currentApplication();
             if (app == null) return false;
             String[] packages = app.getPackageManager().getPackagesForUid(uid);
             if (packages != null) for (String name : packages)

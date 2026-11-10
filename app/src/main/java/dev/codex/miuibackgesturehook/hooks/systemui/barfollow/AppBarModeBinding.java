@@ -184,14 +184,7 @@ final class AppBarModeBinding implements AutoCloseable {
     }
 
     private static Object inherited(Object owner, String name) throws ReflectiveOperationException {
-        for (Class<?> type = owner.getClass(); type != null; type = type.getSuperclass()) {
-            try {
-                java.lang.reflect.Field field = type.getDeclaredField(name);
-                field.setAccessible(true);
-                return field.get(owner);
-            } catch (NoSuchFieldException absent) { }
-        }
-        throw new NoSuchFieldException(name);
+        return AppBarContentPreparation.readInherited(owner, name);
     }
 
     Object repository() { return repository; }
@@ -241,11 +234,18 @@ final class AppBarModeBinding implements AutoCloseable {
                 + ", keyguard=" + call(read(injector, "isOnKeyguard"), "getValue");
     }
 
-    void observeAppearance(java.util.function.BiConsumer<String, Throwable> log) throws ReflectiveOperationException {
+    void observeAppearance(java.util.function.BooleanSupplier enabled,
+                           java.util.function.BiConsumer<String, Throwable> log) throws ReflectiveOperationException {
         Object physical = provider(display, "statusBarModePerDisplayRepositoryImplProvider");
-        collect(read(physical, "_originalStatusBarAttributes"), value -> log.accept("BarAppearance Home packet=" + value, null));
-        collect(read(repository, "_originalStatusBarAttributes"), value -> log.accept("BarAppearance App packet=" + value, null));
-        collect(read(repository, "statusBarAppearance"), value -> log.accept("BarAppearance App resolved=" + value, null));
+        collect(read(physical, "_originalStatusBarAttributes"), value -> {
+            if (enabled.getAsBoolean()) log.accept("BarAppearance Home packet=" + value, null);
+        });
+        collect(read(repository, "_originalStatusBarAttributes"), value -> {
+            if (enabled.getAsBoolean()) log.accept("BarAppearance App packet=" + value, null);
+        });
+        collect(read(repository, "statusBarAppearance"), value -> {
+            if (enabled.getAsBoolean()) log.accept("BarAppearance App resolved=" + value, null);
+        });
     }
 
     String diagnostic() throws ReflectiveOperationException {

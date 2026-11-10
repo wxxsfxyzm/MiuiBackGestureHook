@@ -4081,7 +4081,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             if (preferences != null) {
                 return preferences;
             }
-            preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+            preferences = modulePreferences();
             preferences.registerOnSharedPreferenceChangeListener(
                     miuiHomeGestureTriggerPreferenceListener);
             miuiHomeGestureTriggerPreferences = preferences;

@@ -101,13 +101,6 @@ final class AppBarTouchBinding implements AutoCloseable {
         return result;
     }
     private static Object read(Object owner, String name) throws ReflectiveOperationException {
-        for (Class<?> type = owner.getClass(); type != null; type = type.getSuperclass()) {
-            try {
-                java.lang.reflect.Field field = type.getDeclaredField(name);
-                field.setAccessible(true);
-                return field.get(owner);
-            } catch (NoSuchFieldException absent) { }
-        }
-        throw new NoSuchFieldException(name);
+        return AppBarContentPreparation.readInherited(owner, name);
     }
 }

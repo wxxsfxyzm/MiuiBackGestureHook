@@ -1195,12 +1195,17 @@ private fun loadLaunchableApps(
     packageManager: PackageManager,
     ownPackageName: String,
 ): AppLoadResult {
-    val installedApplications = packageManager.getInstalledApplications(
-        PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
+    // Three package-manager queries in total; per-package lookups cost several Binder calls
+    // for every installed package.
+    val installedPackages = packageManager.getInstalledPackages(
+        PackageManager.PackageInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
     )
+    val launcherActivities = resolveMainActivities(packageManager, launcherOnly = true)
+    val mainActivities = resolveMainActivities(packageManager, launcherOnly = false)
     val entries = LinkedHashMap<String, AppEntry>()
     val applicationOptInPackages = HashSet<String>()
-    installedApplications.forEach { applicationInfo ->
+    installedPackages.forEach { packageInfo ->
+        val applicationInfo = packageInfo.applicationInfo ?: return@forEach
         val packageName = applicationInfo.packageName ?: return@forEach
         if (packageName == ownPackageName) {
             return@forEach
@@ -1208,32 +1213,19 @@ private fun loadLaunchableApps(
         if (packageName in applicationOptInPackages || entries.containsKey(packageName)) {
             return@forEach
         }
-        val launcherActivity = resolveMainActivity(
-            packageManager = packageManager,
-            packageName = packageName,
-            launcherOnly = true,
-        )
+        val launcherActivity = launcherActivities[packageName]
         if (launcherActivity != null && isApplicationPredictiveBackOptedIn(applicationInfo)) {
             applicationOptInPackages.add(packageName)
             return@forEach
         }
 
-        val selectedActivity = launcherActivity ?: resolveMainActivity(
-            packageManager = packageManager,
-            packageName = packageName,
-            launcherOnly = false,
-        )
+        val selectedActivity = launcherActivity ?: mainActivities[packageName]
             ?: return@forEach
         val label = runCatching { applicationInfo.loadLabel(packageManager).toString() }
             .getOrNull()
             .orEmpty()
             .ifBlank { packageName }
-        val firstInstallTime = runCatching {
-            packageManager.getPackageInfo(
-                packageName,
-                PackageManager.PackageInfoFlags.of(0L),
-            ).firstInstallTime
-        }.getOrDefault(0L)
+        val firstInstallTime = packageInfo.firstInstallTime
         entries[packageName] = AppEntry(
             packageName = packageName,
             label = label,
@@ -1253,19 +1245,24 @@ private fun loadLaunchableApps(
     )
 }
 
-private fun resolveMainActivity(
+/** First matching MAIN activity per package, in the resolver's result order. */
+private fun resolveMainActivities(
     packageManager: PackageManager,
-    packageName: String,
     launcherOnly: Boolean,
-): android.content.pm.ActivityInfo? {
-    val intent = Intent(Intent.ACTION_MAIN).setPackage(packageName)
+): Map<String, android.content.pm.ActivityInfo> {
+    val intent = Intent(Intent.ACTION_MAIN)
     if (launcherOnly) {
         intent.addCategory(Intent.CATEGORY_LAUNCHER)
     }
-    return packageManager.queryIntentActivities(
+    val activities = HashMap<String, android.content.pm.ActivityInfo>()
+    packageManager.queryIntentActivities(
         intent,
         PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
-    ).firstOrNull()?.activityInfo
+    ).forEach { resolveInfo ->
+        val activityInfo = resolveInfo.activityInfo ?: return@forEach
+        activities.putIfAbsent(activityInfo.packageName, activityInfo)
+    }
+    return activities
 }
 
 private fun isApplicationPredictiveBackOptedIn(applicationInfo: ApplicationInfo): Boolean {

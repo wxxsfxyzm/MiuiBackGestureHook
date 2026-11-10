@@ -88,7 +88,6 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 .equals(key)) {
             return;
         }
-        contextualSearchPreferences = preferences;
         Context context = contextualSearchStateContext;
         SystemUiPlatformImpl implementation = systemUiPlatformImpl;
         if (context == null || implementation == null) {
@@ -206,11 +205,9 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             return;
         }
         try {
-            SharedPreferences preferences = getRemotePreferences(
-                    PredictiveBackPreferences.GROUP);
+            SharedPreferences preferences = modulePreferences();
             preferences.registerOnSharedPreferenceChangeListener(
                     contextualSearchStatePreferenceListener);
-            contextualSearchPreferences = preferences;
             contextualSearchStatePreferences = preferences;
             contextualSearchStateContext = context.getApplicationContext();
             moduleLog(Log.INFO, TAG,
@@ -226,7 +223,6 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         SharedPreferences preferences = contextualSearchStatePreferences;
         contextualSearchStatePreferences = null;
         contextualSearchStateContext = null;
-        contextualSearchPreferences = null;
         if (preferences == null) {
             return;
         }

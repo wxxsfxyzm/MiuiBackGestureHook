@@ -6,7 +6,6 @@ import android.os.Looper;
 
 import java.lang.ref.Reference;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -207,18 +206,14 @@ final class AppBarAppearancePreparation implements AutoCloseable {
 
     private Class<?> type(String name) throws ClassNotFoundException { return Class.forName(name, false, loader); }
     private static Object read(Object owner, String name) throws ReflectiveOperationException {
-        Field field = owner.getClass().getDeclaredField(name);
-        field.setAccessible(true);
-        return field.get(owner);
+        return AppBarContentPreparation.read(owner, name);
     }
     private static Object call(Object owner, String name) throws ReflectiveOperationException {
-        return call(owner, name, new Class<?>[0]);
+        return AppBarContentPreparation.call(owner, name);
     }
     private static Object call(Object owner, String name, Class<?>[] types, Object... args)
             throws ReflectiveOperationException {
-        Method method = owner.getClass().getMethod(name, types);
-        method.setAccessible(true);
-        return method.invoke(owner, args);
+        return AppBarContentPreparation.call(owner, name, types, args);
     }
     private static void requireMain() {
         if (Looper.myLooper() != Looper.getMainLooper()) throw new IllegalStateException("Appearance requires main Looper");

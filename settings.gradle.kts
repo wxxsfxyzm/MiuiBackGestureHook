@@ -11,6 +11,16 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // miuix SNAPSHOT builds are published to GitHub Packages, which requires a token.
+        maven("https://maven.pkg.github.com/compose-miuix-ui/miuix") {
+            credentials {
+                username = providers.gradleProperty("gpr.user").orNull
+                    ?: System.getenv("GITHUB_ACTOR")
+                password = providers.gradleProperty("gpr.key").orNull
+                    ?: System.getenv("GITHUB_TOKEN")
+            }
+            content { includeGroup("top.yukonga.miuix.kmp") }
+        }
     }
 }
 

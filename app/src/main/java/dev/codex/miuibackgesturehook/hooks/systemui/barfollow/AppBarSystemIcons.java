@@ -6,7 +6,6 @@ import android.view.ViewGroup;
 import android.widget.LinearLayout;
 
 import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -140,11 +139,7 @@ final class AppBarSystemIcons implements AutoCloseable {
         return result;
     }
     private static Object field(Object owner, String name) throws ReflectiveOperationException {
-        for (Class<?> c = owner.getClass(); c != null; c = c.getSuperclass()) {
-            try { Field field = c.getDeclaredField(name); field.setAccessible(true); return field.get(owner); }
-            catch (NoSuchFieldException ignored) { }
-        }
-        throw new NoSuchFieldException(name);
+        return AppBarContentPreparation.readInherited(owner, name);
     }
     private Class<?> type(String name) throws ClassNotFoundException { return Class.forName(name, false, loader); }
     private static void requireMain() {

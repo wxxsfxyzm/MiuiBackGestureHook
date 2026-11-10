@@ -116,7 +116,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             new SideTriggerPreferences(new SideTriggerPreferences.Host() {
                 @Override
                 public SharedPreferences preferences() {
-                    return getRemotePreferences(PredictiveBackPreferences.GROUP);
+                    return modulePreferences();
                 }
 
                 @Override
@@ -997,16 +997,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
 
     protected boolean isPredictiveBackOptInSelected(String packageName) {
         try {
-            SharedPreferences preferences = predictiveBackPreferences;
-            if (preferences == null) {
-                synchronized (this) {
-                    preferences = predictiveBackPreferences;
-                    if (preferences == null) {
-                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
-                        predictiveBackPreferences = preferences;
-                    }
-                }
-            }
+            SharedPreferences preferences = modulePreferences();
             Set<String> packages = preferences.getStringSet(
                     PredictiveBackPreferences.KEY_PACKAGES,
                     Collections.emptySet());

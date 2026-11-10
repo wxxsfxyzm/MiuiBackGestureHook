@@ -48,6 +48,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -120,29 +121,94 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             Collections.newSetFromMap(new WeakHashMap<>());
     protected volatile Object[] pendingHotReloadContextualSearchNavigationBars = new Object[0];
 
-    protected volatile SharedPreferences hyperOsIndicatorPreferences;
     protected volatile boolean hyperOsIndicatorPreferencesFailureLogged;
     protected volatile MiuiHapticFeedbackHelper hyperOsBackHapticHelper;
-    protected volatile SharedPreferences gestureTriggerPreferences;
     protected volatile boolean gestureTriggerPreferencesFailureLogged;
-    protected volatile SharedPreferences fullscreenBackPreferences;
+    /**
+     * Last {height, position} read for the SystemUI trigger band, tagged with the change
+     * generation it was read under. A listener bumps the generation; a snapshot from an older
+     * generation is never used, so a read racing a change simply re-reads on the next DOWN.
+     */
+    protected volatile GestureTriggerAreaSnapshot gestureTriggerAreaSnapshot;
+    protected final AtomicInteger gestureTriggerAreaGeneration = new AtomicInteger();
+    protected final Object gestureTriggerAreaPreferenceLock = new Object();
+    protected SharedPreferences gestureTriggerAreaPreferences;
+    protected boolean gestureTriggerAreaListenerRetired;
+    protected final SharedPreferences.OnSharedPreferenceChangeListener
+            gestureTriggerAreaPreferenceListener = (preferences, key) -> {
+        if (key == null
+                || PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT.equals(key)
+                || PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT.equals(key)) {
+            gestureTriggerAreaGeneration.incrementAndGet();
+            gestureTriggerAreaSnapshot = null;
+        }
+    };
+
+    protected static final class GestureTriggerAreaSnapshot {
+        final int generation;
+        final int heightPercent;
+        final int positionPercent;
+
+        GestureTriggerAreaSnapshot(int generation, int heightPercent, int positionPercent) {
+            this.generation = generation;
+            this.heightPercent = heightPercent;
+            this.positionPercent = positionPercent;
+        }
+    }
+
+    /**
+     * Returns whether a value read now may be cached: true only while this generation's change
+     * listener is registered. Registration failure leaves every DOWN reading live preferences.
+     */
+    protected boolean ensureGestureTriggerAreaListener(SharedPreferences preferences) {
+        synchronized (gestureTriggerAreaPreferenceLock) {
+            if (gestureTriggerAreaListenerRetired) {
+                return false;
+            }
+            if (gestureTriggerAreaPreferences == preferences) {
+                return true;
+            }
+            try {
+                preferences.registerOnSharedPreferenceChangeListener(
+                        gestureTriggerAreaPreferenceListener);
+                gestureTriggerAreaPreferences = preferences;
+                return true;
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG,
+                        "Gesture trigger listener unavailable; reading live preferences",
+                        throwable);
+                return false;
+            }
+        }
+    }
+
+    protected void releaseGestureTriggerAreaPreferenceListener() {
+        SharedPreferences preferences;
+        synchronized (gestureTriggerAreaPreferenceLock) {
+            gestureTriggerAreaListenerRetired = true;
+            preferences = gestureTriggerAreaPreferences;
+            gestureTriggerAreaPreferences = null;
+            gestureTriggerAreaGeneration.incrementAndGet();
+            gestureTriggerAreaSnapshot = null;
+        }
+        if (preferences == null) {
+            return;
+        }
+        try {
+            preferences.unregisterOnSharedPreferenceChangeListener(
+                    gestureTriggerAreaPreferenceListener);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to unregister gesture trigger preference listener", throwable);
+        }
+    }
     protected volatile boolean fullscreenBackPreferencesFailureLogged;
-    protected volatile SharedPreferences contextualSearchPreferences;
     protected volatile boolean contextualSearchPreferencesFailureLogged;
     protected volatile boolean contextualSearchServiceUnavailableLogged;
 
     protected boolean isFullscreenDirectBackEnabled() {
         try {
-            SharedPreferences preferences = fullscreenBackPreferences;
-            if (preferences == null) {
-                synchronized (this) {
-                    preferences = fullscreenBackPreferences;
-                    if (preferences == null) {
-                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
-                        fullscreenBackPreferences = preferences;
-                    }
-                }
-            }
+            SharedPreferences preferences = modulePreferences();
             boolean enabled = preferences.getBoolean(
                     PredictiveBackPreferences.KEY_FULLSCREEN_DIRECT_BACK,
                     PredictiveBackPreferences.DEFAULT_FULLSCREEN_DIRECT_BACK);
@@ -183,16 +249,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
     protected boolean isContextualSearchLongPressEnabled() {
         try {
-            SharedPreferences preferences = contextualSearchPreferences;
-            if (preferences == null) {
-                synchronized (this) {
-                    preferences = contextualSearchPreferences;
-                    if (preferences == null) {
-                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
-                        contextualSearchPreferences = preferences;
-                    }
-                }
-            }
+            SharedPreferences preferences = modulePreferences();
             boolean enabled = preferences.getBoolean(
                     PredictiveBackPreferences.KEY_CONTEXTUAL_SEARCH_LONG_PRESS,
                     PredictiveBackPreferences.DEFAULT_CONTEXTUAL_SEARCH_LONG_PRESS);
@@ -262,16 +319,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
     protected boolean isContextualSearchHapticsEnabled() {
         try {
-            SharedPreferences preferences = contextualSearchPreferences;
-            if (preferences == null) {
-                synchronized (this) {
-                    preferences = contextualSearchPreferences;
-                    if (preferences == null) {
-                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
-                        contextualSearchPreferences = preferences;
-                    }
-                }
-            }
+            SharedPreferences preferences = modulePreferences();
             return preferences.getBoolean(
                     PredictiveBackPreferences.KEY_CONTEXTUAL_SEARCH_HAPTICS,
                     PredictiveBackPreferences.DEFAULT_CONTEXTUAL_SEARCH_HAPTICS);
@@ -521,6 +569,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         private float lastX;
         private float lastY;
         private final Runnable longPress;
+        // Main-Looper only: resource ids are stable for this navigation View's package.
+        private static final int UNRESOLVED_RESOURCE_ID = -1;
+        private int homeHandleId = UNRESOLVED_RESOURCE_ID;
+        private final Rect handleBounds = new Rect();
 
         private void onLongPressTimeout() {
             if (!tracking || pilfered || hasUpwardGestureIntent()
@@ -678,8 +730,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         private boolean containsGestureHandle(float x, float y) {
-            int handleId = navigationView.getResources().getIdentifier(
-                    "home_handle", "id", SYSTEM_UI);
+            int handleId = homeHandleId;
+            if (handleId == UNRESOLVED_RESOURCE_ID) {
+                handleId = navigationView.getResources().getIdentifier(
+                        "home_handle", "id", SYSTEM_UI);
+                homeHandleId = handleId;
+            }
             if (handleId == 0) {
                 return false;
             }
@@ -687,7 +743,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             if (handle == null || !handle.isShown() || handle.getAlpha() <= 0.0f) {
                 return false;
             }
-            Rect bounds = new Rect();
+            Rect bounds = handleBounds;
             if (!handle.getGlobalVisibleRect(bounds) || bounds.isEmpty()) {
                 return false;
             }
@@ -772,17 +828,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     }
 
     protected SharedPreferences getHyperOsIndicatorPreferences() {
-        SharedPreferences preferences = hyperOsIndicatorPreferences;
-        if (preferences == null) {
-            synchronized (this) {
-                preferences = hyperOsIndicatorPreferences;
-                if (preferences == null) {
-                    preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
-                    hyperOsIndicatorPreferences = preferences;
-                }
-            }
-        }
-        return preferences;
+        return modulePreferences();
     }
 
     protected boolean readHyperOsBooleanPreference(String key, boolean defaultValue) {
@@ -1429,40 +1475,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
          */
         protected boolean isWithinConfiguredGestureTriggerArea(MotionEvent event) {
             try {
-                SharedPreferences preferences = gestureTriggerPreferences;
-                if (preferences == null) {
-                    synchronized (SystemUiInputRuntime.this) {
-                        preferences = gestureTriggerPreferences;
-                        if (preferences == null) {
-                            preferences = getRemotePreferences(
-                                    PredictiveBackPreferences.GROUP);
-                            gestureTriggerPreferences = preferences;
-                        }
-                    }
+                GestureTriggerAreaSnapshot area = gestureTriggerAreaSnapshot;
+                if (area == null || area.generation != gestureTriggerAreaGeneration.get()) {
+                    area = readGestureTriggerArea();
                 }
-                int heightPercent;
-                int positionPercent;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
-                    Map<String, ?> values = preferences.getAll();
-                    Object heightValue = values.get(
-                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT);
-                    Object positionValue = values.get(
-                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT);
-                    heightPercent = heightValue == null
-                            ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT
-                            : (Integer) heightValue;
-                    positionPercent = positionValue == null
-                            ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT
-                            : (Integer) positionValue;
-                } else {
-                    // Preserve the Android 16 path paired with the Java launcher window hooks.
-                    heightPercent = preferences.getInt(
-                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
-                            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT);
-                    positionPercent = preferences.getInt(
-                            PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
-                            PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT);
-                }
+                int heightPercent = area.heightPercent;
+                int positionPercent = area.positionPercent;
                 if (heightPercent < PredictiveBackPreferences.MIN_GESTURE_TRIGGER_HEIGHT_PERCENT
                         || heightPercent
                         > PredictiveBackPreferences.MAX_GESTURE_TRIGGER_HEIGHT_PERCENT
@@ -1502,6 +1520,42 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 }
                 return true;
             }
+        }
+
+        /** Reads live preferences; caches the result only under a registered listener. */
+        protected GestureTriggerAreaSnapshot readGestureTriggerArea() {
+            SharedPreferences preferences = modulePreferences();
+            boolean cacheable = ensureGestureTriggerAreaListener(preferences);
+            int generation = gestureTriggerAreaGeneration.get();
+            int heightPercent;
+            int positionPercent;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+                Map<String, ?> values = preferences.getAll();
+                Object heightValue = values.get(
+                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT);
+                Object positionValue = values.get(
+                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT);
+                heightPercent = heightValue == null
+                        ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT
+                        : (Integer) heightValue;
+                positionPercent = positionValue == null
+                        ? PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT
+                        : (Integer) positionValue;
+            } else {
+                // Preserve the Android 16 path paired with the Java launcher window hooks.
+                heightPercent = preferences.getInt(
+                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_HEIGHT_PERCENT,
+                        PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_HEIGHT_PERCENT);
+                positionPercent = preferences.getInt(
+                        PredictiveBackPreferences.KEY_GESTURE_TRIGGER_POSITION_PERCENT,
+                        PredictiveBackPreferences.DEFAULT_GESTURE_TRIGGER_POSITION_PERCENT);
+            }
+            GestureTriggerAreaSnapshot area = new GestureTriggerAreaSnapshot(
+                    generation, heightPercent, positionPercent);
+            if (cacheable && gestureTriggerAreaGeneration.get() == generation) {
+                gestureTriggerAreaSnapshot = area;
+            }
+            return area;
         }
 
         protected boolean canStartBackGesture(MotionEvent event, int edge) {
