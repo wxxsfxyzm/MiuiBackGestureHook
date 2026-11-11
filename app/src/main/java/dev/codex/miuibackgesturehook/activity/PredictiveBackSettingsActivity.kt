@@ -551,6 +551,12 @@ private fun PredictiveBackSettingsScreen(
     var confirmedHyperOsSlideAnimation by remember { mutableStateOf(false) }
     var oneUiCrossTaskAnimation by remember { mutableStateOf(false) }
     var confirmedOneUiCrossTaskAnimation by remember { mutableStateOf(false) }
+    var returnHomeIconPreview by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW)
+    }
+    var confirmedReturnHomeIconPreview by remember {
+        mutableStateOf(PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW)
+    }
     var moduleLogging by remember { mutableStateOf(true) }
     var confirmedModuleLogging by remember { mutableStateOf(true) }
     var fullscreenDirectBack by remember {
@@ -593,6 +599,9 @@ private fun PredictiveBackSettingsScreen(
         confirmedHyperOsSlideAnimation = false
         oneUiCrossTaskAnimation = false
         confirmedOneUiCrossTaskAnimation = false
+        returnHomeIconPreview = PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW
+        confirmedReturnHomeIconPreview =
+            PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW
         moduleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         confirmedModuleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         fullscreenDirectBack = PredictiveBackPreferences.DEFAULT_FULLSCREEN_DIRECT_BACK
@@ -677,6 +686,10 @@ private fun PredictiveBackSettingsScreen(
                         PredictiveBackPreferences.KEY_RESTORE_STATUS_BAR_FOLLOW,
                         PredictiveBackPreferences.DEFAULT_RESTORE_STATUS_BAR_FOLLOW,
                     ),
+                    remotePreferences.getBoolean(
+                        PredictiveBackPreferences.KEY_RETURN_HOME_ICON_PREVIEW,
+                        PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW,
+                    ),
                 )
                 Triple(remotePreferences, flags, hapticEffect)
             }
@@ -699,6 +712,8 @@ private fun PredictiveBackSettingsScreen(
             confirmedHyperOsIndicatorBlur = loaded.second[6]
             restoreStatusBarFollow = loaded.second[7]
             confirmedRestoreStatusBarFollow = loaded.second[7]
+            returnHomeIconPreview = loaded.second[8]
+            confirmedReturnHomeIconPreview = loaded.second[8]
         } catch (_: Throwable) {
             configurationError = configurationErrorMessage
         } finally {
@@ -838,6 +853,15 @@ private fun PredictiveBackSettingsScreen(
             { confirmedHyperOsSlideAnimation = it },
         )
     }
+    val persistReturnHomeIconPreview: (Boolean) -> Unit = { requestedEnabled ->
+        persistBooleanPreference(
+            PredictiveBackPreferences.KEY_RETURN_HOME_ICON_PREVIEW,
+            requestedEnabled,
+            { returnHomeIconPreview = it },
+            { confirmedReturnHomeIconPreview },
+            { confirmedReturnHomeIconPreview = it },
+        )
+    }
     val persistOneUiCrossTaskAnimation: (Boolean) -> Unit = { requestedEnabled ->
         persistBooleanPreference(
             PredictiveBackPreferences.KEY_ONEUI_CROSS_TASK_ANIMATION,
@@ -969,6 +993,7 @@ private fun PredictiveBackSettingsScreen(
                         hyperOsSlideAnimation = hyperOsSlideAnimation,
                         oneUiCrossTaskAnimation = oneUiCrossTaskAnimation,
                         fullscreenDirectBack = fullscreenDirectBack,
+                        returnHomeIconPreview = returnHomeIconPreview,
                         configurationEnabled = configurationEnabled,
                         onHyperOsIndicatorToggle = persistHyperOsIndicator,
                         onHyperOsIndicatorBlurToggle = persistHyperOsIndicatorBlur,
@@ -977,6 +1002,7 @@ private fun PredictiveBackSettingsScreen(
                         onHyperOsSlideAnimationToggle = persistHyperOsSlideAnimation,
                         onOneUiCrossTaskAnimationToggle = persistOneUiCrossTaskAnimation,
                         onFullscreenDirectBackToggle = persistFullscreenDirectBack,
+                        onReturnHomeIconPreviewToggle = persistReturnHomeIconPreview,
                         onOpenGestureTriggerSettings = onOpenGestureTriggerSettings,
                         backdrop = topBarBackdrop,
                         modifier = Modifier
@@ -1082,6 +1108,7 @@ private fun SideGestureGroupCard(
     hyperOsSlideAnimation: Boolean,
     oneUiCrossTaskAnimation: Boolean,
     fullscreenDirectBack: Boolean,
+    returnHomeIconPreview: Boolean,
     configurationEnabled: Boolean,
     onHyperOsIndicatorToggle: (Boolean) -> Unit,
     onHyperOsIndicatorBlurToggle: (Boolean) -> Unit,
@@ -1090,6 +1117,7 @@ private fun SideGestureGroupCard(
     onHyperOsSlideAnimationToggle: (Boolean) -> Unit,
     onOneUiCrossTaskAnimationToggle: (Boolean) -> Unit,
     onFullscreenDirectBackToggle: (Boolean) -> Unit,
+    onReturnHomeIconPreviewToggle: (Boolean) -> Unit,
     onOpenGestureTriggerSettings: () -> Unit,
     backdrop: Backdrop,
     modifier: Modifier = Modifier,
@@ -1199,6 +1227,15 @@ private fun SideGestureGroupCard(
                 onFullscreenDirectBackToggle(selectedIndex == 1)
             },
         )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+            SwitchPreference(
+                title = stringResource(R.string.return_home_icon_preview_title),
+                summary = stringResource(R.string.return_home_icon_preview_summary),
+                checked = returnHomeIconPreview,
+                enabled = configurationEnabled,
+                onCheckedChange = onReturnHomeIconPreviewToggle,
+            )
+        }
     }
 }
 

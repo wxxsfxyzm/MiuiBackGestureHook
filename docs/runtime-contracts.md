@@ -125,9 +125,21 @@ component, so launcher-owned settings do not become idle Home by package-name in
 
 ## Return to Home and appearance
 
-- Return-to-Home uses the standard Shell launcher callback/runner. One native WindowElement /
-  spring owns predictive preview and the matching Xiaomi CLOSE, including legitimate reuse
-  and OPEN interruption. Do not replace a still-owned spring or finish callback prematurely.
+- On Android 17+ the native launcher registers no Return-to-Home runner, so Xiaomi's
+  committed CLOSE (EXIT_TO_HOME, `SfAnim` CLOSE_TO_HOME) is the default. The experimental
+  icon preview (default off, Android 17+ only) registers a dedicated SystemUI
+  `CrossTaskBackAnimation` runner for type 1 only while enabled and withdraws only a runner
+  of that type it installed. Its blur/dim scrim is non-touchable and owned by that preview.
+  At commit it freezes the pose and rejects from Shell's merge only the CLOSE containing the
+  exact committed task, so Xiaomi's route owns the flight; cancel and timeout restore all
+  preview state. MiuiHome native rewrites only the CLOSE_TO_HOME start geometry, from a
+  fresh SystemUI-UID-authenticated handoff that matches the task; a missing, stale or
+  unmatched record, or an unresolved `start_animation` layout, leaves Xiaomi's flight
+  unchanged.
+- On Android 16, Return-to-Home uses the standard Shell launcher callback/runner. One
+  native WindowElement / spring owns predictive preview and the matching Xiaomi CLOSE,
+  including legitimate reuse and OPEN interruption. Do not replace a still-owned spring or
+  finish callback prematurely.
 - Match commit signals, runner targets and task/surface identity across prepare, commit and
   cleanup. Keep handoff transactions compositor-atomic; never expose a fullscreen restore
   before the native reparent/geometry transaction. A delayed command needs its immutable

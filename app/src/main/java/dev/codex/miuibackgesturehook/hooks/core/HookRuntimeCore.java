@@ -1442,6 +1442,7 @@ public abstract class HookRuntimeCore extends XposedModule {
                     defaultCrossActivity, "crossActivity");
             changed |= ensureRegistryRunner(definitions, TYPE_CROSS_TASK,
                     crossTask, "crossTask");
+            changed |= ensureReturnHomePreviewRunner(definitions, crossTask);
             if (changed) {
                 invokeAnyMethod(registry, "updateSupportedAnimators", new Object[0]);
                 moduleLog(Log.INFO, TAG, "Restored AOSP registry definitions from " + source);
@@ -1450,6 +1451,11 @@ public abstract class HookRuntimeCore extends XposedModule {
             moduleLog(Log.WARN, TAG, "Failed to restore AOSP registry definitions from " + source,
                     throwable);
         }
+    }
+
+    /** Android 17 SystemUI installs its own RETURN_TO_HOME preview runner (report 028). */
+    protected boolean ensureReturnHomePreviewRunner(Object definitions, Object crossTask) {
+        return false;
     }
 
     protected boolean ensureRegistryRunner(Object definitions, int type, Object animation,

@@ -279,6 +279,20 @@ void* g_original_gesture_stub_pointer_handler = nullptr;
 void* g_original_gesture_back_touch_processor = nullptr;
 void* g_original_gesture_stub_back_handler = nullptr;
 void* g_original_contextual_long_press_handler = nullptr;
+void* g_original_sf_anim_start = nullptr;
+miui_home_runtime_profile::SfAnimStartLayout g_sf_anim_start_layout{};
+// The frozen RETURN_TO_HOME preview pose SystemUI hands over at commit; consumed
+// once by the matching task's CLOSE_TO_HOME start (report 028).
+struct ReturnHomeHandoffRecord {
+    bool valid;
+    int32_t task_id;
+    int64_t sequence;
+    int64_t received_ms;
+    float left, top, right, bottom;
+};
+pthread_mutex_t g_return_home_handoff_lock = PTHREAD_MUTEX_INITIALIZER;
+ReturnHomeHandoffRecord g_return_home_handoff{};
+constexpr int64_t kReturnHomeHandoffMaxAgeMs = 1500;
 void* g_original_drawer_state_handler = nullptr;
 void* g_dart_app_handle = nullptr;
 uint8_t* g_dart_app_base = nullptr;
@@ -1097,6 +1111,7 @@ const miui_home_profiles::LauncherProfile* CurrentDartFeatureProfile() {
 }
 
 bool HandleRuntimeStatusQuery(void* intent);
+bool HandleReturnHomeHandoff(void* intent);
 void PublishDrawerStateForCurrentGeneration();
 void PublishOverviewStateForCurrentGeneration();
 void PublishHomeSurfaceStateForCurrentGeneration();
@@ -1389,6 +1404,7 @@ void HookBroadcastReceiverOnReceive(void* receiver, void* context, void* intent)
                           __ATOMIC_RELEASE);
         EnsureDartStatePublisherThread();
         PublishXiaoAiStateForCurrentGeneration();
+        if (HandleReturnHomeHandoff(intent)) return;
         // A status query deliberately rides this authenticated action. Reply
         // after the original receiver and publisher setup so readiness covers
         // the actual safe drain boundary.
@@ -2254,6 +2270,57 @@ void PublishXiaoAiStateForCurrentGeneration() {
         Log(ANDROID_LOG_WARN, "native XiaoAi state broadcast failed");
     }
     AtomicStore(&g_xiaoai_state_publish_in_flight, uint32_t{0});
+}
+
+int64_t MonotonicMillis() {
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return static_cast<int64_t>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
+}
+
+// Returns true only for an authenticated SystemUI handoff intent.
+bool HandleReturnHomeHandoff(void* intent) {
+    IntentGetSenderPackageFn get_sender =
+            ResolveLauncherSymbol<IntentGetSenderPackageFn>(
+                    "Intent_get_sender_package_name");
+    IntentGetExtrasFn get_extras = ResolveLauncherSymbol<IntentGetExtrasFn>(
+            "Intent_get_extras");
+    if (intent == nullptr || get_sender == nullptr || get_extras == nullptr) {
+        return false;
+    }
+    void* extras = get_extras(intent);
+    bool handoff = false;
+    if (!ReadNativeBool(extras, "return_home_handoff", &handoff) || !handoff) {
+        return false;
+    }
+    const BorrowedROptionRString sender = get_sender(intent);
+    int32_t sender_uid = -1;
+    int64_t sequence = 0;
+    int32_t task_id = -1;
+    int32_t left = 0, top = 0, right = 0, bottom = 0;
+    if (sender.tag != 0u || sender.data == nullptr ||
+            sender.length != ConstStringLength(kSystemUiPackage) ||
+            memcmp(sender.data, kSystemUiPackage, sender.length) != 0 ||
+            !ReadNativeI32(extras, "sender_uid", &sender_uid) ||
+            !VerifySystemUiUid(sender_uid) ||
+            !ReadNativeI64(extras, "return_home_sequence", &sequence) || sequence <= 0 ||
+            !ReadNativeI32(extras, "return_home_task_id", &task_id) || task_id <= 0 ||
+            !ReadNativeI32(extras, "return_home_left_x100", &left) ||
+            !ReadNativeI32(extras, "return_home_top_x100", &top) ||
+            !ReadNativeI32(extras, "return_home_right_x100", &right) ||
+            !ReadNativeI32(extras, "return_home_bottom_x100", &bottom) ||
+            right <= left || bottom <= top) {
+        Log(ANDROID_LOG_WARN, "rejected RETURN_TO_HOME handoff");
+        return true;
+    }
+    pthread_mutex_lock(&g_return_home_handoff_lock);
+    g_return_home_handoff = {true, task_id, sequence, MonotonicMillis(),
+            left / 100.0f, top / 100.0f, right / 100.0f, bottom / 100.0f};
+    pthread_mutex_unlock(&g_return_home_handoff_lock);
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+            "accepted RETURN_TO_HOME handoff task=%d sequence=%lld rect=%d,%d,%d,%d (x100)",
+            task_id, static_cast<long long>(sequence), left, top, right, bottom);
+    return true;
 }
 
 bool HandleRuntimeStatusQuery(void* intent) {
@@ -3469,6 +3536,90 @@ void HookContextualLongPressHandler(void* closure, uint32_t trigger_mode) {
         Log(ANDROID_LOG_WARN, "contextual-search trigger haptic signal could not reach SystemUI");
 }
 
+// SfAnim CLOSE_TO_HOME, the SurfaceFlinger flight from the closing app to its
+// Home icon (or the screen centre). See reports/028-os4-return-home-icon.
+constexpr int32_t kSfAnimTypeCloseToHome = 2;
+
+using SfAnimStartFn = uint32_t (*)(void* self, uint8_t* param);
+
+void WriteSfAnimFloat(uint8_t* param, uint32_t offset, float value) {
+    memcpy(param + offset, &value, sizeof(value));
+}
+
+float ReadSfAnimFloat(const uint8_t* param, uint32_t offset) {
+    float value = 0.0f;
+    memcpy(&value, param + offset, sizeof(value));
+    return value;
+}
+
+uint32_t HookSfAnimStartAnimation(void* self, uint8_t* param) {
+    const auto original = reinterpret_cast<SfAnimStartFn>(
+            AtomicLoad(&g_original_sf_anim_start));
+    const auto& layout = g_sf_anim_start_layout;
+    int32_t anim_type = -1;
+    if (param != nullptr) memcpy(&anim_type, param + layout.anim_type, sizeof(anim_type));
+    if (anim_type == kSfAnimTypeCloseToHome) {
+        // The first app target's leading i32 is its task id (the same field
+        // start_animation compares against its saved task).
+        uint8_t* targets = nullptr;
+        size_t target_count = 0u;
+        int32_t task_id = -1;
+        memcpy(&targets, param + 0x8, sizeof(targets));
+        memcpy(&target_count, param + 0x10, sizeof(target_count));
+        if (targets != nullptr && target_count >= 1u) {
+            memcpy(&task_id, targets, sizeof(task_id));
+        }
+        ReturnHomeHandoffRecord record{};
+        pthread_mutex_lock(&g_return_home_handoff_lock);
+        if (g_return_home_handoff.valid && g_return_home_handoff.task_id == task_id &&
+                MonotonicMillis() - g_return_home_handoff.received_ms <=
+                        kReturnHomeHandoffMaxAgeMs) {
+            record = g_return_home_handoff;
+            g_return_home_handoff.valid = false;
+        }
+        pthread_mutex_unlock(&g_return_home_handoff_lock);
+        if (record.valid) {
+            WriteSfAnimFloat(param, layout.w_start, record.right - record.left);
+            WriteSfAnimFloat(param, layout.h_start, record.bottom - record.top);
+            WriteSfAnimFloat(param, layout.cx_start, (record.left + record.right) * 0.5f);
+            WriteSfAnimFloat(param, layout.cy_start, (record.top + record.bottom) * 0.5f);
+        }
+        __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                "CLOSE_TO_HOME task=%d handoff=%lld start w=%.1f h=%.1f cx=%.1f cy=%.1f",
+                task_id, static_cast<long long>(record.valid ? record.sequence : 0),
+                static_cast<double>(ReadSfAnimFloat(param, layout.w_start)),
+                static_cast<double>(ReadSfAnimFloat(param, layout.h_start)),
+                static_cast<double>(ReadSfAnimFloat(param, layout.cx_start)),
+                static_cast<double>(ReadSfAnimFloat(param, layout.cy_start)));
+    }
+    return original(self, param);
+}
+
+bool InstallSfAnimStartHook(uint8_t* base) {
+    miui_home_runtime_profile::SfAnimStartLayout layout{};
+    if (base == nullptr ||
+            !miui_home_runtime_profile::ResolveSfAnimStartAnimation(base, &layout)) {
+        Log(ANDROID_LOG_WARN, "SfAnim start_animation layout unresolved");
+        return false;
+    }
+    g_sf_anim_start_layout = layout;
+    if (InstallInlineHook(base + layout.entry_offset,
+                          reinterpret_cast<void*>(HookSfAnimStartAnimation),
+                          &g_original_sf_anim_start) != kHookSuccess ||
+            AtomicLoad(&g_original_sf_anim_start) == nullptr) {
+        Log(ANDROID_LOG_ERROR, "SfAnim start_animation hook failed");
+        return false;
+    }
+    __android_log_print(ANDROID_LOG_INFO, kLogTag,
+            "installed SfAnim start_animation hook entry=0x%" PRIxPTR
+            " anim_type=0x%x w=0x%x/0x%x/0x%x h=0x%x/0x%x/0x%x cx=0x%x/0x%x cy=0x%x/0x%x",
+            layout.entry_offset, layout.anim_type,
+            layout.w_start, layout.w_end, layout.w_velocity,
+            layout.h_start, layout.h_end, layout.h_velocity,
+            layout.cx_start, layout.cx_end, layout.cy_start, layout.cy_end);
+    return true;
+}
+
 bool InstallContextualSearchLongPressHook(
         uint8_t* base,
         const miui_home_profiles::LauncherProfile* profile) {
@@ -4661,6 +4812,10 @@ bool InstallClaimedBusinessHooksForProfile(void* app_entry_point, bool repair) {
         // down the independently proven side-gesture handoff.
         Log(ANDROID_LOG_WARN,
             "continuing without native contextual-search terminal route");
+    }
+    if (!InstallSfAnimStartHook(base)) {
+        // Optional return-home continuity; Xiaomi's flight stays unchanged.
+        Log(ANDROID_LOG_WARN, "continuing without SfAnim start rewrite");
     }
     const auto* dart_profile = CurrentDartFeatureProfile();
     if (!InstallDrawerStateHook(

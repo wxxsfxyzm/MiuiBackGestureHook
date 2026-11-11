@@ -74,6 +74,8 @@
     <string name="hyperos_slide_animation_summary">以全宽侧滑替代 AOSP 预测性返回</string>
     <string name="oneui_cross_task_animation_title">来自 One UI 的 CrossTask 动画</string>
     <string name="oneui_cross_task_animation_summary">返回到其他应用的任务时使用 One UI 过渡动画</string>
+    <string name="return_home_icon_preview_title">返回桌面预览（实验性）</string>
+    <string name="return_home_icon_preview_summary">返回桌面时卡片跟手缩小，松手后飞回桌面图标</string>
     <string name="module_logging_title">详细模块日志</string>
     <string name="module_logging_summary">保留信息日志；关闭后仍保留警告和错误日志</string>
     <string name="contextual_search_title">Google 圈定即搜</string>

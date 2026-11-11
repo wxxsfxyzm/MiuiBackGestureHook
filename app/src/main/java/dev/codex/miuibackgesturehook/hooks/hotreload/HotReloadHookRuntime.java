@@ -625,6 +625,19 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             if (!backFinishOpenAtomicHookReady) {
                 hookBackFinishOpenAtomicTransfer(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains("systemui_return_home_close_rejection")) {
+                hookReturnHomeCloseRejection(hotReloadClassLoader);
+            }
+            hookReturnHomeHandoff(hotReloadClassLoader,
+                    !oldHookIds.contains("systemui_return_home_merge_capture"),
+                    !oldHookIds.contains("systemui_return_home_finish_transfer"),
+                    !oldHookIds.contains("systemui_return_home_close_leash"),
+                    !oldHookIds.contains("systemui_return_home_will_finish"));
+            hookReturnHomePreviewAnimation(hotReloadClassLoader,
+                    !oldHookIds.contains("systemui_return_home_preview_start"),
+                    !oldHookIds.contains("systemui_return_home_preview_progress"),
+                    !oldHookIds.contains("systemui_return_home_preview_commit"),
+                    !oldHookIds.contains("systemui_return_home_preview_finish"));
             if (backCommitCompositionHookReady
                     && backFinishOpenAtomicHookReady
                     && !backFinishOpenCallerDeoptimized) {
@@ -1105,6 +1118,24 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::correctPredictiveBackCommitComposition;
             case "systemui_back_finish_open_atomic":
                 return this::transferReturnHomeFinishIntoCloseStart;
+            case "systemui_return_home_close_rejection":
+                return this::forceReturnHomeCloseRejection;
+            case "systemui_return_home_merge_capture":
+                return this::captureReturnHomeMerge;
+            case "systemui_return_home_finish_transfer":
+                return this::transferReturnHomePreviewFinish;
+            case "systemui_return_home_close_leash":
+                return this::placeReturnHomeCloseLeash;
+            case "systemui_return_home_will_finish":
+                return this::onReturnHomeWillFinishToHome;
+            case "systemui_return_home_preview_start":
+                return this::startReturnHomePreview;
+            case "systemui_return_home_preview_progress":
+                return this::updateReturnHomePreview;
+            case "systemui_return_home_preview_commit":
+                return this::commitReturnHomePreview;
+            case "systemui_return_home_preview_finish":
+                return this::finishReturnHomePreview;
             case "systemui_edge_back_setBackAnimation":
                 return this::onEdgeBackSetBackAnimation;
             case "systemui_edge_back_updateIsEnabled":

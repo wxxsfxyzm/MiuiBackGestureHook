@@ -1865,4 +1865,290 @@ namespace miui_home_runtime_profile {
         return true;
     }
 
+    namespace {
+
+        // Rust fmt template of SfAnim::start_animation's entry log: literals
+        // prefixed by their length, 0xc0 = next argument, 0xc5 + 6 bytes =
+        // next argument with a {:.1} spec. Matching it whole names all 13
+        // arguments: anim_type, app_scs, icons, w[start, end, v],
+        // h[start, end, v], cx[start, end], cy[start, end].
+        constexpr uint8_t kSfAnimStartLogTemplate[] = {
+                0x25u, 0x53u, 0x66u, 0x41u, 0x6eu, 0x69u, 0x6du, 0x41u, 0x70u, 0x70u, 0x3au, 0x20u,
+                0x73u, 0x74u, 0x61u, 0x72u, 0x74u, 0x5fu, 0x61u, 0x6eu, 0x69u, 0x6du, 0x61u, 0x74u,
+                0x69u, 0x6fu, 0x6eu, 0x20u, 0x61u, 0x6eu, 0x69u, 0x6du, 0x5fu, 0x74u, 0x79u, 0x70u,
+                0x65u, 0x3du, 0xc0u, 0x09u, 0x20u, 0x61u, 0x70u, 0x70u, 0x5fu, 0x73u, 0x63u, 0x73u,
+                0x3du, 0xc0u, 0x07u, 0x20u, 0x69u, 0x63u, 0x6fu, 0x6eu, 0x73u, 0x3du, 0xc0u, 0x04u,
+                0x20u, 0x77u, 0x3du, 0x5bu, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u,
+                0xe2u, 0x86u, 0x92u, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u, 0x20u,
+                0x76u, 0x3du, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x05u, 0x5du, 0x20u,
+                0x68u, 0x3du, 0x5bu, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u, 0xe2u,
+                0x86u, 0x92u, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u, 0x20u, 0x76u,
+                0x3du, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x06u, 0x5du, 0x20u, 0x63u,
+                0x78u, 0x3du, 0x5bu, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u, 0xe2u,
+                0x86u, 0x92u, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x06u, 0x5du, 0x20u,
+                0x63u, 0x79u, 0x3du, 0x5bu, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x03u,
+                0xe2u, 0x86u, 0x92u, 0xc5u, 0x20u, 0x00u, 0x00u, 0x70u, 0x01u, 0x00u, 0x01u, 0x5du,
+                0x00u,
+        };
+        constexpr size_t kSfAnimLogArgs = 13u;
+        constexpr uint32_t kSfAnimParamSize = 0x290u;
+        constexpr uint32_t kMovW2SfAnimParamSize = 0x52805202u;  // mov w2, #0x290
+
+        bool FindUniqueReadOnlyBytes(const ElfView &view, const uint8_t *needle,
+                size_t size, uintptr_t *result) {
+            uintptr_t found = 0u;
+            uint32_t count = 0u;
+            for (size_t index = 0u; index < view.load_count; ++index) {
+                const LoadSegment &load = view.loads[index];
+                if ((load.flags & PF_R) == 0u || (load.flags & PF_X) != 0u ||
+                        load.end - load.start < size) {
+                    continue;
+                }
+                for (uintptr_t offset = load.start; offset + size <= load.end; ++offset) {
+                    if (view.base[offset] == needle[0] &&
+                            memcmp(view.base + offset, needle, size) == 0) {
+                        found = offset;
+                        ++count;
+                    }
+                }
+            }
+            if (count != 1u) return false;
+            *result = found;
+            return true;
+        }
+
+        bool IsSpPreIndexStore(uint32_t word) {
+            if (((word >> 5u) & 0x1fu) != 31u) return false;
+            return (word & 0xffe00c00u) == 0xfc000c00u ||  // str dT, [sp, #-imm]!
+                    (word & 0xffc00000u) == 0xa9800000u ||  // stp xT, xT2, [sp, #-imm]!
+                    (word & 0xffc00000u) == 0x6d800000u;    // stp dT, dT2, [sp, #-imm]!
+        }
+
+        // General-purpose registers an instruction may overwrite; stores and
+        // branches write none of the tracked registers.
+        uint32_t WrittenRegisterMask(uint32_t word) {
+            if ((word & 0x0a000000u) == 0x08000000u) {
+                if ((word & (1u << 22u)) == 0u) return 0u;
+                uint32_t mask = 1u << (word & 0x1fu);
+                if ((word & 0x3a000000u) == 0x28000000u) {
+                    mask |= 1u << ((word >> 10u) & 0x1fu);
+                }
+                return mask;
+            }
+            if ((word & 0x1c000000u) == 0x14000000u) return 0u;
+            return 1u << (word & 0x1fu);
+        }
+
+        bool IsSfAnimParamCopyCall(const ElfView &view, uintptr_t call,
+                uintptr_t memcpy_got) {
+            uint32_t word = 0u;
+            uintptr_t destination = 0u;
+            uintptr_t argument = 0u;
+            return call >= 24u &&
+                    ReadInstruction(view, call - 24u, &word) &&
+                    DecodeAddImmediate(word, 0u, 31u, &destination) &&
+                    InstructionEquals(view, call - 16u, kMovW2SfAnimParamSize) &&
+                    CallTargetsImport(view, call - 12u, memcpy_got) &&
+                    ReadInstruction(view, call - 8u, &word) &&
+                    DecodeAddImmediate(word, 1u, 31u, &argument) &&
+                    argument == destination &&
+                    ReadInstruction(view, call - 4u, &word) &&
+                    (word & 0xffe0ffffu) == 0xaa0003e0u;
+        }
+
+        struct SfAnimLogSlot {
+            bool present;
+            bool from_param;
+            uintptr_t field;
+            uintptr_t formatter;
+        };
+
+    }  // namespace
+
+    bool ResolveSfAnimStartAnimation(const uint8_t *base, SfAnimStartLayout *layout) {
+        if (layout == nullptr) return false;
+        *layout = {};
+        ElfView view{};
+        uintptr_t log_template = 0u;
+        uintptr_t memcpy_got = 0u;
+        if (!ParseElf(base, &view) || !FindImportGot(view, kMemcpy, &memcpy_got) ||
+                !FindUniqueReadOnlyBytes(view, kSfAnimStartLogTemplate,
+                        sizeof(kSfAnimStartLogTemplate), &log_template)) {
+            return false;
+        }
+
+        // The entry log is the only code materializing the template in x0.
+        uintptr_t site = 0u;
+        uint32_t sites = 0u;
+        for (size_t index = 0u; index < view.load_count; ++index) {
+            const LoadSegment &load = view.loads[index];
+            if ((load.flags & (PF_R | PF_X)) != (PF_R | PF_X)) continue;
+            for (uintptr_t at = (load.start + 3u) & ~uintptr_t{3}; at + 8u <= load.end; at += 4u) {
+                uintptr_t target = 0u;
+                if (DecodeAddressPair(view, at, 0u, &target) && target == log_template) {
+                    site = at;
+                    ++sites;
+                }
+            }
+        }
+        if (sites != 1u) return false;
+
+        // The nearest SP pre-index store opens the frame; between it and the
+        // log, x1 is saved to a callee-saved register and nothing is called.
+        uintptr_t entry = 0u;
+        for (uintptr_t back = 4u; back <= 0x80u && back <= site; back += 4u) {
+            uint32_t word = 0u;
+            if (!ReadInstruction(view, site - back, &word)) return false;
+            if (IsSpPreIndexStore(word)) {
+                entry = site - back;
+                break;
+            }
+        }
+        if (entry == 0u) return false;
+        uint32_t param_reg = 32u;
+        for (uintptr_t at = entry + 4u; at < site; at += 4u) {
+            uint32_t word = 0u;
+            if (!ReadInstruction(view, at, &word) ||
+                    (word & 0xfc000000u) == 0x94000000u || word == 0xd65f03c0u) {
+                return false;
+            }
+            if ((word & 0xffffffe0u) == 0xaa0103e0u) {
+                const uint32_t reg = word & 0x1fu;
+                if (reg < 19u || reg > 28u || param_reg != 32u) return false;
+                param_reg = reg;
+            } else if (param_reg != 32u &&
+                    (WrittenRegisterMask(word) & (1u << param_reg)) != 0u) {
+                return false;
+            }
+        }
+        if (param_reg == 32u) return false;
+
+        // Every direct caller passes a fresh 0x290-byte memcpy'd copy in x1.
+        uint32_t callers = 0u;
+        for (size_t index = 0u; index < view.load_count; ++index) {
+            const LoadSegment &load = view.loads[index];
+            if ((load.flags & (PF_R | PF_X)) != (PF_R | PF_X)) continue;
+            for (uintptr_t at = (load.start + 3u) & ~uintptr_t{3}; at + 4u <= load.end; at += 4u) {
+                uintptr_t target = 0u;
+                if (!DecodeBlTarget(view, at, &target) || target != entry) continue;
+                if (at < load.start + 24u || !IsSfAnimParamCopyCall(view, at, memcpy_got)) {
+                    return false;
+                }
+                ++callers;
+            }
+        }
+        if (callers == 0u) return false;
+
+        // Replay the log argument array: stp x8, x9, [sp, #k] pairs a value
+        // (param field or local) with its formatter.
+        SfAnimLogSlot slots[kSfAnimLogArgs]{};
+        bool args_base_seen = false;
+        uintptr_t args_base = 0u;
+        bool x8_known = false;
+        bool x8_param = false;
+        uintptr_t x8_field = 0u;
+        bool x9_known = false;
+        uintptr_t x9_formatter = 0u;
+        bool log_called = false;
+        for (uintptr_t at = site + 8u; at < site + 0x200u; at += 4u) {
+            uint32_t word = 0u;
+            uintptr_t immediate = 0u;
+            uintptr_t page = 0u;
+            if (!ReadInstruction(view, at, &word)) return false;
+            if ((word & 0xfc000000u) == 0x94000000u) {
+                log_called = true;
+                break;
+            }
+            if (DecodeAddImmediate(word, 1u, 31u, &immediate)) {
+                if (args_base_seen) return false;
+                args_base_seen = true;
+                args_base = immediate;
+                continue;
+            }
+            if (DecodeAddImmediate(word, 8u, param_reg, &immediate)) {
+                x8_known = true;
+                x8_param = true;
+                x8_field = immediate;
+                continue;
+            }
+            if ((word & 0xffc003ffu) == (0xd1000000u | (29u << 5u) | 8u)) {
+                x8_known = true;
+                x8_param = false;
+                x8_field = 0u;
+                continue;
+            }
+            if (DecodeAdrp(word, at, 9u, &page)) {
+                uint32_t next = 0u;
+                if (!ReadInstruction(view, at + 4u, &next) ||
+                        !DecodeAddImmediate(next, 9u, 9u, &immediate) ||
+                        AddOverflows(page, immediate)) {
+                    return false;
+                }
+                x9_known = true;
+                x9_formatter = page + immediate;
+                at += 4u;
+                continue;
+            }
+            if ((word & 0xffc07fffu) == (0xa9000000u | (9u << 10u) | (31u << 5u) | 8u)) {
+                int64_t pair_index = static_cast<int64_t>((word >> 15u) & 0x7fu);
+                if ((pair_index & 0x40) != 0) pair_index -= 0x80;
+                const int64_t offset = pair_index * 8;
+                if (!args_base_seen || !x8_known || !x9_known ||
+                        offset < static_cast<int64_t>(args_base)) {
+                    return false;
+                }
+                const uint64_t delta = static_cast<uint64_t>(offset) - args_base;
+                if (delta % 16u != 0u || delta / 16u >= kSfAnimLogArgs) return false;
+                SfAnimLogSlot &slot = slots[delta / 16u];
+                if (slot.present) return false;
+                slot = {true, x8_param, x8_field, x9_formatter};
+                continue;
+            }
+            const uint32_t written = WrittenRegisterMask(word);
+            if ((written & (1u << 8u)) != 0u) x8_known = false;
+            if ((written & (1u << 9u)) != 0u) x9_known = false;
+            if ((written & (1u << param_reg)) != 0u) return false;
+        }
+        if (!log_called) return false;
+        for (const SfAnimLogSlot &slot : slots) {
+            if (!slot.present) return false;
+        }
+        const uintptr_t float_formatter = slots[3].formatter;
+        if (!slots[0].from_param || slots[1].from_param || slots[2].from_param ||
+                slots[1].formatter != slots[2].formatter ||
+                slots[0].formatter == float_formatter ||
+                slots[1].formatter == float_formatter) {
+            return false;
+        }
+        uint32_t fields[kSfAnimLogArgs]{};
+        for (size_t index = 0u; index < kSfAnimLogArgs; ++index) {
+            if (index == 1u || index == 2u) continue;
+            const SfAnimLogSlot &slot = slots[index];
+            if ((index >= 3u && (!slot.from_param || slot.formatter != float_formatter)) ||
+                    slot.field % 4u != 0u || slot.field + 4u > kSfAnimParamSize) {
+                return false;
+            }
+            fields[index] = static_cast<uint32_t>(slot.field);
+        }
+        // Channel records share one shape: end follows start, velocity at +0xc.
+        if (fields[4] != fields[3] + 4u || fields[5] != fields[3] + 0xcu ||
+                fields[7] != fields[6] + 4u || fields[8] != fields[6] + 0xcu ||
+                fields[10] != fields[9] + 4u || fields[12] != fields[11] + 4u) {
+            return false;
+        }
+        layout->entry_offset = entry;
+        layout->anim_type = fields[0];
+        layout->w_start = fields[3];
+        layout->w_end = fields[4];
+        layout->w_velocity = fields[5];
+        layout->h_start = fields[6];
+        layout->h_end = fields[7];
+        layout->h_velocity = fields[8];
+        layout->cx_start = fields[9];
+        layout->cx_end = fields[10];
+        layout->cy_start = fields[11];
+        layout->cy_end = fields[12];
+        return true;
+    }
+
 }  // namespace miui_home_runtime_profile

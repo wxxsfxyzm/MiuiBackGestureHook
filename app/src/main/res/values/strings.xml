@@ -76,6 +76,8 @@
     <string name="hyperos_slide_animation_summary">Full-width slide instead of the AOSP predictive back</string>
     <string name="oneui_cross_task_animation_title">One UI CrossTask animation</string>
     <string name="oneui_cross_task_animation_summary">Use the One UI transition when returning to a task in another app</string>
+    <string name="return_home_icon_preview_title">Return-to-Home preview (experimental)</string>
+    <string name="return_home_icon_preview_summary">Shrink the app while swiping back to Home, then fly it into its Home icon</string>
     <string name="module_logging_title">Detailed module logs</string>
     <string name="module_logging_summary">Keep informational logs enabled; warnings and errors are always kept</string>
     <string name="contextual_search_title">Google Circle to Search</string>
