@@ -6474,7 +6474,6 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         TransitionInfo closeInfo;
         boolean placed;
         SurfaceControl homeWrapper;
-        SurfaceControl homeTask;
         boolean backgroundReleased;
         final Looper looper = Looper.myLooper();
 
@@ -6501,6 +6500,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
     }
 
     /** Read at registry setup, so a switch change applies from the next gesture. */
+    @Override
     protected boolean isReturnHomePreviewEnabled() {
         return isReturnHomePreviewSupported() && readHyperOsBooleanPreference(
                 PredictiveBackPreferences.KEY_RETURN_HOME_ICON_PREVIEW,
@@ -6636,12 +6636,24 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
     protected static final int RETURN_HOME_SCRIM_BLUR_PX = 150;
     protected static final float RETURN_HOME_SCRIM_DIM_ALPHA = 0.36f;
     protected static final float RETURN_HOME_SCRIM_FULL_PROGRESS = 0.25f;
-    // Xiaomi presents one Home-state frame at the CLOSE start and switches to its own
-    // app-state blur/dim on the next; cover that frame, then hand the background over
-    // without stacking both dims (screen-record measured).
-    protected static final long RETURN_HOME_SCRIM_FADE_DELAY_MS = 0L;
-    protected static final long RETURN_HOME_SCRIM_FADE_MS = 250L;
-    protected static final long RETURN_HOME_HOME_REVEAL_MS = 80L;
+    // Xiaomi's app state recedes Home's icons and zooms the wallpaper in (screen
+    // record of an icon launch; layer trace of the CLOSE start, wallpaper top -205).
+    // The wallpaper and the Home task share the entering leash: zoom the leash for
+    // the wallpaper and counter-scale the Home task inside it for the icons.
+    protected static final float RETURN_HOME_APP_STATE_SCALE = 0.96f;
+    protected static final float RETURN_HOME_APP_STATE_WALLPAPER_ZOOM = 1.157f;
+    protected volatile Object returnHomeTaskOrganizer;
+    protected SurfaceControl returnHomeTaskLeash;
+    protected final Matrix returnHomeTaskMatrix = new Matrix();
+    // Xiaomi reveals Home in its app state (luminance 85 vs the scrim's 82) 21-28 ms
+    // after the CLOSE start; until then the scrim covers the hidden Home, afterwards
+    // its dim stacks on Xiaomi's (layer trace + screen record). Shell cannot see the
+    // reveal frame, so fade the dim linearly across that window: a reveal anywhere in
+    // it only meets part of the dim. Keep the blur a little longer, so a late reveal
+    // never shows a sharp stale Home: blurring Xiaomi's blurred app state is invisible.
+    protected static final long RETURN_HOME_HOME_REVEAL_MS = 16L;
+    protected static final long RETURN_HOME_SCRIM_DIM_RELEASE_MS = 24L;
+    protected static final long RETURN_HOME_SCRIM_BLUR_RELEASE_MS = 200L;
     protected static final long RETURN_HOME_BACKGROUND_FALLBACK_MS = 400L;
     protected static final int ACTIVITY_TYPE_HOME_VALUE = 2;
 
@@ -6730,47 +6742,6 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         t.apply();
     }
 
-    /** After Xiaomi's own blur is on screen, fade the preview scrim out underneath it. */
-    protected void fadeOutReturnHomeScrim(ReturnHomeScrim scrim) {
-        Handler handler = new Handler(Looper.myLooper());
-        handler.postDelayed(() -> {
-            if (RETURN_HOME_SCRIM_FADE_MS <= 0L) {
-                try {
-                    removeReturnHomeScrim(scrim);
-                } catch (Exception exception) {
-                    moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME scrim",
-                            exception);
-                }
-                return;
-            }
-            float start = scrim.amount;
-            ValueAnimator animator = ValueAnimator.ofFloat(start, 0f);
-            animator.setDuration(RETURN_HOME_SCRIM_FADE_MS);
-            animator.addUpdateListener(value -> {
-                try {
-                    SurfaceControl.Transaction t = new SurfaceControl.Transaction();
-                    applyReturnHomeScrim(scrim, (Float) value.getAnimatedValue(), t);
-                    t.apply();
-                } catch (Throwable throwable) {
-                    moduleLog(Log.WARN, TAG, "RETURN_TO_HOME scrim fade failed", throwable);
-                    value.cancel();
-                }
-            });
-            animator.addListener(new AnimatorListenerAdapter() {
-                @Override
-                public void onAnimationEnd(Animator ended) {
-                    try {
-                        removeReturnHomeScrim(scrim);
-                    } catch (Exception exception) {
-                        moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME scrim",
-                                exception);
-                    }
-                }
-            });
-            animator.start();
-        }, RETURN_HOME_SCRIM_FADE_DELAY_MS);
-    }
-
     /** A preview that ends without a handoff (cancel, timeout) drops its scrim at once. */
     protected Object finishReturnHomePreview(XposedInterface.Chain chain) throws Throwable {
         Object animation = chain.getThisObject();
@@ -6781,9 +6752,30 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 if (scrim != null) {
                     removeReturnHomeScrim(scrim);
                 }
+                resetReturnHomeTaskLeash(null);
             }
         }
         return chain.proceed();
+    }
+
+    /** Drops the preview's Home counter-scale, in {@code t} or immediately. */
+    protected void resetReturnHomeTaskLeash(SurfaceControl.Transaction t) {
+        SurfaceControl homeTask = returnHomeTaskLeash;
+        returnHomeTaskLeash = null;
+        if (homeTask == null || !homeTask.isValid()) {
+            return;
+        }
+        try {
+            SurfaceControl.Transaction apply = t != null ? t : new SurfaceControl.Transaction();
+            invokeMethod(apply, "setMatrix",
+                    new Class<?>[]{SurfaceControl.class, Matrix.class, float[].class},
+                    new Object[]{homeTask, new Matrix(), new float[9]});
+            if (t == null) {
+                apply.apply();
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to reset RETURN_TO_HOME Home task", throwable);
+        }
     }
 
     protected Object startReturnHomePreview(XposedInterface.Chain chain) throws Throwable {
@@ -6802,6 +6794,18 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         startTaskRect.offsetTo(0, 0);
         returnHomePreviewRect.set(startTaskRect);
         removeReturnHomeScrim(returnHomeScrim);
+        resetReturnHomeTaskLeash(null);
+        try {
+            RemoteAnimationTarget entering =
+                    (RemoteAnimationTarget) readField(animation, "mEnteringTarget");
+            Object organizer = returnHomeTaskOrganizer;
+            returnHomeTaskLeash = organizer == null ? null : (SurfaceControl) invokeMethod(
+                    organizer, "getTaskLeash", new Class<?>[]{int.class},
+                    new Object[]{Integer.valueOf(entering.taskId)});
+        } catch (Throwable throwable) {
+            returnHomeTaskLeash = null;
+            moduleLog(Log.WARN, TAG, "RETURN_TO_HOME Home task leash unavailable", throwable);
+        }
         try {
             SurfaceControl.Transaction t =
                     (SurfaceControl.Transaction) readField(animation, "mTransaction");
@@ -6812,7 +6816,8 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             moduleLog(Log.WARN, TAG, "Failed to create RETURN_TO_HOME scrim", throwable);
         }
         moduleLog(Log.INFO, TAG, "Started RETURN_TO_HOME preview"
-                + ", taskId=" + closing.taskId + ", bounds=" + startTaskRect);
+                + ", taskId=" + closing.taskId + ", bounds=" + startTaskRect
+                + ", homeTask=" + (returnHomeTaskLeash != null));
         return null;
     }
 
@@ -6855,14 +6860,27 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         float top = (height - scaledHeight) / 2f + shift;
         returnHomePreviewRect.set(left, top, left + scaledWidth, top + scaledHeight);
 
+        // Ease Home into Xiaomi's app state so nothing jumps when Xiaomi takes over.
+        float amount = Math.min(1f, progress / RETURN_HOME_SCRIM_FULL_PROGRESS);
+        SurfaceControl homeTask = returnHomeTaskLeash;
+        float zoom = homeTask == null ? 1f
+                : 1f + (RETURN_HOME_APP_STATE_WALLPAPER_ZOOM - 1f) * amount;
+        RectF home = new RectF(start);
+        home.inset(width * (1f - zoom) / 2f, height * (1f - zoom) / 2f);
         invokeAnyMethod(animation, "applyTransform", new Object[]{
-                entering.leash, new RectF(start), Float.valueOf(0f)});
+                entering.leash, home, Float.valueOf(0f)});
+        if (homeTask != null && homeTask.isValid()) {
+            float homeScale = (1f - (1f - RETURN_HOME_APP_STATE_SCALE) * amount) / zoom;
+            returnHomeTaskMatrix.setScale(homeScale, homeScale, width / 2f, height / 2f);
+            invokeMethod(readField(animation, "mTransaction"), "setMatrix",
+                    new Class<?>[]{SurfaceControl.class, Matrix.class, float[].class},
+                    new Object[]{homeTask, returnHomeTaskMatrix, new float[9]});
+        }
         invokeAnyMethod(animation, "applyTransform", new Object[]{
                 closing.leash, returnHomePreviewRect, Float.valueOf(cornerRadius)});
         ReturnHomeScrim scrim = returnHomeScrim;
         if (scrim != null) {
-            applyReturnHomeScrim(scrim,
-                    Math.min(1f, progress / RETURN_HOME_SCRIM_FULL_PROGRESS),
+            applyReturnHomeScrim(scrim, amount,
                     (SurfaceControl.Transaction) readField(animation, "mTransaction"));
         }
         invokeAnyMethod(animation, "applyTransaction", new Object[0]);
@@ -7048,8 +7066,8 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                     new Class<?>[]{SurfaceControl.class, float.class},
                     new Object[]{wrapper, Float.valueOf(handoff.cornerRadius)});
             if (scrim != null) {
-                // Stay directly beneath the card: CLOSE orders the wallpaper above Home,
-                // so beneath Home the scrim would expose the unblurred wallpaper.
+                // Directly beneath the card, above Home, as during the preview. Xiaomi's
+                // app-state Home is translucent, so beneath it the dims would still stack.
                 setReturnHomeRelativeLayer(t, scrim.root, wrapper);
             }
             handoff.placed = true;
@@ -7060,26 +7078,24 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         } else if (handoff.homeWrapper == null
                 && ((Integer) invokeMethod(task, "getActivityType", new Class<?>[0],
                         new Object[0])) == ACTIVITY_TYPE_HOME_VALUE) {
-            // Xiaomi reveals this wrapper (find_home_surface_control, alpha 1) when its
-            // flight starts, one frame before Flutter draws Home in its app state; that
-            // frame showed Home in its sharp Home state. Hide the Home task surface
-            // inside the wrapper instead and reveal it once the app state is drawn, so
-            // the preview scrim (beneath Home) keeps showing until Home covers it.
-            SurfaceControl homeTask = change.getLeash();
-            t.setAlpha(homeTask, 0f);
+            // The opening Home wrapper starts at alpha 0 until Xiaomi's flight reveals it
+            // a few frames later; those frames dropped Home's glow from beneath the
+            // scrim (layer trace + screen record). Keep Home visible under the scrim
+            // through the CLOSE start; the scrim leaves once Home is in its app state.
+            t.setAlpha(wrapper, 1f);
+            resetReturnHomeTaskLeash(t);
             handoff.homeWrapper = wrapper;
-            handoff.homeTask = homeTask;
             new Handler(handoff.looper).postDelayed(
                     () -> releaseReturnHomeBackground(handoff), RETURN_HOME_HOME_REVEAL_MS);
-            moduleLog(Log.INFO, TAG, "Hid RETURN_TO_HOME Home task until Xiaomi app state"
-                    + ", homeTaskId=" + task.taskId + ", homeTask=" + homeTask);
+            moduleLog(Log.INFO, TAG, "Kept RETURN_TO_HOME Home visible beneath the scrim"
+                    + ", homeTaskId=" + task.taskId + ", homeWrapper=" + wrapper);
         }
         return result;
     }
 
     /**
      * Xiaomi's flight has started (its startPop reports setWillFinishToHome over
-     * Binder): its Home now covers the scrim, which fades beneath on wmshell.main.
+     * Binder): its Home now replaces the scrim, released on wmshell.main.
      */
     protected Object onReturnHomeWillFinishToHome(XposedInterface.Chain chain)
             throws Throwable {
@@ -7100,39 +7116,66 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         moduleLog(Log.INFO, TAG, "Releasing RETURN_TO_HOME background to Xiaomi Home"
                 + ", taskId=" + handoff.taskId);
         try {
-            // Same frame: Xiaomi's app-state Home appears and covers the scrim, which
-            // then fades out beneath it.
-            SurfaceControl.Transaction t = new SurfaceControl.Transaction();
-            if (handoff.homeTask != null && handoff.homeTask.isValid()) {
-                t.setAlpha(handoff.homeTask, 1f);
+            if (scrim != null) {
+                releaseReturnHomeScrim(scrim);
             }
-            if (scrim != null && handoff.homeWrapper != null
-                    && handoff.homeWrapper.isValid() && scrim.root.isValid()) {
-                setReturnHomeRelativeLayer(t, scrim.root, handoff.homeWrapper);
-            }
-            t.apply();
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to release RETURN_TO_HOME background",
                     throwable);
-        }
-        if (scrim != null) {
-            fadeOutReturnHomeScrim(scrim);
-        }
-    }
-
-    protected void restoreReturnHomeHomeWrapper(ReturnHomeHandoff handoff, long delayMs) {
-        SurfaceControl home = handoff.homeTask;
-        if (home == null) {
-            return;
-        }
-        new Handler(Looper.myLooper()).postDelayed(() -> {
-            if (home.isValid()) {
-                new SurfaceControl.Transaction().setAlpha(home, 1f).apply();
+            try {
+                removeReturnHomeScrim(scrim);
+            } catch (Exception exception) {
+                moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME scrim",
+                        exception);
             }
-        }, delayMs);
+        }
     }
 
-    /** If Xiaomi never reports its start, never leave Home hidden or the scrim behind. */
+    /** Hands the background to Xiaomi's app state: dim first, blur last, then removal. */
+    protected void releaseReturnHomeScrim(ReturnHomeScrim scrim) {
+        if (returnHomeScrim == scrim) {
+            returnHomeScrim = null;
+        }
+        float dimStart = RETURN_HOME_SCRIM_DIM_ALPHA * scrim.amount;
+        float blurStart = RETURN_HOME_SCRIM_BLUR_PX * scrim.amount;
+        ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
+        animator.setDuration(RETURN_HOME_SCRIM_BLUR_RELEASE_MS);
+        animator.setInterpolator(null);
+        animator.addUpdateListener(value -> {
+            if (!scrim.root.isValid()) {
+                value.cancel();
+                return;
+            }
+            float elapsed = value.getAnimatedFraction() * RETURN_HOME_SCRIM_BLUR_RELEASE_MS;
+            float dim = 1f - Math.min(1f, elapsed / RETURN_HOME_SCRIM_DIM_RELEASE_MS);
+            float blur = 1f - value.getAnimatedFraction();
+            try {
+                SurfaceControl.Transaction t = new SurfaceControl.Transaction();
+                t.setAlpha(scrim.dim, dimStart * dim);
+                invokeMethod(t, "setBackgroundBlurRadius",
+                        new Class<?>[]{SurfaceControl.class, int.class},
+                        new Object[]{scrim.blur, Integer.valueOf(Math.round(blurStart * blur))});
+                t.apply();
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG, "RETURN_TO_HOME scrim release failed", throwable);
+                value.cancel();
+            }
+        });
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator ended) {
+                try {
+                    removeReturnHomeScrim(scrim);
+                } catch (Exception exception) {
+                    moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME scrim",
+                            exception);
+                }
+            }
+        });
+        animator.start();
+    }
+
+    /** If the release never runs, never leave the scrim behind. */
     protected void scheduleReturnHomeBackgroundFallback(ReturnHomeHandoff handoff) {
         new Handler(Looper.myLooper()).postDelayed(() -> {
             if (handoff.backgroundReleased) {
@@ -7141,10 +7184,11 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             handoff.backgroundReleased = true;
             moduleLog(Log.WARN, TAG, "RETURN_TO_HOME background fallback"
                     + ", taskId=" + handoff.taskId);
-            restoreReturnHomeHomeWrapper(handoff, 0L);
-            ReturnHomeScrim scrim = returnHomeScrim;
-            if (scrim != null) {
-                fadeOutReturnHomeScrim(scrim);
+            try {
+                removeReturnHomeScrim(returnHomeScrim);
+            } catch (Exception exception) {
+                moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME scrim",
+                        exception);
             }
         }, RETURN_HOME_BACKGROUND_FALLBACK_MS);
     }
@@ -8228,6 +8272,9 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         try {
             Object registry = readField(controller, "mShellBackAnimationRegistry");
             ensureAospRegistryDefinitions(registry, source);
+            Object organizer = readFieldOrNull(
+                    readFieldOrNull(controller, "mTransitions"), "mOrganizer");
+            returnHomeTaskOrganizer = organizer instanceof String ? null : organizer;
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to ensure AOSP back animations from " + source,
                     throwable);
