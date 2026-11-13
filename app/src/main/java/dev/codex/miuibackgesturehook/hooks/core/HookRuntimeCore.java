@@ -5,6 +5,7 @@ import android.animation.AnimatorListenerAdapter;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.os.Build;
@@ -51,7 +52,22 @@ public abstract class HookRuntimeCore extends XposedModule {
         }
         synchronized (this) {
             if (!dexKitLibraryLoaded) {
-                System.loadLibrary("dexkit");
+                // Module libraries are extracted for the embedded Java MiuiHome, so the APK no
+                // longer stores DexKit page-aligned for LSPosed's in-APK library lookup.
+                java.io.File extracted = null;
+                try {
+                    android.content.pm.ApplicationInfo module = getModuleApplicationInfo();
+                    if (module != null && module.nativeLibraryDir != null) {
+                        extracted = new java.io.File(module.nativeLibraryDir, "libdexkit.so");
+                    }
+                } catch (Throwable ignored) {
+                    // Fall back to the class loader's library search path.
+                }
+                if (extracted != null && extracted.isFile()) {
+                    System.load(extracted.getAbsolutePath());
+                } else {
+                    System.loadLibrary("dexkit");
+                }
                 dexKitLibraryLoaded = true;
             }
         }
@@ -607,13 +623,53 @@ public abstract class HookRuntimeCore extends XposedModule {
         return packageName;
     }
 
+    /** -1 unknown, 0 Java (dex) MiuiHome, 1 native Flutter MiuiHome. */
+    private static volatile int miuiHomeImplementation = -1;
+
+    /** Records the installed MiuiHome flavor from an authoritative ApplicationInfo. */
+    protected static void noteMiuiHomeApplicationInfo(ApplicationInfo applicationInfo) {
+        if (applicationInfo != null) {
+            miuiHomeImplementation =
+                    (applicationInfo.flags & ApplicationInfo.FLAG_HAS_CODE) != 0 ? 0 : 1;
+        }
+    }
+
+    /** Drops the cached flavor after the launcher package changes. */
+    protected static void invalidateMiuiHomeImplementation() {
+        miuiHomeImplementation = -1;
+    }
+
     /**
-     * Android 17 MiuiHome is protected from every LSPosed hook in this module. The package
-     * remains in the static scope solely so the same APK can continue supporting Android 16;
-     * libxposed does not provide a platform-conditional scope list.
+     * Whether the current launcher contract is the Android 17 native (code-less Flutter)
+     * MiuiHome. An Android 16 Java MiuiHome installed on Android 17 uses the Android 16
+     * launcher contract instead. An unknown flavor fails closed to the native contract.
+     */
+    protected static boolean usesNativeMiuiHome() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN) {
+            return false;
+        }
+        int implementation = miuiHomeImplementation;
+        if (implementation < 0) {
+            try {
+                Context application = android.app.ActivityThread.currentApplication();
+                if (application != null) {
+                    noteMiuiHomeApplicationInfo(application.getPackageManager()
+                            .getApplicationInfo(MiuiHomePackages.MIUI, 0));
+                    implementation = miuiHomeImplementation;
+                }
+            } catch (Throwable ignored) {
+                // Keep the protective native contract until the flavor is known.
+            }
+        }
+        return implementation != 0;
+    }
+
+    /**
+     * The native Android 17 MiuiHome is protected from every LSPosed hook in this module. A
+     * Java MiuiHome installed on Android 17 receives the Android 16 launcher hooks.
      */
     protected static boolean blockMiuiHomeXposedHooks() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN;
+        return usesNativeMiuiHome();
     }
 
     protected static boolean isMiuiHomeProcess(String candidate) {

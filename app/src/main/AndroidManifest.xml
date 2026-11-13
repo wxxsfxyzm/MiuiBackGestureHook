@@ -3,6 +3,11 @@
     <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
+    <!-- Shows which MiuiHome implementation is running in the launcher option. -->
+    <queries>
+        <package android:name="com.miui.home" />
+    </queries>
+
     <application
         android:name=".ModuleApplication"
         android:allowBackup="false"

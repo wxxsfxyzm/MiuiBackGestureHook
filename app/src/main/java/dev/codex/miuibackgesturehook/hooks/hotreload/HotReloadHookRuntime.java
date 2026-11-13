@@ -20,12 +20,12 @@ import java.util.Set;
 
 import dev.codex.miuibackgesturehook.hooks.core.MiuiHomePackages;
 import dev.codex.miuibackgesturehook.hooks.googleapp.GoogleAppRuntime;
-import dev.codex.miuibackgesturehook.hooks.systemserver.SystemServerHookRuntime;
+import dev.codex.miuibackgesturehook.hooks.javahome.JavaHomeSwipeUpRuntime;
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModuleInterface;
 
 @SuppressLint("PrivateApi")
-public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
+public abstract class HotReloadHookRuntime extends JavaHomeSwipeUpRuntime {
 
     private final GoogleAppRuntime googleApp = new GoogleAppRuntime(new GoogleAppRuntime.Host() {
         @Override
@@ -194,6 +194,7 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         releaseSideTriggerExclusionPreferenceListener();
         releaseGestureTriggerAreaPreferenceListener();
         releaseModuleLoggingPreferenceListener();
+        releaseJavaHomeLauncherSwitch();
         Object[][] inputState = new Object[nativeInputMonitors.size()][2];
         int index = 0;
         for (Map.Entry<Object, NativeBackInputMonitor> entry
@@ -209,6 +210,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         }
         nativeInputMonitors.clear();
         destroySystemUiPlatformImpl();
+        releaseMiuiHomeFlavorReceiver();
+        Object savedJavaHomeBridge = javaHomeBridgeInstalled
+                ? detachJavaHomeSwipeUpBridge("hot reload") : null;
         param.setSavedInstanceState(new Object[]{
                 inputState, Boolean.valueOf(savedMiuiOverviewVisible),
                 Long.valueOf(savedMiuiOverviewDismissDeadline),
@@ -225,7 +229,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 Boolean.valueOf(savedMiuiFolderVisible),
                 savedContextualSearchNavigationBars,
                 Long.valueOf(savedMiuiLauncherDartStateOwnerEpoch),
-                saveServerBarRetiredOwners()
+                saveServerBarRetiredOwners(),
+                savedJavaHomeBridge
         });
         return true;
     }
@@ -426,6 +431,16 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 if (!oldHookIds.contains("server_return_home_touch_occlusion")) {
                     hookReturnHomeTouchOcclusion(serverClassLoader);
                 }
+                if (!oldHookIds.contains(SERVER_JAVA_HOME_SCAN_HOOK)) {
+                    hookJavaHomeLauncherScanPath(serverClassLoader);
+                }
+                if (!oldHookIds.contains(SERVER_JAVA_HOME_SCAN_FLAGS_HOOK)) {
+                    hookJavaHomeLauncherScanFlags(serverClassLoader);
+                }
+                if (!oldHookIds.contains(SERVER_JAVA_HOME_ALLOWLIST_HOOK)) {
+                    hookJavaHomeLauncherAllowlist(serverClassLoader);
+                }
+                ensureJavaHomeLauncherSwitch();
                 hookSideTriggerExclusion(serverClassLoader, oldHookIds);
                 if (!oldHookIds.contains("server_predictive_opt_in_metadata")
                         && !oldHookIds.contains("predictive_opt_in_system_server")) {
@@ -521,6 +536,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                     "systemui_block_miui_gesture_line_progress")) {
                 hookMiuiOverviewProxy(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains(SYSTEMUI_JAVA_HOME_MONITOR_HOOK)) {
+                hookJavaHomeSwipeUpMonitorService(hotReloadClassLoader);
+            }
+            ensureMiuiHomeFlavorReceiver();
             boolean missingEdgeUpdate = !oldHookIds.contains(
                     "systemui_edge_back_updateIsEnabled");
             boolean missingEdgeMode = !oldHookIds.contains(
@@ -649,6 +668,14 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             Object[] navigationBars = pendingHotReloadContextualSearchNavigationBars;
             pendingHotReloadContextualSearchNavigationBars = new Object[0];
             restoreContextualSearchInputReceivers(navigationBars);
+        }
+        if (MIUI_HOME.equals(processName) && hotReloadClassLoader != null
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+            Object savedState = param.getSavedInstanceState();
+            Object bridgeState = savedState instanceof Object[]
+                    && ((Object[]) savedState).length > 18
+                    ? ((Object[]) savedState)[18] : null;
+            installJavaHomeSwipeUpBridge(hotReloadClassLoader, bridgeState);
         }
         if (MiuiHomePackages.isKnownPackage(processName)
                 && hotReloadClassLoader != null) {
@@ -858,6 +885,14 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         if (hookId.startsWith(SERVER_BAR_CALLBACK_RUN_PREFIX))
             return this::dispatchServerBarSynthetic;
         switch (hookId) {
+            case SYSTEMUI_JAVA_HOME_MONITOR_HOOK:
+                return this::serveJavaHomeSwipeUpMonitor;
+            case SERVER_JAVA_HOME_SCAN_HOOK:
+                return this::redirectJavaHomeLauncherScan;
+            case SERVER_JAVA_HOME_SCAN_FLAGS_HOOK:
+                return this::mapJavaHomeLauncherScanFlags;
+            case SERVER_JAVA_HOME_ALLOWLIST_HOOK:
+                return this::keepJavaHomeLauncherAllowlistState;
             case SERVER_BAR_BRIDGE_READY:
                 return this::serverBarBridgeReady;
             case SERVER_BAR_FEATURE:
@@ -1303,6 +1338,13 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         String loadedPackage = param.getPackageName();
+        if (MIUI_HOME.equals(loadedPackage)) {
+            noteMiuiHomeApplicationInfo(param.getApplicationInfo());
+            if (isJavaHomeOnAndroid17(param.getApplicationInfo())) {
+                // onModuleLoaded could not identify the flavor before the Application.
+                initializeModuleLoggingPreference();
+            }
+        }
         if (MiuiHomePackages.isKnownPackage(loadedPackage)
                 && blockMiuiHomeXposedHooks()) {
             processName = loadedPackage;
@@ -1326,6 +1368,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             case MIUI_HOME:
             case POCO_HOME:
                 installMiuiHomeHooks(param.getDefaultClassLoader());
+                if (MIUI_HOME.equals(loadedPackage)
+                        && isJavaHomeOnAndroid17(param.getApplicationInfo())) {
+                    installJavaHomeSwipeUpBridge(param.getDefaultClassLoader(), null);
+                }
                 break;
             case GOOGLE_APP:
                 googleApp.install(

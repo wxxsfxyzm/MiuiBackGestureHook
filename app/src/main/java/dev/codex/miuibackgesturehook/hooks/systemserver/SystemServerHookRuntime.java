@@ -555,8 +555,7 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
             installContextualSearchPermissionHook(serviceClass, existingHookIds);
             installContextualSearchProviderHook(serviceClass, existingHookIds);
             SystemServerPlatformImpl implementation = systemServerPlatformImpl;
-            String callerPackage = implementation != null
-                    && implementation.nativeLauncherOwnsContextualSearchLongPress()
+            String callerPackage = nativeLauncherOwnsContextualSearch(implementation)
                     ? MIUI_HOME : SYSTEM_UI;
             moduleLog(Log.INFO, TAG,
                     "Installed contextual-search compatibility bridge"
@@ -715,10 +714,27 @@ public abstract class SystemServerHookRuntime extends MiuiHomeHookRuntime {
                     "Contextual-search caller policy unavailable; preserving platform call");
             return chain.proceed();
         }
-        String requiredPackage = implementation
-                .nativeLauncherOwnsContextualSearchLongPress()
+        String requiredPackage = nativeLauncherOwnsContextualSearch(implementation)
                 ? MIUI_HOME : SYSTEM_UI;
         return runContextualSearchBridge(chain, requiredPackage);
+    }
+
+    /**
+     * Android 17 native MiuiHome owns the platform call; a Java MiuiHome leaves it to SystemUI.
+     * system_server outlives launcher replacement, so the flavor is read for each rare call.
+     */
+    private boolean nativeLauncherOwnsContextualSearch(SystemServerPlatformImpl implementation) {
+        if (implementation == null
+                || !implementation.nativeLauncherOwnsContextualSearchLongPress()) {
+            return false;
+        }
+        long identity = Binder.clearCallingIdentity();
+        try {
+            invalidateMiuiHomeImplementation();
+            return usesNativeMiuiHome();
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
     }
 
     protected Object bridgeContextualSearchProviderCall(

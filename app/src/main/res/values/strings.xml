@@ -77,6 +77,17 @@
     <string name="oneui_cross_task_animation_title">One UI CrossTask animation</string>
     <string name="oneui_cross_task_animation_summary">Use the One UI transition when returning to a task in another app</string>
     <string name="return_home_icon_preview_title">Return-to-Home preview (experimental)</string>
+    <string name="launcher_implementation_title">Launcher implementation</string>
+    <string name="launcher_implementation_native">Native launcher</string>
+    <string name="launcher_implementation_java">Java launcher</string>
+    <string name="launcher_implementation_native_summary">Use the Android 17 system launcher. Switching restarts the launcher immediately. Running: %1$s</string>
+    <string name="launcher_implementation_java_summary">Use the Java launcher embedded in this module. Switching restarts the launcher immediately. Running: %1$s</string>
+    <string name="launcher_switch_native_title">Switch to the native launcher</string>
+    <string name="launcher_switch_native_body">MiuiHome switches to the factory version of the native launcher and restarts. An updated launcher version is lost; launcher data is kept.</string>
+    <string name="launcher_switch_java_title">Switch to the Java launcher</string>
+    <string name="launcher_switch_java_body">If the native launcher was updated, switching to the Java launcher removes that update. Launcher data is kept. MiuiHome restarts.</string>
+    <string name="launcher_switch_confirm">Switch</string>
+    <string name="cancel">Cancel</string>
     <string name="return_home_icon_preview_summary">Shrink the app while swiping back to Home, then fly it into its Home icon</string>
     <string name="module_logging_title">Detailed module logs</string>
     <string name="module_logging_summary">Keep informational logs enabled; warnings and errors are always kept</string>

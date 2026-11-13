@@ -45,7 +45,6 @@ import androidx.compose.ui.unit.dp
 import dev.codex.miuibackgesturehook.ModuleApplication
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
-import dev.codex.miuibackgesturehook.util.SettingsProgressiveAppBarSurface
 import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
 import kotlinx.coroutines.Dispatchers
@@ -290,30 +289,28 @@ private fun GestureTriggerSettingsScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
-                SettingsProgressiveAppBarSurface(backdrop = topBarBackdrop) {
-                    GlassTopAppBar(
-                        backdrop = topBarBackdrop,
-                        isContentScrolled = isContentScrolled,
-                        backgroundAlpha = { 0f },
-                        scrollBehavior = scrollBehavior,
-                        title = stringResource(R.string.gesture_trigger_title),
-                        navigationIcon = {
-                            val layoutDirection = LocalLayoutDirection.current
-                            GlassIconButton(onClick = onClose) {
-                                Icon(
-                                    imageVector = MiuixIcons.Glass.ChevronBackward,
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .graphicsLayer {
-                                            if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                        },
-                                    tint = MiuixTheme.colorScheme.onSurface,
-                                    contentDescription = stringResource(R.string.back),
-                                )
-                            }
-                        },
-                    )
-                }
+                GlassTopAppBar(
+                    backdrop = topBarBackdrop,
+                    isContentScrolled = isContentScrolled,
+                    progressiveBlur = true,
+                    scrollBehavior = scrollBehavior,
+                    title = stringResource(R.string.gesture_trigger_title),
+                    navigationIcon = {
+                        val layoutDirection = LocalLayoutDirection.current
+                        GlassIconButton(onClick = onClose) {
+                            Icon(
+                                imageVector = MiuixIcons.Glass.ChevronBackward,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                tint = MiuixTheme.colorScheme.onSurface,
+                                contentDescription = stringResource(R.string.back),
+                            )
+                        }
+                    },
+                )
             },
         ) { paddingValues ->
             Box(

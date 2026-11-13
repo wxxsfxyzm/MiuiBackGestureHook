@@ -33,6 +33,38 @@ tasks.named("preBuild") {
     dependsOn(verifyLocalLsplt)
 }
 
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.isFile) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+
+// The Android 16 Java MiuiHome is embedded as an extracted native library so PackageManager can
+// parse it from the module's own lib directory. It is a proprietary Xiaomi binary: supply a local
+// path through -PjavaHomeLauncherApk or local.properties; it never enters source control.
+val javaHomeLauncherApk = ((findProperty("javaHomeLauncherApk") as String?)
+    ?: localProperties.getProperty("javaHomeLauncherApk"))?.takeIf { it.isNotBlank() }
+// Builds without the local APK keep the standard in-APK native packaging unchanged.
+val embedJavaHomeLauncher = javaHomeLauncherApk != null
+val javaHomeJniLibsDir = layout.buildDirectory.dir("generated/javaHomeJniLibs")
+val stageJavaHomeLauncher by tasks.registering(Sync::class) {
+    into(javaHomeJniLibsDir)
+    if (javaHomeLauncherApk != null) {
+        val apk = file(javaHomeLauncherApk)
+        doFirst {
+            require(apk.isFile) { "Missing Java MiuiHome APK: ${apk.absolutePath}" }
+        }
+        from(apk) {
+            into("arm64-v8a")
+            rename { "libjavahome_launcher.so" }
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(stageJavaHomeLauncher)
+}
+
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 if (keystorePropertiesFile.isFile) {
@@ -80,7 +112,7 @@ android {
         minSdk = 36
         targetSdk = 37
         versionCode = gitVersionCode.get()
-        versionName = "0.13.0"
+        versionName = "0.14.0"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -138,8 +170,22 @@ android {
         }
     }
 
+    if (embedJavaHomeLauncher) {
+        sourceSets["main"].jniLibs.srcDir(javaHomeJniLibsDir.get().asFile)
+
+        // Extracted packaging compresses native libraries; LSPosed loads the native entry and
+        // DexKit straight from the APK, so keep them stored (page alignment follows below).
+        androidResources {
+            noCompress += "so"
+        }
+    }
+
     packaging {
-        jniLibs.useLegacyPackaging = false
+        // Extracted only to place the embedded Java MiuiHome on disk as a world-readable file.
+        jniLibs.useLegacyPackaging = embedJavaHomeLauncher
+        if (embedJavaHomeLauncher) {
+            jniLibs.keepDebugSymbols += "**/libjavahome_launcher.so"
+        }
         jniLibs.excludes += "**/libandroidx.graphics.path.so"
         resources.merges += "META-INF/xposed/*"
     }
@@ -164,4 +210,46 @@ dependencies {
 
     testImplementation(kotlin("test-junit"))
     testImplementation(libs.libxposed.api)
+}
+
+// AGP aligns stored libraries to 4 bytes when packaging for extraction. Re-align them to 16 KiB
+// pages for LSPosed's in-APK loading of the native entry, then re-sign with the same key.
+// Values are resolved at configuration time so the task action stays configuration-cache safe.
+val realignSigning = android.signingConfigs.getByName("release")
+val realignStoreFile: String? = realignSigning.storeFile?.absolutePath
+val realignStorePassword: String? = realignSigning.storePassword
+val realignKeyAlias: String? = realignSigning.keyAlias
+val realignKeyPassword: String? = realignSigning.keyPassword
+val realignBuildTools: String = androidComponents.sdkComponents.sdkDirectory.get().asFile
+    .resolve("build-tools/${android.buildToolsVersion}").absolutePath
+
+if (embedJavaHomeLauncher) tasks.matching {
+    it.name == "packageDebug" || it.name == "packageRelease"
+}.configureEach {
+    val storeFile = realignStoreFile
+    val storePassword = realignStorePassword
+    val keyAlias = realignKeyAlias
+    val keyPassword = realignKeyPassword
+    val buildTools = realignBuildTools
+    doLast {
+        // Skipping the re-alignment would leave the native entry unloadable from the APK.
+        check(storeFile != null && keyAlias != null) {
+            "Embedding the Java MiuiHome requires the release signing configuration " +
+                "to re-align and re-sign the APK."
+        }
+        fun run(vararg command: String) {
+            val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().readText()
+            check(process.waitFor() == 0) { "${command[0]} failed: $output" }
+        }
+        outputs.files.asFileTree.matching { include("*.apk") }.files.forEach { apk ->
+            val aligned = File(apk.parentFile, apk.name + ".aligned")
+            run("$buildTools/zipalign", "-f", "-P", "16", "4", apk.path, aligned.path)
+            run("$buildTools/apksigner", "sign", "--ks", storeFile,
+                "--ks-pass", "pass:$storePassword", "--ks-key-alias", keyAlias,
+                "--key-pass", "pass:$keyPassword", "--out", apk.path, aligned.path)
+            aligned.delete()
+            File(apk.parentFile, apk.name + ".idsig").delete()
+        }
+    }
 }

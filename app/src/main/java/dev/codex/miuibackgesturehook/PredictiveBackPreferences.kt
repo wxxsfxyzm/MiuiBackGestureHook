@@ -43,6 +43,9 @@ object PredictiveBackPreferences {
     // Android 17 only: AOSP-style return-to-Home preview landing on the Home icon.
     const val KEY_RETURN_HOME_ICON_PREVIEW = "return_home_icon_preview"
     const val DEFAULT_RETURN_HOME_ICON_PREVIEW = false
+    // Android 17 only: boot-scan the Java MiuiHome in place of the native system image.
+    const val KEY_JAVA_HOME_LAUNCHER = "java_home_launcher"
+    const val DEFAULT_JAVA_HOME_LAUNCHER = false
     const val KEY_MODULE_LOGGING = "module_logging"
     const val DEFAULT_MODULE_LOGGING = true
     const val KEY_CONTEXTUAL_SEARCH_LONG_PRESS = "contextual_search_long_press"

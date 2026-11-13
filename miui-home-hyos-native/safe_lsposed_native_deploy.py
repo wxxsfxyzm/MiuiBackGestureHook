@@ -21,6 +21,7 @@ from typing import Iterable, Sequence
 
 
 PACKAGE_NAME = "dev.codex.miuibackgesturehook"
+NATIVE_ENTRY_LIBRARY = "libmiui_home_hyos_lsp.so"
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 EVIDENCE_ROOT = SCRIPT_DIR / "out" / "lsposed-device-tests"
@@ -471,6 +472,86 @@ echo "$size"
             f"spawner. {last_mapping_failure}"
         )
 
+    def get_launcher_package(self) -> tuple[bool, str]:
+        """Return whether the active MiuiHome is the Java (dex) launcher, and its code path."""
+        result = self.invoke_adb(
+            ["shell", "dumpsys", "package", "com.miui.home"], allow_failure=True
+        )
+        code_path = ""
+        flags = ""
+        for line in result.lines:
+            text = line.strip()
+            if not code_path and text.startswith("codePath="):
+                code_path = text.split("=", 1)[1]
+            if not flags and text.startswith("pkgFlags="):
+                flags = text
+            if code_path and flags:
+                break
+        if not code_path or not flags:
+            raise RuntimeError("The active MiuiHome package state is unreadable.")
+        return "HAS_CODE" in flags, code_path
+
+    @staticmethod
+    def assert_java_launcher_independent(code_path: str) -> None:
+        # The redirected system image runs from this module's extracted library; an
+        # update deletes that directory and leaves the running launcher without its APK.
+        if f"/{PACKAGE_NAME}-" in code_path:
+            raise RuntimeError(
+                "The Java MiuiHome runs from this module's embedded copy as the system "
+                "image; a module update would delete its APK. Switch to the native "
+                "launcher and back (installing it as an update) or reboot first."
+            )
+
+    def wait_java_launcher(self, spawner_pid: int) -> LauncherProcess:
+        """Wait for one Java MiuiHome outside the spawner with an inert native entry."""
+        self.invoke_adb(
+            [
+                "shell", "am", "start", "-W", "-a", "android.intent.action.MAIN",
+                "-c", "android.intent.category.HOME",
+            ],
+            allow_failure=True,
+        )
+        last_failure = ""
+        for _ in range(200):
+            launchers = self.get_launcher_processes()
+            if len(launchers) == 1 and launchers[0].parent_pid != spawner_pid:
+                launcher = launchers[0]
+                maps = self.invoke_root(
+                    f"cat /proc/{launcher.pid}/maps", allow_failure=True
+                ).text
+                if NATIVE_ENTRY_LIBRARY in maps:
+                    raise RuntimeError(
+                        f"Java Launcher PID {launcher.pid} maps the native entry."
+                    )
+                stale = [
+                    line for line in maps.splitlines()
+                    if PACKAGE_NAME in line and "(deleted)" in line
+                ]
+                if not stale:
+                    return launcher
+                last_failure = (
+                    f"Java Launcher PID {launcher.pid} maps a deleted module file."
+                )
+            time.sleep(0.1)
+        raise RuntimeError(
+            f"MiuiHome did not settle as one Java Launcher process. {last_failure}"
+        )
+
+    def wait_java_launcher_ready(self, log_before: LogSnapshot) -> str:
+        """The new Java generation must re-attach its SystemUI swipe-up monitor."""
+        for _ in range(100):
+            delta = self.read_lsposed_log_delta(log_before)
+            ready = [
+                line for line in delta.splitlines()
+                if "(com.miui.home)" in line and "Swipe-up monitor attached" in line
+            ]
+            if ready:
+                return f"java_launcher_bridge=ready\n{ready[-1]}"
+            time.sleep(0.2)
+        raise RuntimeError(
+            "The Java Launcher did not re-attach its swipe-up monitor within 20 seconds."
+        )
+
     def wait_native_ready_status(self, launcher_pid: int) -> str:
         logs = self.invoke_adb(
             [
@@ -711,7 +792,9 @@ done
             )
         return result
 
-    def invoke_rollback(self, rollback_apk: Path, expected_hash: str) -> str:
+    def invoke_rollback(
+        self, rollback_apk: Path, expected_hash: str, java_launcher: bool = False
+    ) -> str:
         if not rollback_apk.is_file():
             return "rollback_apk=unavailable"
         rollback_method = "platform"
@@ -753,6 +836,12 @@ done
         old_launchers = [process.pid for process in self.get_launcher_processes()]
         try:
             new_spawner = self.stop_exact_spawner(old_spawner)
+            if java_launcher:
+                launcher = self.wait_java_launcher(new_spawner)
+                return (
+                    f"rollback=restored,method={rollback_method},hyos_pid={new_spawner},"
+                    f"launcher_pid={launcher.pid},launcher_flavor=java"
+                )
             launcher = self.start_and_wait_launcher(
                 new_spawner, old_launchers, identity
             )
@@ -777,12 +866,26 @@ done
             self.emit(f"apk_device_inode_size={identity.device_inode_size}")
         for launcher in self.get_launcher_processes():
             self.emit(f"launcher_pid={launcher.pid},parent={launcher.parent_pid}")
+        java_launcher, code_path = self.get_launcher_package()
+        self.emit(f"launcher_flavor={'java' if java_launcher else 'native'}")
+        self.emit(f"launcher_code_path={code_path}")
 
     def verify(self) -> None:
         self.assert_no_foreign_native_owner()
         spawner = self.get_exact_spawner_pid()
         if spawner is None:
             raise RuntimeError("Exact root hyos_spawner is unavailable.")
+        java_launcher, code_path = self.get_launcher_package()
+        if java_launcher:
+            if not self.get_installed_apk_path():
+                raise RuntimeError("The module APK is not installed.")
+            launcher = self.wait_java_launcher(spawner)
+            self.emit("launcher_flavor=java")
+            self.emit(f"launcher_code_path={code_path}")
+            self.emit(f"hyos_pid={spawner}")
+            self.emit(f"launcher_pid={launcher.pid}")
+            self.emit("native_generation=inactive-java-launcher")
+            return
         launchers = self.get_launcher_processes()
         matching = [process for process in launchers if process.parent_pid == spawner]
         if len(matching) != 1 or len(launchers) != 1:
@@ -808,6 +911,10 @@ done
         no_hot_reload_retry: bool = False,
     ) -> None:
         self.assert_no_foreign_native_owner()
+        java_launcher, launcher_code_path = self.get_launcher_package()
+        if java_launcher:
+            self.assert_java_launcher_independent(launcher_code_path)
+        self.emit(f"launcher_flavor={'java' if java_launcher else 'native'}")
         deployment_apk = self.resolve_deployment_apk(apk, variant, skip_build)
         self.assert_local_apk(deployment_apk)
         local_hash = sha256_file(deployment_apk)
@@ -873,13 +980,19 @@ done
                     "hyos_spawner changed unexpectedly before the controlled replacement."
                 )
             spawner_after = self.stop_exact_spawner(spawner_before)
-            launcher_after = self.start_and_wait_launcher(
-                spawner_after,
-                launchers_before,
-                installed,
-                [installed_before.inode],
-            )
-            self.wait_native_ready_status(launcher_after.pid)
+            if java_launcher:
+                # The native entry stays inert in a Java launcher; the replaced spawner
+                # serves the next native launcher with the current payload.
+                launcher_after = self.wait_java_launcher(spawner_after)
+                self.emit(self.wait_java_launcher_ready(log_before))
+            else:
+                launcher_after = self.start_and_wait_launcher(
+                    spawner_after,
+                    launchers_before,
+                    installed,
+                    [installed_before.inode],
+                )
+                self.wait_native_ready_status(launcher_after.pid)
             time.sleep(1.5)
             tombstone_after = self.get_latest_tombstone()
             if tombstone_after != tombstone_before:
@@ -893,7 +1006,8 @@ done
             self.emit(f"launcher_pid={launcher_after.pid}")
             self.emit(f"launcher_parent={launcher_after.parent_pid}")
             self.emit("api102_hot_reload=verified")
-            self.emit("native_generation=current-apk")
+            self.emit("native_generation="
+                      + ("inactive-java-launcher" if java_launcher else "current-apk"))
             evidence = self.write_evidence(
                 "lsposed-native-activated", f"apk_sha256={local_hash}"
             )
@@ -901,7 +1015,7 @@ done
         except Exception as error:
             failure = str(error)
             rollback = (
-                self.invoke_rollback(rollback_apk, rollback_hash)
+                self.invoke_rollback(rollback_apk, rollback_hash, java_launcher)
                 if mutation_started and rollback_hash
                 else "rollback=not-attempted"
             )

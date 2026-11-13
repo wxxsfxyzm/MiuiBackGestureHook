@@ -99,7 +99,8 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             if (contextualSearchStateContext != context) {
                 return;
             }
-            if (!implementation.nativeLauncherOwnsContextualSearchLongPress()) {
+            if (!implementation.nativeLauncherOwnsContextualSearchLongPress()
+                    || !usesNativeMiuiHome()) {
                 refreshContextualSearchInputReceivers();
                 return;
             }
@@ -177,11 +178,38 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
     protected Object attachContextualSearchAfterNavigationBarAttached(
             XposedInterface.Chain chain) throws Throwable {
         Object result = chain.proceed();
-        if (!requireSystemUiPlatformImpl()
-                .nativeLauncherOwnsContextualSearchLongPress()) {
+        if (!nativeLauncherOwnsContextualSearch()) {
             attachContextualSearchInputReceiver(chain.getThisObject());
+        } else {
+            // Track it anyway so a later switch to a Java MiuiHome can attach the observer.
+            synchronized (contextualSearchNavigationBars) {
+                contextualSearchNavigationBars.add(chain.getThisObject());
+            }
         }
         return result;
+    }
+
+    /** Android 17 native MiuiHome owns long-press search; a Java MiuiHome leaves it to SystemUI. */
+    protected boolean nativeLauncherOwnsContextualSearch() {
+        return requireSystemUiPlatformImpl().nativeLauncherOwnsContextualSearchLongPress()
+                && usesNativeMiuiHome();
+    }
+
+    /** Re-applies contextual-search ownership after the launcher flavor changes. */
+    protected void reconcileContextualSearchOwnership() {
+        if (!nativeLauncherOwnsContextualSearch()) {
+            refreshContextualSearchInputReceivers();
+            return;
+        }
+        Object[] navigationBars;
+        synchronized (contextualSearchNavigationBars) {
+            navigationBars = contextualSearchNavigationBars.toArray();
+        }
+        for (Object navigationBar : navigationBars) {
+            if (navigationBar != null) {
+                detachContextualSearchInputReceiver(navigationBar);
+            }
+        }
     }
 
     protected Object detachContextualSearchBeforeNavigationBarDetached(
@@ -193,8 +221,14 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
 
     @Override
     protected void restoreContextualSearchInputReceivers(Object[] navigationBars) {
-        if (requireSystemUiPlatformImpl()
-                .nativeLauncherOwnsContextualSearchLongPress()) {
+        if (nativeLauncherOwnsContextualSearch()) {
+            synchronized (contextualSearchNavigationBars) {
+                for (Object navigationBar : navigationBars) {
+                    if (navigationBar != null) {
+                        contextualSearchNavigationBars.add(navigationBar);
+                    }
+                }
+            }
             return;
         }
         super.restoreContextualSearchInputReceivers(navigationBars);
@@ -266,7 +300,9 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
 
     protected String systemUiInputArbiterStateAction() {
         SystemUiPlatformImpl implementation = systemUiPlatformImpl;
-        return implementation == null
+        // A Java MiuiHome listens on the module action; only the native launcher bridge
+        // observes the Xiaomi receiver action.
+        return implementation == null || !usesNativeMiuiHome()
                 ? MODULE_SYSTEMUI_INPUT_ARBITER_STATE
                 : implementation.systemUiInputArbiterStateAction(
                 MODULE_SYSTEMUI_INPUT_ARBITER_STATE);
@@ -6514,6 +6550,8 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             // Android 16: type 1 belongs to the Java launcher's own remote runner.
             return false;
         }
+        boolean removedDead = removeDeadReturnHomeRunner(
+                (android.util.SparseArray<?>) definitions);
         if (!isReturnHomePreviewEnabled()) {
             // Withdraw only a preview runner this module installed in any generation.
             try {
@@ -6533,7 +6571,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 moduleLog(Log.WARN, TAG, "Failed to remove RETURN_TO_HOME preview runner",
                         throwable);
             }
-            return false;
+            return removedDead;
         }
         android.util.SparseArray<?> registered = (android.util.SparseArray<?>) definitions;
         try {
@@ -6568,6 +6606,33 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG, "Failed to install RETURN_TO_HOME preview runner",
                     throwable);
+            return removedDead;
+        }
+    }
+
+    /**
+     * A Java MiuiHome registers a remote RETURN_TO_HOME runner that Shell never unregisters
+     * when the launcher dies; a native MiuiHome registers none, so after a switch Shell would
+     * keep dispatching return-home to the dead callback. Only a dead remote callback is removed.
+     */
+    protected boolean removeDeadReturnHomeRunner(android.util.SparseArray<?> definitions) {
+        try {
+            Object existing = definitions.get(TYPE_RETURN_TO_HOME);
+            Object callback = existing == null ? null : readField(existing, "mCallback");
+            if (!(callback instanceof android.os.IInterface)) {
+                return false;
+            }
+            IBinder binder = ((android.os.IInterface) callback).asBinder();
+            if (binder == null || binder.isBinderAlive()) {
+                return false;
+            }
+            invokeAnyMethod(definitions, "remove",
+                    new Object[]{Integer.valueOf(TYPE_RETURN_TO_HOME)});
+            moduleLog(Log.INFO, TAG, "Removed dead remote RETURN_TO_HOME runner"
+                    + ", runner=" + shortObject(existing));
+            return true;
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to inspect RETURN_TO_HOME runner", throwable);
             return false;
         }
     }
@@ -7451,7 +7516,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                         || intent.hasExtra("overview_visible")
                         || intent.hasExtra(EXTRA_LAUNCHER_EDITING)
                         || intent.hasExtra(EXTRA_LAUNCHER_HOME_SURFACE_VISIBLE);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                if (usesNativeMiuiHome()
                         && (carriesDartState
                         || intent.hasExtra(EXTRA_LAUNCHER_STATE_OWNER_EPOCH))) {
                     long ownerEpoch = intent.getLongExtra(
@@ -7496,7 +7561,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 if (intent.hasExtra("drawer_visible")) {
                     long drawerGeneration = intent.getLongExtra(
                             EXTRA_INPUT_ARBITER_GENERATION, 0L);
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                    if (usesNativeMiuiHome()
                             && drawerGeneration != systemUiInputArbiterGeneration) {
                         moduleLog(Log.WARN, TAG,
                                 "Ignored stale native MiuiHome drawer state"
@@ -7516,7 +7581,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 if (intent.hasExtra(EXTRA_LAUNCHER_XIAOAI_VISIBLE)) {
                     long xiaoAiGeneration = intent.getLongExtra(
                             EXTRA_INPUT_ARBITER_GENERATION, 0L);
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                    if (usesNativeMiuiHome()
                             && xiaoAiGeneration
                             != systemUiInputArbiterGeneration) {
                         moduleLog(Log.WARN, TAG,
@@ -7544,7 +7609,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                             + ", uid=" + senderUid
                             + ", package=" + senderPackage);
                 }
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                if (usesNativeMiuiHome()
                         && intent.hasExtra(EXTRA_LAUNCHER_HOME_SURFACE_VISIBLE)) {
                     // Caller, arbiter generation and Dart owner were validated above.
                     // A distinct key prevents old native editing hooks from reviving the
@@ -7556,7 +7621,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                             + ", generation=" + systemUiInputArbiterGeneration
                             + ", ownerEpoch=" + miuiLauncherDartStateOwnerEpoch);
                 }
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN
+                if (!usesNativeMiuiHome()
                         && intent.hasExtra(EXTRA_LAUNCHER_EDITING)) {
                     miuiLauncherEditing = intent.getBooleanExtra(EXTRA_LAUNCHER_EDITING, false);
                     moduleLog(Log.INFO, TAG, "MiuiHome editing state changed"
@@ -7610,7 +7675,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                 if (intent.hasExtra("overview_visible")) {
                     long overviewGeneration = intent.getLongExtra(
                             EXTRA_INPUT_ARBITER_GENERATION, 0L);
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                    if (usesNativeMiuiHome()
                             && overviewGeneration
                             != systemUiInputArbiterGeneration) {
                         moduleLog(Log.WARN, TAG,
@@ -7627,7 +7692,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
                         return;
                     }
                     state = overviewVisible ? "actualRecentsEnter" : "actualRecentsExit";
-                    source = Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+                    source = usesNativeMiuiHome()
                             ? "nativeOverview" : "RecentsContainer";
                 } else if ("toRecents".equals(state)) {
                     overviewVisible = true;
@@ -7832,7 +7897,7 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
             return;
         }
         try {
-            boolean legacyMode = Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN;
+            boolean legacyMode = !usesNativeMiuiHome();
             boolean legacyReady = nativeReply != null && nativeReply.getBooleanExtra(
                     EXTRA_STATUS_LEGACY_READY, false);
             boolean profileResolved = nativeReply != null && nativeReply.getBooleanExtra(
