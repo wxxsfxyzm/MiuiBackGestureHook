@@ -85,7 +85,8 @@ This LSPosed API-102 module restores Xiaomi/MIUI back gestures and optional syst
   API-102 remote preferences and existing `system` scope; never mutate shared ApplicationInfo.
   Preserve metadata exclusions, stale-selection pruning and the incompatible-app warning.
 - Preserve window-requested bar appearance and native gesture-line/indicator lifecycle.
-  Visual options cannot change input ownership or native commit/cancel decisions.
+  Visual options cannot gate predictive handoff, change input ownership or alter native
+  commit/cancel decisions.
 
 ## Hook lifecycle
 

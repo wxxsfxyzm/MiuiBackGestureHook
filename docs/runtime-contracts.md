@@ -105,11 +105,12 @@ component, so launcher-owned settings do not become idle Home by package-name in
   fields equal to a reference built through the current framework API) and no other operation;
   its exact opening participant/native App direction and successful finish callback replace
   the pending-reorder proof, while the same final foreground identity checks still apply.
-- If that Recents OPEN ends while an admitted stream is held over a retained Activity stack,
+- If that Recents OPEN ends while an admitted stream is still held,
   wait for Shell idle, cancel only its exact null-navigation probe without BACK, then reuse
   the accumulated-coordinate Shell start. A released, cancelled, replaced or stale attempt
-  cannot restart. Root-task OPEN retains its existing release behavior unless the Android 17+
-  experimental Return-to-Home preview is enabled, which makes the same handoff available.
+  cannot restart. Handoff is independent of Activity count and the Return-to-Home preview
+  preference; Shell resolves the actual destination, and the optional preview runner remains
+  gated by its own preference.
 - Preserve all four navigation families: callback, cross-Activity, cross-Task and return-to-Home.
   Restore backed registry/runner wiring before inventing animation code. Missing native objects
   or unreadable shape/state do not authorize guessed Surfaces or broad compatibility rules.

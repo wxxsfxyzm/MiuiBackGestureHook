@@ -64,11 +64,6 @@ import dev.codex.miuibackgesturehook.hooks.systemui.indicator.MiuiStyleBackArrow
 public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected volatile RecentsOpenSession.Attempt recentsOpenAttempt;
 
-    /** Android 17 experimental Return-to-Home preview; SystemUiHookRuntime decides. */
-    protected boolean isReturnHomePreviewEnabled() {
-        return false;
-    }
-
     protected abstract boolean isRecentsOpenAttemptCurrentOnOwner(
             RecentsOpenSession.Attempt attempt) throws Throwable;
 
@@ -2744,12 +2739,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             AtomicBoolean claimed = new AtomicBoolean();
             boolean completed = executeShellBlocking(owner.executor, () -> {
                 try {
-                    ActivityManager.RunningTaskInfo task = findCompletedRecentsTaskOnOwner(opening);
-                    // A retained Activity above the root can now expose a cross-Activity
-                    // destination; a root task only a Return-to-Home preview runner. Without
-                    // one, root-task OPEN keeps its existing release behavior.
-                    if (task == null
-                            || (task.numActivities <= 1 && !isReturnHomePreviewEnabled())
+                    // A single-Activity task can still expose an app callback; let Shell resolve it.
+                    if (findCompletedRecentsTaskOnOwner(opening) == null
                             || activeShellSession != previous
                             || !isShellSessionOwnerCurrent(previous)
                             || !isCurrentAcceptedInputIdentity(input, previous.edge,

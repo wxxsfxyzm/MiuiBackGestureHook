@@ -6500,7 +6500,6 @@ public abstract class SystemUiHookRuntime extends SystemUiBarFollowRuntime {
     }
 
     /** Read at registry setup, so a switch change applies from the next gesture. */
-    @Override
     protected boolean isReturnHomePreviewEnabled() {
         return isReturnHomePreviewSupported() && readHyperOsBooleanPreference(
                 PredictiveBackPreferences.KEY_RETURN_HOME_ICON_PREVIEW,
