@@ -444,9 +444,12 @@ public abstract class SystemUiBarFollowRuntime extends SystemUiInputRuntime {
                 if (taskToken == null || taskInfo.topActivity == null) return;
                 Object type = readField(controller, "mRemoteToRecentType");
                 Object opening = readField(controller, "mOpeningTasks");
+                // Launching from the Recents overview reuses an existing task as TO_FRONT.
+                int infoType = ((TransitionInfo) info).getType();
                 boolean launchFromHome = type instanceof Enum
                         && "LAUNCH_FROM_HOME".equals(((Enum<?>) type).name())
-                        && ((TransitionInfo) info).getType() == 1
+                        && (infoType == TRANSIT_OPEN
+                        || infoType == TRANSIT_TO_FRONT)
                         && opening instanceof java.util.List && ((java.util.List<?>) opening).contains(task);
                 recentsOpenSession = new RecentsOpenSession(owner, controller, token, info, task,
                         taskInfo.taskId, taskToken, taskInfo.topActivity, launchFromHome);
