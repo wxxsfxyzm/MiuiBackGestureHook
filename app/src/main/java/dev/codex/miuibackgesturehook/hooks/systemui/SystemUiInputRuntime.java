@@ -1631,10 +1631,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && !launcherDrawer
                     && !launcherFolder;
             RecentsOpenSession.Attempt opening = recentsOpenAttempt;
+            // MiuiHome publishes its Recents exit after Shell proves the App-direction OPEN, so
+            // a still-visible overview flag is stale while that verified attempt is active.
             boolean recentsOpen = launcherHome && displayId == 0
                     && Build.VERSION.SDK_INT == 37
                     && !launcherShade && !launcherXiaoAi && !launcherHomeSurface
-                    && !miuiOverviewVisible && !launcherDrawer && !launcherFolder
+                    && !launcherDrawer && !launcherFolder
                     && !launcherEditing && !launcherOpenBreak
                     && opening != null && opening.isActive();
             if (launcherHome && !miuiOverviewVisible
@@ -2572,7 +2574,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     ? launcherOpenBreakGenerationCandidate : 0L;
             launcherOpenBreakAttemptId = launcherOpenBreakCandidate
                     ? launcherOpenBreakAttemptIds.incrementAndGet() : 0L;
-            launcherOverviewGesture = miuiOverviewVisible && !launcherShadeCandidate;
+            launcherOverviewGesture = miuiOverviewVisible && !launcherShadeCandidate
+                    && recentsOpenGesture == null;
             launcherShadeGesture = launcherShadeCandidate;
             launcherXiaoAiGesture = launcherXiaoAiCandidate;
             if (launcherXiaoAiGesture) {

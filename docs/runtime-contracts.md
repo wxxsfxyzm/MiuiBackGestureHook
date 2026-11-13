@@ -94,7 +94,9 @@ component, so launcher-owned settings do not become idle Home by package-name in
   Missing/rejected commands receive only the existing one-BACK fallback; cancellation sends none.
 - Native Recents task reuse may display an expanding app while Home remains the top task.
   Admit this interval only from a live Shell-owned controller/task/transition receipt for its
-  current App direction, independently of bar-follow preferences. Revalidate on Shell before
+  current App direction, independently of bar-follow preferences. MiuiHome may publish its
+  Recents exit after that receipt; while the verified attempt is active, a still-visible
+  overview flag is stale and the stream is not a Recents-screen gesture. Revalidate on Shell before
   pilfer/start and null-navigation fallback; Home direction, target replacement, cleanup and
   reload revoke opening admission. Only a successful native finish WCT placing that exact task
   on top may hand an already accepted attempt to the same foreground task/token/component;
