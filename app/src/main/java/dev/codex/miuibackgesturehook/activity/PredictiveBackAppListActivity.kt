@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.LruCache
@@ -95,6 +96,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.DropdownImpl
 import top.yukonga.miuix.kmp.basic.FloatingActionButton
 import top.yukonga.miuix.kmp.basic.Icon
@@ -179,6 +181,11 @@ private data class AppLoadResult(
     val applicationOptInPackages: Set<String>,
 )
 
+private data class ManualPackageLookup(
+    val entry: AppEntry?,
+    val applicationOptedIn: Boolean,
+)
+
 private data class AppListStatusCardMessage(
     val text: String,
     val severity: AppListCardSeverity,
@@ -200,10 +207,13 @@ private const val UI_KEY_ORDER_TYPE = "order_type"
 private const val UI_KEY_ORDER_REVERSED = "order_reversed"
 private const val UI_KEY_SELECTED_FIRST = "selected_first"
 private const val UI_KEY_SHOW_SYSTEM_APPS = "show_system_apps"
+private const val UI_KEY_SHOW_NO_LAUNCHER_APPS = "show_no_launcher_apps"
 private const val UI_KEY_SHOW_PACKAGE_NAME = "show_package_name"
 private const val APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG = 1 shl 3
 private const val APPLICATION_PREDICTIVE_BACK_DUMP_PREFIX =
     "enableOnBackInvokedCallback="
+private val ANDROID_PACKAGE_NAME =
+    Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
 
 private val applicationPrivateFlagsExtField by lazy(LazyThreadSafetyMode.PUBLICATION) {
     runCatching { ApplicationInfo::class.java.getField("privateFlagsExt") }.getOrNull()
@@ -224,6 +234,14 @@ private fun PredictiveBackAppListScreen(
     val serviceLoadingMessage = stringResource(R.string.predictive_back_service_loading)
     val serviceUnavailableMessage =
         stringResource(R.string.predictive_back_service_unavailable)
+    val manualInvalidMessage =
+        stringResource(R.string.predictive_back_manual_package_invalid)
+    val manualNotInstalledMessage =
+        stringResource(R.string.predictive_back_manual_package_not_installed)
+    val manualAlreadyEnabledMessage =
+        stringResource(R.string.predictive_back_manual_package_already_enabled)
+    val manualOwnPackageMessage =
+        stringResource(R.string.predictive_back_manual_package_own_app)
     val scope = rememberCoroutineScope()
     val uiPreferences = remember(context) {
         context.getSharedPreferences(UI_PREFERENCES_GROUP, Context.MODE_PRIVATE)
@@ -236,6 +254,10 @@ private fun PredictiveBackAppListScreen(
     }
     var query by rememberSaveable { mutableStateOf("") }
     var showCompatibilityDialog by rememberSaveable { mutableStateOf(false) }
+    var showManualPackageDialog by rememberSaveable { mutableStateOf(false) }
+    var manualPackageName by rememberSaveable { mutableStateOf("") }
+    var manualPackageError by rememberSaveable { mutableStateOf<String?>(null) }
+    var manualPackageLoading by remember { mutableStateOf(false) }
     var orderTypeName by rememberSaveable {
         mutableStateOf(
             uiPreferences.getString(UI_KEY_ORDER_TYPE, AppOrderType.Label.name)
@@ -250,6 +272,9 @@ private fun PredictiveBackAppListScreen(
     }
     var showSystemApps by rememberSaveable {
         mutableStateOf(uiPreferences.getBoolean(UI_KEY_SHOW_SYSTEM_APPS, false))
+    }
+    var showNoLauncherApps by rememberSaveable {
+        mutableStateOf(uiPreferences.getBoolean(UI_KEY_SHOW_NO_LAUNCHER_APPS, false))
     }
     var showPackageName by rememberSaveable {
         mutableStateOf(uiPreferences.getBoolean(UI_KEY_SHOW_PACKAGE_NAME, false))
@@ -290,7 +315,7 @@ private fun PredictiveBackAppListScreen(
                 delay(1_500.milliseconds)
             }
             val loaded = withContext(Dispatchers.IO) {
-                loadLaunchableApps(
+                loadInstalledApps(
                     packageManager = context.packageManager,
                     ownPackageName = context.packageName,
                 )
@@ -351,6 +376,7 @@ private fun PredictiveBackAppListScreen(
         selectedPackages,
         query,
         showSystemApps,
+        showNoLauncherApps,
         selectedFirst,
         orderType,
         orderInReverse,
@@ -379,6 +405,10 @@ private fun PredictiveBackAppListScreen(
         val filteredApps = entriesByPackage.values
             .asSequence()
             .filter { app -> showSystemApps || !app.isSystem }
+            .filter { app ->
+                showNoLauncherApps || app.launcherActivity != null ||
+                        app.packageName in selectedPackages
+            }
             .filter { app ->
                 query.isEmpty() ||
                         app.label.contains(query, ignoreCase = true) ||
@@ -525,6 +555,7 @@ private fun PredictiveBackAppListScreen(
                             orderInReverse = orderInReverse,
                             selectedFirst = selectedFirst,
                             showSystemApps = showSystemApps,
+                            showNoLauncherApps = showNoLauncherApps,
                             showPackageName = showPackageName,
                             onOrderInReverseChanged = { enabled ->
                                 orderInReverse = enabled
@@ -542,6 +573,12 @@ private fun PredictiveBackAppListScreen(
                                 showSystemApps = enabled
                                 uiPreferences.edit()
                                     .putBoolean(UI_KEY_SHOW_SYSTEM_APPS, enabled)
+                                    .apply()
+                            },
+                            onShowNoLauncherAppsChanged = { enabled ->
+                                showNoLauncherApps = enabled
+                                uiPreferences.edit()
+                                    .putBoolean(UI_KEY_SHOW_NO_LAUNCHER_APPS, enabled)
                                     .apply()
                             },
                             onShowPackageNameChanged = { enabled ->
@@ -570,7 +607,7 @@ private fun PredictiveBackAppListScreen(
                                 layoutDirection,
                             ),
                         )
-                        .padding(bottom = 8.dp),
+                        .padding(bottom = 16.dp),
                     label = stringResource(R.string.predictive_back_search),
                 )
                 Card(
@@ -586,6 +623,15 @@ private fun PredictiveBackAppListScreen(
                         .padding(bottom = 8.dp),
                     insideMargin = PaddingValues(0.dp),
                 ) {
+                    ArrowPreference(
+                        title = stringResource(
+                            R.string.predictive_back_manual_package_entry,
+                        ),
+                        onClick = {
+                            manualPackageError = null
+                            showManualPackageDialog = true
+                        },
+                    )
                     ArrowPreference(
                         title = stringResource(
                             R.string.predictive_back_compatibility_entry,
@@ -677,6 +723,103 @@ private fun PredictiveBackAppListScreen(
                 TextButton(
                     text = stringResource(R.string.close),
                     onClick = { showCompatibilityDialog = false },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        OverlayDialog(
+            show = showManualPackageDialog,
+            title = stringResource(R.string.predictive_back_manual_package_title),
+            onDismissRequest = {
+                if (!manualPackageLoading) {
+                    showManualPackageDialog = false
+                    manualPackageError = null
+                }
+            },
+        ) {
+            Column {
+                InputField(
+                    query = manualPackageName,
+                    onQueryChange = {
+                        manualPackageName = it
+                        manualPackageError = null
+                    },
+                    onSearch = {},
+                    expanded = false,
+                    onExpandedChange = {},
+                    modifier = Modifier.fillMaxWidth(),
+                    label = stringResource(R.string.predictive_back_manual_package_hint),
+                )
+                manualPackageError?.let { error ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = error,
+                        color = MiuixTheme.colorScheme.error,
+                        style = MiuixTheme.textStyles.body2,
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                TextButton(
+                    text = stringResource(R.string.predictive_back_manual_package_add),
+                    enabled = configurationEnabled && !manualPackageLoading,
+                    onClick = {
+                        val packageName = manualPackageName.trim()
+                        when {
+                            !ANDROID_PACKAGE_NAME.matches(packageName) -> {
+                                manualPackageError = manualInvalidMessage
+                            }
+
+                            packageName == context.packageName -> {
+                                manualPackageError = manualOwnPackageMessage
+                            }
+
+                            else -> {
+                                manualPackageLoading = true
+                                scope.launch {
+                                    val lookup = withContext(Dispatchers.IO) {
+                                        lookupManualPackage(
+                                            packageManager = context.packageManager,
+                                            packageName = packageName,
+                                        )
+                                    }
+                                    manualPackageLoading = false
+                                    when {
+                                        lookup.entry == null -> {
+                                            manualPackageError = manualNotInstalledMessage
+                                        }
+
+                                        lookup.applicationOptedIn -> {
+                                            manualPackageError = manualAlreadyEnabledMessage
+                                        }
+
+                                        else -> {
+                                            val entry = requireNotNull(lookup.entry)
+                                            apps = apps
+                                                .filterNot { it.packageName == packageName } +
+                                                    entry
+                                            persistSelection(
+                                                selectedPackages + packageName,
+                                            )
+                                            manualPackageName = ""
+                                            manualPackageError = null
+                                            showManualPackageDialog = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    text = stringResource(R.string.close),
+                    enabled = !manualPackageLoading,
+                    onClick = {
+                        showManualPackageDialog = false
+                        manualPackageError = null
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -857,10 +1000,12 @@ private fun PredictiveBackTopAppBarActions(
     orderInReverse: Boolean,
     selectedFirst: Boolean,
     showSystemApps: Boolean,
+    showNoLauncherApps: Boolean,
     showPackageName: Boolean,
     onOrderInReverseChanged: (Boolean) -> Unit,
     onSelectedFirstChanged: (Boolean) -> Unit,
     onShowSystemAppsChanged: (Boolean) -> Unit,
+    onShowNoLauncherAppsChanged: (Boolean) -> Unit,
     onShowPackageNameChanged: (Boolean) -> Unit,
 ) {
     val showMenu = remember { mutableStateOf(false) }
@@ -869,12 +1014,14 @@ private fun PredictiveBackTopAppBarActions(
         orderInReverse,
         selectedFirst,
         showSystemApps,
+        showNoLauncherApps,
         showPackageName,
     ) {
         listOf(
             R.string.sort_by_reverse_order to orderInReverse,
             R.string.sort_by_selected_first to selectedFirst,
             R.string.sort_by_show_system_app to showSystemApps,
+            R.string.sort_by_show_no_launcher_app to showNoLauncherApps,
             R.string.sort_by_show_package_name to showPackageName,
         )
     }
@@ -896,7 +1043,8 @@ private fun PredictiveBackTopAppBarActions(
                             0 -> onOrderInReverseChanged(!orderInReverse)
                             1 -> onSelectedFirstChanged(!selectedFirst)
                             2 -> onShowSystemAppsChanged(!showSystemApps)
-                            3 -> onShowPackageNameChanged(!showPackageName)
+                            3 -> onShowNoLauncherAppsChanged(!showNoLauncherApps)
+                            4 -> onShowPackageNameChanged(!showPackageName)
                         }
                         hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
                     },
@@ -1146,7 +1294,8 @@ private fun AppIcon(
     }
 }
 
-private fun loadLaunchableApps(
+@SuppressLint("WrongConstant")
+private fun loadInstalledApps(
     packageManager: PackageManager,
     ownPackageName: String,
 ): AppLoadResult {
@@ -1155,47 +1304,96 @@ private fun loadLaunchableApps(
         launcherIntent,
         PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
     )
-    val entries = LinkedHashMap<String, AppEntry>()
-    val applicationOptInPackages = HashSet<String>()
+    val launcherActivities = LinkedHashMap<String, ComponentName>()
     resolvedActivities.forEach { resolved ->
         val activityInfo = resolved.activityInfo ?: return@forEach
-        val applicationInfo = activityInfo.applicationInfo ?: return@forEach
         val packageName = activityInfo.packageName ?: return@forEach
+        launcherActivities.putIfAbsent(
+            packageName,
+            ComponentName(packageName, activityInfo.name),
+        )
+    }
+    val installedPackages = packageManager.getInstalledPackages(
+        PackageManager.PackageInfoFlags.of(
+            (PackageManager.MATCH_ALL or PackageManager.GET_META_DATA).toLong(),
+        ),
+    )
+    val entries = ArrayList<AppEntry>(installedPackages.size)
+    val applicationOptInPackages = HashSet<String>()
+    installedPackages.forEach { packageInfo: PackageInfo ->
+        val applicationInfo = packageInfo.applicationInfo ?: return@forEach
+        val packageName = applicationInfo.packageName ?: return@forEach
         if (packageName == ownPackageName) {
             return@forEach
         }
         if (isApplicationPredictiveBackOptedIn(applicationInfo)) {
             applicationOptInPackages.add(packageName)
-            entries.remove(packageName)
             return@forEach
         }
-        if (packageName in applicationOptInPackages || entries.containsKey(packageName)) {
-            return@forEach
-        }
-        val label = runCatching { resolved.loadLabel(packageManager).toString() }
+        val label = runCatching { applicationInfo.loadLabel(packageManager).toString() }
             .getOrNull()
             .orEmpty()
             .ifBlank { packageName }
-        val firstInstallTime = runCatching {
-            packageManager.getPackageInfo(
-                packageName,
-                PackageManager.PackageInfoFlags.of(0L),
-            ).firstInstallTime
-        }.getOrDefault(0L)
-        entries[packageName] = AppEntry(
+        entries.add(AppEntry(
             packageName = packageName,
             label = label,
-            launcherActivity = ComponentName(packageName, activityInfo.name),
+            launcherActivity = launcherActivities[packageName],
+            firstInstallTime = packageInfo.firstInstallTime,
+            isSystem = applicationInfo.flags and (
+                    ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
+                    ) != 0,
+            isAvailable = true,
+        ))
+    }
+    return AppLoadResult(
+        apps = entries,
+        applicationOptInPackages = applicationOptInPackages.toSet(),
+    )
+}
+
+@SuppressLint("WrongConstant")
+private fun lookupManualPackage(
+    packageManager: PackageManager,
+    packageName: String,
+): ManualPackageLookup {
+    val applicationInfo = runCatching {
+        packageManager.getApplicationInfo(
+            packageName,
+            PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ALL.toLong()),
+        )
+    }.getOrNull() ?: return ManualPackageLookup(
+        entry = null,
+        applicationOptedIn = false,
+    )
+    if (isApplicationPredictiveBackOptedIn(applicationInfo)) {
+        return ManualPackageLookup(
+            entry = null,
+            applicationOptedIn = true,
+        )
+    }
+    val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+    val label = runCatching { applicationInfo.loadLabel(packageManager).toString() }
+        .getOrNull()
+        .orEmpty()
+        .ifBlank { packageName }
+    val firstInstallTime = runCatching {
+        packageManager.getPackageInfo(
+            packageName,
+            PackageManager.PackageInfoFlags.of(0L),
+        ).firstInstallTime
+    }.getOrDefault(0L)
+    return ManualPackageLookup(
+        entry = AppEntry(
+            packageName = packageName,
+            label = label,
+            launcherActivity = launchIntent?.component,
             firstInstallTime = firstInstallTime,
             isSystem = applicationInfo.flags and (
                     ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
                     ) != 0,
             isAvailable = true,
-        )
-    }
-    return AppLoadResult(
-        apps = entries.values.toList(),
-        applicationOptInPackages = applicationOptInPackages.toSet(),
+        ),
+        applicationOptedIn = false,
     )
 }
 

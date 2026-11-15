@@ -5,14 +5,17 @@ LSPosed module using modern Xposed API 102 for SystemUI-side MIUI back gesture r
 ## Build
 
 ```powershell
-.\gradlew.bat assembleDebug
+.\gradlew.bat clean assembleRelease
 ```
 
-The debug APK is generated at:
+The release APK is generated at:
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release.apk
 ```
+
+Follow `AGENTS.md` for signing configuration and release-build checks. Do not commit
+keystores, signing credentials, APKs, or build outputs.
 
 ## AOSP References
 
@@ -59,6 +62,13 @@ autoHotReload=true
 ```
 
 The module implements `onHotReloading(...)` and `onHotReloaded(...)`.
+
+## Developer handoff
+
+The implementation map, known limitations, debugging lessons, and project rules are documented in:
+
+- [Feature map and implementation notes](docs/功能实现与代码地图.md)
+- [Handoff guide, pitfalls, and development rules](docs/接手开发规范与踩坑记录.md)
 
 ## Entry
 

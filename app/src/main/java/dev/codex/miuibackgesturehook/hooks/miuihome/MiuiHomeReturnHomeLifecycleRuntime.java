@@ -2709,6 +2709,15 @@ abstract class MiuiHomeReturnHomeLifecycleRuntime
             }
             session.previewTarget = null;
             session.previewLeash = null;
+            session.statusBarTarget = null;
+            session.statusBarLeash = null;
+            if (session.statusBarTransaction != null) {
+                try {
+                    session.statusBarTransaction.close();
+                } catch (Throwable ignored) {
+                }
+                session.statusBarTransaction = null;
+            }
             if (!session.unifiedNativeOwnerAbandoned) {
                 releaseTargets(session.apps);
                 releaseTargets(session.wallpapers);

@@ -295,6 +295,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final String EXTRA_LAUNCHER_OPEN_BREAK_ATTEMPT =
             "launcher_open_break_attempt";
     protected static final String EXTRA_LAUNCHER_EDITING = "launcher_editing";
+    protected static final String EXTRA_FOCUSED_EXPANDED_SMALL_WINDOW =
+            "focused_expanded_small_window";
     protected static final String EXTRA_RETURN_HOME_COMMIT_TASK_ID =
             "return_home_commit_task_id";
     protected static final String EXTRA_RETURN_HOME_COMMIT_DEBUG_ID =
@@ -350,6 +352,10 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected static final long INPUT_ACCEPTED_TOKEN_TIMEOUT_MS = 750L;
     protected static final long RETURN_HOME_DIRECT_CANCEL_CLEANUP_GUARD_MS = 500L;
     protected static final long RETURN_HOME_NATIVE_TIMEOUT_MS = 1800L;
+    protected static final int RETURN_HOME_CANCEL_TIMEOUT_MAX_RETRIES = 3;
+    protected static final long SHELL_ORPHANED_SESSION_RECOVERY_MS = 2500L;
+    protected static final long SHELL_POST_COMMIT_HANDOFF_SETTLE_MS = 32L;
+    protected static final long RETURN_HOME_DEAD_SHELL_RECOVERY_MS = 500L;
     protected static final int RETURN_HOME_GEOMETRY_SOURCE_ANIM_UPDATE = 1;
     protected static final int RETURN_HOME_GEOMETRY_SOURCE_SURFACE_PARAMS = 2;
     protected static final int MIUI_SURFACE_PARAM_FLAG_MATRIX = 2;
@@ -446,6 +452,8 @@ public abstract class HookRuntimeCore extends XposedModule {
     protected volatile boolean miuiDrawerVisible;
     protected volatile boolean miuiLauncherEditing;
     protected volatile boolean miuiHomeEditingStatePublished;
+    protected volatile boolean miuiFocusedExpandedSmallWindow;
+    protected volatile boolean miuiHomeFocusedExpandedSmallWindowPublished;
     protected volatile boolean miuiLauncherOpenActive;
     protected volatile boolean miuiLauncherOpenBreakAvailable;
     protected volatile long miuiLauncherOpenBreakGeneration;
@@ -482,12 +490,25 @@ public abstract class HookRuntimeCore extends XposedModule {
             PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR;
     protected volatile boolean cachedHyperOsSlideAnimationEnabled =
             PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION;
+    protected volatile boolean cachedAospBackPanelMaterialEnabled =
+            PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_MATERIAL;
+    protected volatile int cachedHyperOsHapticsStrengthPercent =
+            PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_STRENGTH_PERCENT;
+    protected volatile boolean cachedCustomHapticsEnabled =
+            PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS;
+    protected volatile int cachedCustomHapticsPreset =
+            PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
     protected volatile SharedPreferences moduleLoggingPreferences;
     private final SharedPreferences.OnSharedPreferenceChangeListener
             moduleLoggingPreferenceListener = (preferences, key) -> {
                 if (!PredictiveBackPreferences.KEY_MODULE_LOGGING.equals(key)
                         && !PredictiveBackPreferences.KEY_AOSP_BACKGROUND_MODE.equals(key)
                         && !PredictiveBackPreferences.KEY_AOSP_WALLPAPER_BLUR.equals(key)
+                        && !PredictiveBackPreferences.KEY_HYPEROS_HAPTICS_STRENGTH_PERCENT
+                        .equals(key)
+                        && !PredictiveBackPreferences.KEY_CUSTOM_HAPTICS.equals(key)
+                        && !PredictiveBackPreferences.KEY_CUSTOM_HAPTICS_PRESET.equals(key)
+                        && !PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_MATERIAL.equals(key)
                         && !PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION.equals(key)) {
                     return;
                 }
@@ -508,6 +529,24 @@ public abstract class HookRuntimeCore extends XposedModule {
                     cachedHyperOsSlideAnimationEnabled = preferences.getBoolean(
                             PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
                             PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
+                    cachedAospBackPanelMaterialEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_MATERIAL,
+                            PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_MATERIAL);
+                    cachedHyperOsHapticsStrengthPercent = PredictiveBackPreferences
+                            .clampHyperOsHapticsStrengthPercent(preferences.getInt(
+                                    PredictiveBackPreferences
+                                            .KEY_HYPEROS_HAPTICS_STRENGTH_PERCENT,
+                                    PredictiveBackPreferences
+                                            .DEFAULT_HYPEROS_HAPTICS_STRENGTH_PERCENT));
+                    cachedCustomHapticsEnabled = preferences.getBoolean(
+                            PredictiveBackPreferences.KEY_CUSTOM_HAPTICS,
+                            PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS);
+                    int preset = preferences.getInt(
+                            PredictiveBackPreferences.KEY_CUSTOM_HAPTICS_PRESET,
+                            PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET);
+                    cachedCustomHapticsPreset = PredictiveBackPreferences
+                            .isValidCustomHapticsPreset(preset)
+                            ? preset : PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
                 } catch (Throwable ignored) {
                     // Keep the last known logging policy when the remote preference is unreadable.
                 }
@@ -982,6 +1021,24 @@ public abstract class HookRuntimeCore extends XposedModule {
             cachedHyperOsSlideAnimationEnabled = preferences.getBoolean(
                     PredictiveBackPreferences.KEY_HYPEROS_SLIDE_ANIMATION,
                     PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION);
+            cachedAospBackPanelMaterialEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_MATERIAL,
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_MATERIAL);
+            cachedHyperOsHapticsStrengthPercent = PredictiveBackPreferences
+                    .clampHyperOsHapticsStrengthPercent(preferences.getInt(
+                            PredictiveBackPreferences
+                                    .KEY_HYPEROS_HAPTICS_STRENGTH_PERCENT,
+                            PredictiveBackPreferences
+                                    .DEFAULT_HYPEROS_HAPTICS_STRENGTH_PERCENT));
+            cachedCustomHapticsEnabled = preferences.getBoolean(
+                    PredictiveBackPreferences.KEY_CUSTOM_HAPTICS,
+                    PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS);
+            int preset = preferences.getInt(
+                    PredictiveBackPreferences.KEY_CUSTOM_HAPTICS_PRESET,
+                    PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET);
+            cachedCustomHapticsPreset = PredictiveBackPreferences
+                    .isValidCustomHapticsPreset(preset)
+                    ? preset : PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
         } catch (Throwable ignored) {
             moduleLoggingEnabled = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING;
             aospBackgroundMode =
@@ -990,6 +1047,13 @@ public abstract class HookRuntimeCore extends XposedModule {
                     PredictiveBackPreferences.DEFAULT_AOSP_WALLPAPER_BLUR;
             cachedHyperOsSlideAnimationEnabled =
                     PredictiveBackPreferences.DEFAULT_HYPEROS_SLIDE_ANIMATION;
+            cachedAospBackPanelMaterialEnabled =
+                    PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_MATERIAL;
+            cachedHyperOsHapticsStrengthPercent =
+                    PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_STRENGTH_PERCENT;
+            cachedCustomHapticsEnabled = PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS;
+            cachedCustomHapticsPreset =
+                    PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
         }
     }
 

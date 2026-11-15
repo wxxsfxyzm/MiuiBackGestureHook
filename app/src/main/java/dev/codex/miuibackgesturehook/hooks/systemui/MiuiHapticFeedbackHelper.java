@@ -1,9 +1,15 @@
 package dev.codex.miuibackgesturehook.hooks.systemui;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.os.SystemProperties;
 import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.os.VibratorManager;
 import android.util.Log;
+
+import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.Executor;
@@ -46,9 +52,17 @@ final class MiuiHapticFeedbackHelper {
     private final boolean defaultBackSupported;
     private final boolean supported;
     private final boolean hapticV2;
+    private final Vibrator vibrator;
+    private final boolean scaledPrimitivesSupported;
+    private final boolean thudPrimitiveSupported;
     private volatile boolean enhancedMode;
+    private volatile int strengthPercent = 100;
+    private volatile boolean customFeedback;
+    private volatile int customPreset =
+            PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
     private volatile long lastReadyBackUptime;
 
+    @SuppressLint("BlockedPrivateApi")
     MiuiHapticFeedbackHelper(Context context, Logger logger) {
         this.logger = logger;
         Object util = null;
@@ -56,6 +70,9 @@ final class MiuiHapticFeedbackHelper {
         boolean resolvedDefaultSupported = false;
         boolean resolvedSupported = false;
         boolean resolvedV2 = false;
+        Vibrator resolvedVibrator = null;
+        boolean resolvedScaledPrimitives = false;
+        boolean resolvedThudPrimitive = false;
         try {
             String version = SystemProperties.get("sys.haptic.version", "1.0");
             resolvedV2 = "2.0".equals(version);
@@ -85,12 +102,36 @@ final class MiuiHapticFeedbackHelper {
             resolvedDefaultSupported = false;
             resolvedSupported = false;
         }
+        try {
+            VibratorManager vibratorManager = context.getSystemService(
+                    VibratorManager.class);
+            if (vibratorManager != null) {
+                resolvedVibrator = vibratorManager.getDefaultVibrator();
+                boolean[] primitiveSupport = resolvedVibrator.arePrimitivesSupported(
+                        VibrationEffect.Composition.PRIMITIVE_TICK,
+                        VibrationEffect.Composition.PRIMITIVE_CLICK,
+                        VibrationEffect.Composition.PRIMITIVE_THUD);
+                resolvedScaledPrimitives = primitiveSupport.length == 3
+                        && primitiveSupport[0] && primitiveSupport[1];
+                resolvedThudPrimitive = primitiveSupport.length == 3
+                        && primitiveSupport[2];
+            }
+        } catch (Throwable throwable) {
+            logger.log(Log.WARN, "Scaled haptic primitives unavailable; "
+                    + "keeping native HyperOS strength", throwable);
+            resolvedVibrator = null;
+            resolvedScaledPrimitives = false;
+            resolvedThudPrimitive = false;
+        }
         this.hapticFeedbackUtil = util;
         this.performExtHapticFeedback = perform;
         this.defaultBackSupported = resolvedDefaultSupported
                 && util != null && perform != null;
         this.supported = resolvedSupported && util != null && perform != null;
         this.hapticV2 = resolvedV2;
+        this.vibrator = resolvedVibrator;
+        this.scaledPrimitivesSupported = resolvedScaledPrimitives;
+        this.thudPrimitiveSupported = resolvedThudPrimitive;
         if (this.supported) {
             logger.log(Log.INFO, "MIUI two-stage back haptics ready"
                     + ", hapticV2=" + resolvedV2, null);
@@ -110,6 +151,10 @@ final class MiuiHapticFeedbackHelper {
         return defaultBackSupported;
     }
 
+    boolean isCustomSupported() {
+        return vibrator != null && vibrator.hasVibrator();
+    }
+
     boolean isHapticV2() {
         return hapticV2;
     }
@@ -127,8 +172,21 @@ final class MiuiHapticFeedbackHelper {
         return enhancedMode;
     }
 
+    void setStrengthPercent(int strengthPercent) {
+        this.strengthPercent = Math.max(20, Math.min(200, strengthPercent));
+    }
+
+    void setCustomFeedback(boolean enabled, int preset) {
+        customFeedback = enabled;
+        customPreset = PredictiveBackPreferences.isValidCustomHapticsPreset(preset)
+                ? preset : PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
+    }
+
     /** Plays only HyperOS's default back effect, without its second hand-up stage. */
     boolean performDefaultBack() {
+        if (customFeedback) {
+            return performCustomFeedback(false);
+        }
         if (!defaultBackSupported) {
             return false;
         }
@@ -156,17 +214,31 @@ final class MiuiHapticFeedbackHelper {
 
     /** Arrow fade-in completed; mirrors performGestureReadyBack(). */
     void performReadyBack() {
+        if (customFeedback) {
+            performCustomFeedback(false);
+            lastReadyBackUptime = SystemClock.uptimeMillis();
+            return;
+        }
         if (!supported) {
             return;
         }
         if (!hapticV2 || enhancedMode) {
             lastReadyBackUptime = SystemClock.uptimeMillis();
         }
-        play(hapticV2 ? EFFECT_GESTURE_BACK_V2 : EFFECT_GESTURE_READY_BACK_LINEAR);
+        int effect = hapticV2 ? EFFECT_GESTURE_BACK_V2
+                : EFFECT_GESTURE_READY_BACK_LINEAR;
+        play(effect);
     }
 
     /** Committed release; mirrors performGestureBackHandUp() with the 140ms blocker. */
     void performHandUp() {
+        if (customFeedback) {
+            if (SystemClock.uptimeMillis() - lastReadyBackUptime
+                    >= LINEAR_HAND_UP_BLOCK_MS) {
+                performCustomFeedback(true);
+            }
+            return;
+        }
         if (!supported) {
             return;
         }
@@ -182,6 +254,73 @@ final class MiuiHapticFeedbackHelper {
             effect = EFFECT_GESTURE_BACK_HAND_UP_LINEAR;
         }
         play(effect);
+    }
+
+    /**
+     * Framework-only custom effects. They do not depend on Xiaomi effect IDs, and therefore keep
+     * their character and strength controls independent from HyperOS gesture haptics.
+     */
+    private boolean performCustomFeedback(boolean release) {
+        if (!isCustomSupported()) {
+            return false;
+        }
+        float baseScale = Math.max(0.1f, Math.min(1.0f, strengthPercent / 160.0f));
+        try {
+            VibrationEffect effect;
+            if (!scaledPrimitivesSupported
+                    && customPreset != PredictiveBackPreferences.CUSTOM_HAPTICS_PRESET_DEEP) {
+                int amplitude = Math.max(24,
+                        Math.min(255, Math.round(strengthPercent * 1.275f)));
+                effect = VibrationEffect.createOneShot(release ? 22L : 14L, amplitude);
+                vibrator.vibrate(effect);
+                return true;
+            }
+            switch (customPreset) {
+                case PredictiveBackPreferences.CUSTOM_HAPTICS_PRESET_SOFT:
+                    effect = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK,
+                                    Math.min(0.7f, baseScale * 0.65f))
+                            .compose();
+                    break;
+                case PredictiveBackPreferences.CUSTOM_HAPTICS_PRESET_DEEP:
+                    if (thudPrimitiveSupported) {
+                        effect = VibrationEffect.startComposition()
+                                .addPrimitive(VibrationEffect.Composition.PRIMITIVE_THUD,
+                                        baseScale)
+                                .compose();
+                    } else {
+                        int amplitude = Math.max(32,
+                                Math.min(255, Math.round(strengthPercent * 1.275f)));
+                        effect = VibrationEffect.createOneShot(
+                                release ? 42L : 34L, amplitude);
+                    }
+                    break;
+                case PredictiveBackPreferences.CUSTOM_HAPTICS_PRESET_DOUBLE:
+                    effect = VibrationEffect.startComposition()
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_CLICK,
+                                    baseScale)
+                            .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK,
+                                    Math.min(1.0f, baseScale * 0.8f), 42)
+                            .compose();
+                    break;
+                case PredictiveBackPreferences.CUSTOM_HAPTICS_PRESET_CRISP:
+                default:
+                    effect = VibrationEffect.startComposition()
+                            .addPrimitive(release
+                                            ? VibrationEffect.Composition.PRIMITIVE_CLICK
+                                            : VibrationEffect.Composition.PRIMITIVE_TICK,
+                                    baseScale)
+                            .compose();
+                    break;
+            }
+            vibrator.vibrate(effect);
+            return true;
+        } catch (Throwable throwable) {
+            logger.log(Log.WARN, "Failed to play custom back feedback"
+                    + ", preset=" + customPreset
+                    + ", strengthPercent=" + strengthPercent, throwable);
+            return false;
+        }
     }
 
     private void play(int effectId) {

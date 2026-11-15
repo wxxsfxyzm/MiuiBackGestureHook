@@ -59,6 +59,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         boolean savedMiuiOverviewVisible = miuiOverviewVisible;
         boolean savedMiuiDrawerVisible = miuiDrawerVisible;
         boolean savedMiuiLauncherEditing = miuiLauncherEditing;
+        boolean savedMiuiFocusedExpandedSmallWindow =
+                miuiFocusedExpandedSmallWindow;
         long savedMiuiOverviewDismissDeadline = miuiOverviewDismissPendingUntilUptime;
         Object savedMiuiHomeOpenBreakController = miuiHomeOpenBreakController;
         Context savedMiuiHomeOpenBreakContext = miuiHomeOpenBreakContext;
@@ -133,7 +135,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 Boolean.valueOf(savedMiuiDrawerVisible),
                 savedMiuiHomeReturnHomeBinder,
                 savedHeadlessState,
-                Boolean.valueOf(savedMiuiLauncherEditing)
+                Boolean.valueOf(savedMiuiLauncherEditing),
+                Boolean.valueOf(savedMiuiFocusedExpandedSmallWindow)
         });
         return true;
     }
@@ -324,6 +327,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
             if (!oldHookIds.contains("systemui_back_panel_aosp_haptic")) {
                 hookAospBackPanelHaptic(hotReloadClassLoader);
             }
+            if (!oldHookIds.contains("systemui_back_panel_android_background_blur")) {
+                hookAospBackPanelBlurRendering(hotReloadClassLoader);
+            }
             boolean missingAospViewHaptic = !oldHookIds.contains(
                     "systemui_back_panel_aosp_view_haptic");
             boolean missingAospViewHapticFlags = !oldHookIds.contains(
@@ -390,6 +396,10 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                         !oldHookIds.contains("systemui_back_slide_duration"),
                         !oldHookIds.contains("systemui_back_slide_finish"),
                         !oldHookIds.contains("systemui_back_color_root_apply"));
+            }
+            if (!oldHookIds.contains(
+                    "systemui_back_post_commit_animator_duration")) {
+                hookPostCommitAnimatorDurationCapture();
             }
             if (!oldHookIds.contains("systemui_predictive_background_remove")
                     || (!oldHookIds.contains(
@@ -601,6 +611,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
         switch (hookId) {
             case "systemui_block_miui_gesture_line_progress":
                 return this::interceptMiuiOverviewProxyTransact;
+            case "systemui_back_panel_android_background_blur":
+                return this::drawAospBackPanelBlur;
             case "systemui_navigation_bar_transient_appearance":
             case "systemui_status_bar_transient_appearance":
                 return this::preserveTransientBarAppearance;
@@ -711,6 +723,8 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 return this::onCrossActivitySlideDuration;
             case "systemui_back_slide_finish":
                 return this::onCrossActivitySlideFinish;
+            case "systemui_back_post_commit_animator_duration":
+                return this::captureCrossActivityPostCommitAnimator;
             case "systemui_back_color_root_apply":
                 return this::onCrossActivityColorRootApply;
             case "systemui_back_color_root_scrim_creation":
@@ -830,6 +844,9 @@ public abstract class HotReloadHookRuntime extends SystemServerHookRuntime {
                 }
                 if (state.length >= 14) {
                     miuiLauncherEditing = Boolean.TRUE.equals(state[13]);
+                }
+                if (state.length >= 15) {
+                    miuiFocusedExpandedSmallWindow = Boolean.TRUE.equals(state[14]);
                 }
             }
         }

@@ -87,6 +87,35 @@ abstract class MiuiHomeReturnHomePreviewRuntime
                     "shellBinderDied", true);
             invalidatePendingWidgetOpenBarrier("shellBinderDied");
             beginDeferredControllerReplacement("shellBinderDied");
+            ReturnHomeSession orphanedSession = currentSession;
+            if (orphanedSession != null && orphanedSession.finished.get() == 0) {
+                handler.postDelayed(() ->
+                                recoverReturnHomeAfterDeadShell(orphanedSession),
+                        RETURN_HOME_DEAD_SHELL_RECOVERY_MS);
+            }
+        }
+
+        protected void recoverReturnHomeAfterDeadShell(
+                ReturnHomeSession session) {
+            if (!shellBinderDead || !deferredControllerReplacement
+                    || session == null || currentSession != session
+                    || session.finished.get() != 0) {
+                return;
+            }
+            // The registered Shell runner and its finish callback died. Keeping Xiaomi's
+            // provisional owner can no longer produce a valid completion, so abandon the old
+            // surfaces instead of mutating whichever WindowElement the launcher now owns.
+            session.unifiedNativePreviewSpringEndHeld = false;
+            session.unifiedNativeOwnerAbandoned = true;
+            session.unifiedNativeCleanupVerified = true;
+            session.nativeHandoffStarted = false;
+            session.nativeAnimationStarted = false;
+            session.unifiedNativeCommitPending = false;
+            session.unifiedNativeCancelPending = false;
+            moduleLog(Log.ERROR, TAG,
+                    "Recovered orphaned return-home session after Shell binder death"
+                            + ", generation=" + session.generation);
+            finishSession(session, "deadShellOwnerRecovery");
         }
 
         public String describeUnifiedOwner() {

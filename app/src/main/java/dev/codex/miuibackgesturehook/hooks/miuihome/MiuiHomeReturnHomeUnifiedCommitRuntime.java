@@ -2470,6 +2470,7 @@ abstract class MiuiHomeReturnHomeUnifiedCommitRuntime
                                 ? new RectF(session.startRect) : null);
                 invokeAnyMethod(session.nativeWindowElement,
                         "animTo", new Object[]{params});
+                applyReturnHomeStatusBarTransform(session);
                 return true;
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG,
@@ -2786,6 +2787,7 @@ abstract class MiuiHomeReturnHomeUnifiedCommitRuntime
                 session.unifiedNativeCancelAnimToEpoch =
                         cancelAnimToEpoch;
                 session.unifiedNativeCancelEndObserved = false;
+                session.unifiedNativeCancelTimeoutRetries = 0;
                 session.unifiedNativeCancelAnimParams = cancelParams;
                 verifyUnifiedStateManagerListenerGate(
                         session, true, "cancelEntry:" + reason);
@@ -2930,6 +2932,7 @@ abstract class MiuiHomeReturnHomeUnifiedCommitRuntime
                         != animToEpoch) {
                     return;
                 }
+                session.unifiedNativeCancelTimeoutRetries++;
                 long attempt = session.unifiedNativeRetargetAttempts
                         .incrementAndGet();
                 session.unifiedNativeCancelTimeoutAttempt = attempt;
@@ -2952,8 +2955,15 @@ abstract class MiuiHomeReturnHomeUnifiedCommitRuntime
                                     + ", attempt=" + attempt
                                     + ", animToEpoch="
                                     + animToEpoch
-                                    + ", reason=" + reason,
+                            + ", reason=" + reason,
                             throwable);
+                    if (session.unifiedNativeCancelTimeoutRetries
+                            >= RETURN_HOME_CANCEL_TIMEOUT_MAX_RETRIES) {
+                        abandonTimedOutUnifiedNativeCancelOwner(
+                                session, animToEpoch, reason,
+                                "inspectionFailureLimit", null);
+                        return;
+                    }
                     scheduleUnifiedNativeCancelTimeout(
                             session, animToEpoch, reason);
                 }
@@ -3025,8 +3035,129 @@ abstract class MiuiHomeReturnHomeUnifiedCommitRuntime
                     animToEpoch, reason)) {
                 return;
             }
+            boolean replacedStoppedOwner = currentElementRead
+                    && currentElement != session.nativeWindowElement
+                    && inspection.failure == null
+                    && inspection.sameAnimation
+                    && !inspection.running
+                    && (!"APP_TO_APP".equals(inspection.actualType)
+                    || !inspection.exactTarget);
+            if (replacedStoppedOwner) {
+                abandonTimedOutUnifiedNativeCancelOwner(
+                        session, animToEpoch, reason,
+                        "replacedStoppedOwner", inspection);
+                return;
+            }
+            if (session.unifiedNativeCancelTimeoutRetries
+                    >= RETURN_HOME_CANCEL_TIMEOUT_MAX_RETRIES) {
+                abandonTimedOutUnifiedNativeCancelOwner(
+                        session, animToEpoch, reason,
+                        "retryLimit", inspection);
+                return;
+            }
             scheduleUnifiedNativeCancelTimeout(
                     session, animToEpoch, reason);
+        }
+
+        protected void applyReturnHomeStatusBarTransform(ReturnHomeSession session) {
+            SurfaceControl statusBar = session.statusBarLeash;
+            SurfaceControl app = session.previewLeash;
+            if (statusBar == null || app == null
+                    || !statusBar.isValid() || !app.isValid()
+                    || session.statusBarStartRect.isEmpty()
+                    || session.startRect.isEmpty()) {
+                return;
+            }
+            try {
+                float scale = session.currentRect.width()
+                        / Math.max(1.0f, session.startRect.width());
+                float left = session.currentRect.left
+                        + ((session.statusBarStartRect.left
+                        - session.startRect.left) * scale);
+                float top = session.currentRect.top
+                        + ((session.statusBarStartRect.top
+                        - session.startRect.top) * scale);
+                SurfaceControl.Transaction transaction = session.statusBarTransaction;
+                if (transaction == null) {
+                    transaction = new SurfaceControl.Transaction();
+                    session.statusBarTransaction = transaction;
+                }
+                invokeMethod(transaction, "setMatrix",
+                        new Class<?>[]{SurfaceControl.class, float.class,
+                                float.class, float.class, float.class},
+                        new Object[]{statusBar, scale, 0.0f, 0.0f, scale});
+                transaction.setPosition(statusBar, left, top);
+                invokeMethod(transaction, "setWindowCrop",
+                        new Class<?>[]{SurfaceControl.class, int.class, int.class},
+                        new Object[]{statusBar,
+                                session.statusBarStartRect.width(),
+                                session.statusBarStartRect.height()});
+                invokeMethod(transaction, "setRelativeLayer",
+                        new Class<?>[]{SurfaceControl.class, SurfaceControl.class,
+                                int.class},
+                        new Object[]{statusBar, app, 1});
+                transaction.setAlpha(statusBar, 1.0f);
+                invokeMethod(transaction, "show",
+                        new Class<?>[]{SurfaceControl.class},
+                        new Object[]{statusBar});
+                transaction.apply();
+            } catch (Throwable throwable) {
+                session.statusBarLeash = null;
+                moduleLog(Log.WARN, TAG,
+                        "Failed to embed status bar in return-home card"
+                                + ", generation=" + session.generation,
+                        throwable);
+            }
+        }
+
+        /**
+         * Stop retaining a cancellation owner once Xiaomi has replaced it or repeated
+         * inspection can no longer prove that it is ours.  Abandonment deliberately skips
+         * surface/blur/target restoration: the replacement WindowElement remains Xiaomi's
+         * owner and the old Shell runner is only released from this module's state machine.
+         */
+        protected void abandonTimedOutUnifiedNativeCancelOwner(
+                ReturnHomeSession session, long animToEpoch, String reason,
+                String timeoutReason,
+                UnifiedNativeRetargetInspection inspection) {
+            if (session == null || currentSession != session
+                    || session.finished.get() != 0
+                    || session.unifiedNativeCleanupVerified
+                    || !session.unifiedNativeCancelPending
+                    || session.unifiedNativeCancelAnimToEpoch != animToEpoch) {
+                return;
+            }
+            Runnable timeout = session.unifiedNativeCancelTimeout;
+            if (timeout != null) {
+                handler.removeCallbacks(timeout);
+            }
+            session.unifiedNativeCancelTimeout = null;
+            session.unifiedNativeCancelPending = false;
+            session.unifiedNativeCancelRetargeted = false;
+            session.unifiedNativeCancelEndObserved = false;
+            session.unifiedNativeCancelAnimParams = null;
+            session.unifiedNativePreviewSpringEndHeld = false;
+            session.unifiedNativeOwnerAbandoned = true;
+            session.unifiedNativeCleanupVerified = true;
+            moduleLog(Log.ERROR, TAG,
+                    "Abandoned timed-out Xiaomi cancel owner"
+                            + ", generation=" + session.generation
+                            + ", animToEpoch=" + animToEpoch
+                            + ", timeoutReason=" + timeoutReason
+                            + ", retries="
+                            + session.unifiedNativeCancelTimeoutRetries
+                            + ", type=" + (inspection == null
+                            ? "unknown" : inspection.actualType)
+                            + ", sameAnimation=" + (inspection != null
+                            && inspection.sameAnimation)
+                            + ", exactTarget=" + (inspection != null
+                            && inspection.exactTarget)
+                            + ", running=" + (inspection != null
+                            && inspection.running)
+                            + ", reason=" + reason,
+                    inspection == null ? null : inspection.failure);
+            finishSession(session,
+                    "cancelOwnerAbandoned:" + timeoutReason + ":" + reason);
         }
 
         /**

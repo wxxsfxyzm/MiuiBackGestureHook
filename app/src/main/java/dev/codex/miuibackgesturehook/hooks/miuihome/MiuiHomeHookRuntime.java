@@ -637,6 +637,59 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
             moduleLog(Log.WARN, TAG, "MiuiHome small-window back lifecycle unavailable",
                     throwable);
         }
+        try {
+            Class<?> helperClass = Class.forName(
+                    MIUI_HOME_SMALL_WINDOW_STATE_HELPER, false, classLoader);
+            int hooked = 0;
+            for (Method method : helperClass.getDeclaredMethods()) {
+                if (!"dispatchFreeFormStackModeChanged".equals(method.getName())) {
+                    continue;
+                }
+                method.setAccessible(true);
+                final int index = hooked++;
+                recordHookHandle(hook(method)
+                        .setId("miui_home_freeform_state_changed_" + index)
+                        .intercept(this::refreshMiuiHomeFreeformBackState));
+            }
+            if (hooked == 0) {
+                throw new NoSuchMethodException(
+                        MIUI_HOME_SMALL_WINDOW_STATE_HELPER
+                                + ".dispatchFreeFormStackModeChanged");
+            }
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "MiuiHome small-window transition lifecycle unavailable", throwable);
+        }
+    }
+
+    protected Object refreshMiuiHomeFreeformBackState(
+            XposedInterface.Chain chain) throws Throwable {
+        Object result = chain.proceed();
+        Object helper = chain.getThisObject();
+        Handler mainHandler = new Handler(Looper.getMainLooper());
+        mainHandler.post(() -> refreshExpandedSmallWindow(helper));
+        return result;
+    }
+
+    protected void refreshExpandedSmallWindow(Object helper) {
+        try {
+            ClassLoader classLoader = helper.getClass().getClassLoader();
+            Class<?> applicationClass = Class.forName(
+                    MIUI_HOME_APPLICATION, false, classLoader);
+            Method getLauncher = applicationClass.getDeclaredMethod("getLauncher");
+            getLauncher.setAccessible(true);
+            Object launcher = getLauncher.invoke(null);
+            if (!(launcher instanceof Context)) {
+                return;
+            }
+            boolean expanded = Boolean.TRUE.equals(invokeAnyMethod(
+                    helper, "isInSmallWindowMode", new Object[0]))
+                    && hasExpandedSmallWindow(helper);
+            publishExpandedSmallWindow((Context) launcher, expanded);
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to refresh MiuiHome small-window transition state", throwable);
+        }
     }
 
     protected void hookMiuiHomeEditingState(ClassLoader classLoader) {
@@ -2500,27 +2553,31 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
         Object enabled = chain.getArg(0);
         Object source = chain.getArg(1);
         Object launcher = chain.getThisObject();
-        if (!Boolean.FALSE.equals(enabled)
-                || !"typefrom_home".equals(source)
-                || !(launcher instanceof Context)) {
+        if (!(launcher instanceof Context)) {
             return chain.proceed();
         }
+        boolean expandedSmallWindow = false;
         try {
             KeyguardManager keyguardManager = ((Context) launcher)
                     .getSystemService(KeyguardManager.class);
-            if (keyguardManager == null || keyguardManager.isKeyguardLocked()) {
-                return chain.proceed();
+            if (keyguardManager != null && !keyguardManager.isKeyguardLocked()) {
+                Class<?> helperClass = Class.forName(
+                        MIUI_HOME_SMALL_WINDOW_STATE_HELPER, false,
+                        launcher.getClass().getClassLoader());
+                Method getInstance = helperClass.getDeclaredMethod("getInstance");
+                getInstance.setAccessible(true);
+                Object helper = getInstance.invoke(null);
+                expandedSmallWindow = helper != null
+                        && Boolean.TRUE.equals(invokeAnyMethod(
+                        helper, "isInSmallWindowMode", new Object[0]))
+                        && hasExpandedSmallWindow(helper);
             }
-            Class<?> helperClass = Class.forName(
-                    MIUI_HOME_SMALL_WINDOW_STATE_HELPER, false,
-                    launcher.getClass().getClassLoader());
-            Method getInstance = helperClass.getDeclaredMethod("getInstance");
-            getInstance.setAccessible(true);
-            Object helper = getInstance.invoke(null);
-            if (helper != null && Boolean.TRUE.equals(invokeAnyMethod(
-                    helper, "isInSmallWindowMode", new Object[0]))) {
+            publishExpandedSmallWindow((Context) launcher, expandedSmallWindow);
+            if (Boolean.FALSE.equals(enabled)
+                    && "typefrom_home".equals(source)
+                    && expandedSmallWindow) {
                 moduleLog(Log.INFO, TAG, "Kept native MiuiHome back stubs enabled"
-                        + ", reason=activeSmallWindowOverHome");
+                        + ", reason=expandedSmallWindowOverHome");
                 return chain.proceed(new Object[]{Boolean.TRUE, source});
             }
         } catch (Throwable throwable) {
@@ -2528,6 +2585,72 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
                     + "preserving launcher decision", throwable);
         }
         return chain.proceed();
+    }
+
+    protected void publishExpandedSmallWindow(Context launcher, boolean expanded) {
+        if (miuiHomeFocusedExpandedSmallWindowPublished
+                && miuiFocusedExpandedSmallWindow == expanded) {
+            return;
+        }
+        Intent stateIntent = new Intent(MODULE_MIUI_OVERVIEW_STATE_CHANGE);
+        stateIntent.putExtra(EXTRA_FOCUSED_EXPANDED_SMALL_WINDOW, expanded);
+        sendAuthenticatedMiuiHomeState(launcher, stateIntent);
+        miuiFocusedExpandedSmallWindow = expanded;
+        miuiHomeFocusedExpandedSmallWindowPublished = true;
+        moduleLog(Log.INFO, TAG, "Mirrored expanded small-window state"
+                + ", expanded=" + expanded);
+    }
+
+    /**
+     * Xiaomi's coarse small-window flag includes normal, mini, and pinned windows. Only a normal
+     * expanded freeform task is a back target; mini and edge-pinned windows must preserve
+     * normal Home edge scrolling instead of re-enabling MiuiHome's native back stubs.
+     */
+    protected boolean hasExpandedSmallWindow(Object helper) {
+        try {
+            // getNormalSmallWindows also contains the compact normal window created directly
+            // from fullscreen. Admit only Xiaomi's genuinely enlarged freeform geometry; the
+            // callback may otherwise republish that compact window as a back target after its
+            // first state refresh.
+            Object windowsObject = invokeAnyMethod(
+                    helper, "getNormalSmallWindows", new Object[0]);
+            if (!(windowsObject instanceof Set)) {
+                return false;
+            }
+            Set<?> windows = (Set<?>) windowsObject;
+            if (windows.isEmpty()) {
+                return false;
+            }
+            for (Object window : windows) {
+                Object pinnedObject = readField(window, "inPinMode");
+                if (Boolean.TRUE.equals(pinnedObject)) {
+                    continue;
+                }
+                Object windowState = readField(window, "windowState");
+                if (!(windowState instanceof Number)
+                        || ((Number) windowState).intValue() != 0) {
+                    continue;
+                }
+                if (!Boolean.TRUE.equals(readField(window, "isNormalFreeForm"))
+                        || Boolean.TRUE.equals(readField(window, "freeformTaskHidden"))
+                        || Boolean.TRUE.equals(readField(window, "freeformExiting"))) {
+                    continue;
+                }
+                Object scaleObject = readField(window, "freeFormScale");
+                if (!(scaleObject instanceof Number)
+                        || ((Number) scaleObject).floatValue() < 0.9f) {
+                    // Compact fullscreen-to-freeform and mini-transition snapshots remain
+                    // ordinary Home input. Expanded mode settles near scale 1 on this branch.
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG, "Failed to distinguish expanded MiuiHome small window; "
+                    + "failing closed", throwable);
+            return false;
+        }
     }
 
     protected Object mirrorMiuiHomeEditingState(XposedInterface.Chain chain)

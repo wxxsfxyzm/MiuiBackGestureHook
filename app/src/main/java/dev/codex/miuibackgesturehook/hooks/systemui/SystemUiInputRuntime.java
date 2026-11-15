@@ -17,6 +17,7 @@ import android.graphics.Region;
 import android.hardware.input.InputManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
 import android.util.Pair;
@@ -54,6 +55,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected abstract void publishSystemUiReturnHomeFinish(
             Object controller, long shellSessionId,
             Object finishCallback, String reason);
+    protected abstract void acceleratePriorPostCommitAnimation(
+            Executor shellExecutor, long shellSessionId);
 
     protected static boolean hasXiaomiBackIntent(
             float outwardDistance, float verticalDelta, float outwardThreshold) {
@@ -69,6 +72,14 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected volatile MiuiHapticFeedbackHelper hyperOsBackHapticHelper;
     protected volatile SharedPreferences gestureTriggerPreferences;
     protected volatile boolean gestureTriggerPreferencesFailureLogged;
+    protected final BackPanelMaterialController backPanelMaterialController =
+            new BackPanelMaterialController((priority, message, throwable) -> {
+                if (throwable == null) {
+                    moduleLog(priority, TAG, message);
+                } else {
+                    moduleLog(priority, TAG, message, throwable);
+                }
+            });
 
     protected boolean isHyperOsIndicatorEnabled() {
         return readHyperOsBooleanPreference(
@@ -91,6 +102,32 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     @Override
     protected boolean isHyperOsSlideAnimationEnabled() {
         return cachedHyperOsSlideAnimationEnabled;
+    }
+
+    protected int getHyperOsHapticsStrengthPercent() {
+        int value = readHyperOsIntPreference(
+                PredictiveBackPreferences.KEY_HYPEROS_HAPTICS_STRENGTH_PERCENT,
+                PredictiveBackPreferences.DEFAULT_HYPEROS_HAPTICS_STRENGTH_PERCENT);
+        cachedHyperOsHapticsStrengthPercent = PredictiveBackPreferences
+                .clampHyperOsHapticsStrengthPercent(value);
+        return cachedHyperOsHapticsStrengthPercent;
+    }
+
+    protected boolean isCustomHapticsEnabled() {
+        cachedCustomHapticsEnabled = readHyperOsBooleanPreference(
+                PredictiveBackPreferences.KEY_CUSTOM_HAPTICS,
+                PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS);
+        return cachedCustomHapticsEnabled;
+    }
+
+    protected int getCustomHapticsPreset() {
+        int value = readHyperOsIntPreference(
+                PredictiveBackPreferences.KEY_CUSTOM_HAPTICS_PRESET,
+                PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET);
+        cachedCustomHapticsPreset = PredictiveBackPreferences
+                .isValidCustomHapticsPreset(value)
+                ? value : PredictiveBackPreferences.DEFAULT_CUSTOM_HAPTICS_PRESET;
+        return cachedCustomHapticsPreset;
     }
 
     protected int getAospBackgroundMode() {
@@ -124,6 +161,31 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
     }
 
+    protected int readHyperOsIntPreference(String key, int defaultValue) {
+        try {
+            SharedPreferences preferences = hyperOsIndicatorPreferences;
+            if (preferences == null) {
+                synchronized (this) {
+                    preferences = hyperOsIndicatorPreferences;
+                    if (preferences == null) {
+                        preferences = getRemotePreferences(PredictiveBackPreferences.GROUP);
+                        hyperOsIndicatorPreferences = preferences;
+                    }
+                }
+            }
+            int value = preferences.getInt(key, defaultValue);
+            hyperOsIndicatorPreferencesFailureLogged = false;
+            return value;
+        } catch (Throwable throwable) {
+            if (!hyperOsIndicatorPreferencesFailureLogged) {
+                hyperOsIndicatorPreferencesFailureLogged = true;
+                moduleLog(Log.ERROR, TAG, "Gesture preference unavailable"
+                        + ", key=" + key, throwable);
+            }
+            return defaultValue;
+        }
+    }
+
     /**
      * Replaces AOSP threshold haptics with HyperOS's default back effect. The
      * caller must keep the original AOSP method when this returns false.
@@ -131,7 +193,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
     protected boolean playHyperOsReplacementHaptic(Object panelViewOrController) {
         // HyperOS indicator mode owns its own two-stage feedback path. In AOSP-panel mode,
         // this same global switch replaces the panel's original threshold feedback.
-        if (isHyperOsIndicatorEnabled() || !isHyperOsHapticsEnabled()) {
+        boolean custom = isCustomHapticsEnabled();
+        if (isHyperOsIndicatorEnabled()
+                || (!custom && !isHyperOsHapticsEnabled())) {
             return false;
         }
         try {
@@ -159,9 +223,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     }
                 }
             }
-            if (!helper.isDefaultBackSupported()) {
+            helper.setCustomFeedback(custom, getCustomHapticsPreset());
+            if (custom ? !helper.isCustomSupported() : !helper.isDefaultBackSupported()) {
                 return false;
             }
+            helper.setStrengthPercent(getHyperOsHapticsStrengthPercent());
             return helper.performDefaultBack();
         } catch (Throwable throwable) {
             moduleLog(Log.WARN, TAG,
@@ -220,6 +286,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean launcherDrawerCandidate;
         protected boolean launcherEditingCandidate;
         protected boolean launcherHomeTokenRequiredCandidate;
+        protected boolean systemUiOwnedInputCandidate;
         protected boolean miuiHomeInputAccepted;
         protected boolean pilfered;
         protected boolean waitingForTransientBarsAtDown;
@@ -361,15 +428,62 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", launcherShade=" + launcherShadeCandidate
                     + ", launcherDrawer=" + launcherDrawerCandidate
                     + ", launcherEditing=" + launcherEditingCandidate
-                    + ", inputModel=miuihome-accepted-token"
+                    + ", inputModel=" + (systemUiOwnedInputCandidate
+                    ? "focused-systemui-window" : "miuihome-accepted-token")
                     + ", displayId=" + displayId
                     + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
+            if (systemUiOwnedInputCandidate) {
+                acceptSystemUiOwnedInput();
+                return false;
+            }
             MiuiHomeAcceptedInputToken token = acceptedInputToken.get();
             if (token != null && matchesMiuiHomeInput(token)
                     && acceptedInputToken.compareAndSet(token, null)) {
                 acceptMiuiHomeInput(token);
             }
             return false;
+        }
+
+        protected void acceptSystemUiOwnedInput() {
+            MiuiHomeAcceptedInputToken identity = new MiuiHomeAcceptedInputToken(
+                    downEventId, downTime, downDeviceId, downSource,
+                    downDisplayId, activeEdge, systemUiInputArbiterGeneration,
+                    false, 0L, false);
+            miuiHomeInputAccepted = true;
+            MotionEvent down = pendingDownEvent;
+            pendingDownEvent = null;
+            try {
+                if (down == null || !driver.handleTouch(down, activeEdge,
+                        launcherOpenBreakCandidate,
+                        launcherOpenBreakGenerationCandidate,
+                        launcherShadeCandidate,
+                        launcherDrawerCandidate,
+                        launcherEditingCandidate)
+                        || !driver.bindAcceptedInput(identity)) {
+                    moduleLog(Log.INFO, TAG,
+                            "Focused SystemUI window declined native back DOWN"
+                                    + ", launcherShade=" + launcherShadeCandidate
+                                    + ", focusedExpandedSmallWindow="
+                                    + miuiFocusedExpandedSmallWindow
+                                    + ", edge=" + activeEdge);
+                    resetCandidate();
+                    return;
+                }
+                moduleLog(Log.INFO, TAG,
+                        "Accepted native back from focused SystemUI-owned window"
+                                + ", launcherShade=" + launcherShadeCandidate
+                                + ", focusedExpandedSmallWindow="
+                                + miuiFocusedExpandedSmallWindow
+                                + ", edge=" + activeEdge);
+            } catch (Throwable throwable) {
+                moduleLog(Log.ERROR, TAG,
+                        "Failed to start focused SystemUI-owned back input", throwable);
+                resetCandidate();
+            } finally {
+                if (down != null) {
+                    down.recycle();
+                }
+            }
         }
 
         protected boolean onNativeMove(MotionEvent event) {
@@ -749,6 +863,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && isLauncherHomeComponent(topActivity);
             boolean launcherShade = launcherHome && displayId == 0
                     && isMiuiShadeExpanded();
+            boolean launcherFocusedExpandedSmallWindow = launcherHome
+                    && displayId == 0
+                    && miuiFocusedExpandedSmallWindow;
             boolean launcherOpenBreak = displayId == 0
                     && !launcherShade
                     && !miuiOverviewVisible
@@ -768,7 +885,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && !launcherDrawer;
             boolean launcherHomeTokenRequired = launcherHome && !miuiOverviewVisible
                     && !launcherOpenBreak && !launcherShade
-                    && !launcherDrawer && !launcherEditing;
+                    && !launcherDrawer && !launcherEditing
+                    && !launcherFocusedExpandedSmallWindow;
             if (launcherHomeTokenRequired) {
                 moduleLog(Log.INFO, TAG, "Awaiting MiuiHome accepted token on launcher Home"
                         + ", topActivity=" + topActivity.flattenToShortString()
@@ -880,6 +998,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             launcherDrawerCandidate = launcherDrawer;
             launcherEditingCandidate = launcherEditing;
             launcherHomeTokenRequiredCandidate = launcherHomeTokenRequired;
+            systemUiOwnedInputCandidate = launcherFocusedExpandedSmallWindow;
             // Geometry, attachment, touchability, and redirect acceptance are proved later
             // by the matching token emitted only from MiuiHome's accepted processor boundary.
             return true;
@@ -1206,6 +1325,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             launcherDrawerCandidate = false;
             launcherEditingCandidate = false;
             launcherHomeTokenRequiredCandidate = false;
+            systemUiOwnedInputCandidate = false;
             miuiHomeInputAccepted = false;
             pilfered = false;
             waitingForTransientBarsAtDown = false;
@@ -1296,6 +1416,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected final class ShellGestureSession {
             final long id = systemUiShellGestureSessionIds.incrementAndGet();
+            final long createdUptime = SystemClock.uptimeMillis();
             final Object controller;
             final Executor executor;
             final long inputEpoch;
@@ -1348,6 +1469,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean thresholdCrossed;
         protected boolean shellGestureStarted;
         protected boolean shellGestureStartDeferred;
+        protected boolean waitingForPriorPostCommit;
+        protected long waitingPriorShellSessionId;
+        protected long pendingLegacyAfterPriorSessionId;
+        protected Object pendingLegacyAfterPriorController;
+        protected long pendingLegacyAfterPriorInputEpoch;
+        protected int pendingLegacyAfterPriorEdge;
+        protected MiuiHomeAcceptedInputToken pendingLegacyAfterPriorIdentity;
         protected volatile boolean gestureSuppressed;
         protected boolean legacyInterruptGesture;
         protected boolean legacyBusyFallbackGesture;
@@ -1555,10 +1683,16 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return true;
             }
             ShellOwner owner = gestureOwner;
-            if (!isShellOwnerCurrent(owner)
-                    || !prepareShellSessionSlotForStart()) {
+            if (!isShellOwnerCurrent(owner)) {
                 return armLegacyBusyFallback(
-                        "Shell owner/session unavailable before pilfer");
+                        "Shell owner unavailable before pilfer");
+            }
+            if (deferBehindPriorPostCommitIfExact()) {
+                return true;
+            }
+            if (!prepareShellSessionSlotForStart()) {
+                return armLegacyBusyFallback(
+                        "Shell session unavailable before pilfer");
             }
             AtomicBoolean ready = new AtomicBoolean();
             AtomicReference<String> state = new AtomicReference<>("not-run");
@@ -1576,6 +1710,56 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return armLegacyBusyFallback(
                         "Shell busy before pilfer, state=" + state.get());
             }
+            return true;
+        }
+
+        /**
+         * Do not force-finish the previous composed transition. Keep the authenticated edge
+         * gesture alive until Shell reports its real terminal callback, then acquire a fresh
+         * navigation for the Activity that owns focus at that later boundary.
+         */
+        protected boolean deferBehindPriorPostCommitIfExact() {
+            ShellGestureSession session = activeShellSession;
+            if (session == null || session.completionConsumed.get()
+                    || !session.releaseQueued.get()) {
+                return false;
+            }
+            AtomicBoolean exact = new AtomicBoolean();
+            boolean inspected = executeShellBlocking(session.executor, () -> {
+                try {
+                    Object currentTracker = readField(
+                            session.controller, "mCurrentTracker");
+                    Object queuedTracker = readField(
+                            session.controller, "mQueuedTracker");
+                    exact.set(activeShellSession == session
+                            && Boolean.TRUE.equals(readField(
+                            session.controller,
+                            "mPostCommitAnimationInProgress"))
+                            && !Boolean.TRUE.equals(readField(
+                            session.controller, "mBackGestureStarted"))
+                            && currentTracker == session.tracker
+                            && currentTracker instanceof BackTouchTracker
+                            && Boolean.TRUE.equals(invokeAnyMethod(
+                            currentTracker, "isFinished", new Object[0]))
+                            && isTrackerInitial(queuedTracker));
+                } catch (Throwable throwable) {
+                    moduleLog(Log.WARN, TAG,
+                            "Failed to inspect prior post-commit before pilfer"
+                                    + ", shellSessionId=" + session.id,
+                            throwable);
+                }
+            }, "inspectPriorPostCommitBeforePilfer");
+            if (!inspected || !exact.get()) {
+                return false;
+            }
+            waitingForPriorPostCommit = true;
+            waitingPriorShellSessionId = session.id;
+            acceleratePriorPostCommitAnimation(session.executor, session.id);
+            moduleLog(Log.INFO, TAG,
+                    "Deferred current predictive back behind prior post-commit"
+                            + ", shellSessionId=" + session.id
+                            + ", ageMs=" + (SystemClock.uptimeMillis()
+                            - session.createdUptime));
             return true;
         }
 
@@ -1599,6 +1783,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             }
             shellGestureStartDeferred = false;
             shellGestureStarted = false;
+            waitingForPriorPostCommit = false;
+            waitingPriorShellSessionId = 0L;
             legacyBusyFallbackGesture = true;
             aospNullNavigationGesture = false;
             moduleLog(Log.INFO, TAG,
@@ -1677,9 +1863,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                boolean launcherDrawerCandidate,
                                boolean launcherEditingCandidate) throws Exception {
             clearLegacyBackGuard("newPhysicalGesture");
+            clearPendingLegacyAfterPriorPostCommit();
             gestureActive = true;
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
+            waitingForPriorPostCommit = false;
+            waitingPriorShellSessionId = 0L;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             legacyBusyFallbackGesture = false;
@@ -1810,6 +1999,12 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             promoteShellResetToLegacyFallback(
                     activeShellSession, "Shell identity changed during active gesture");
             if (shellGestureStartDeferred && intentQualified) {
+                if (waitingForPriorPostCommit) {
+                    if (!thresholdCrossed) {
+                        crossIntentThreshold(distance);
+                    }
+                    return true;
+                }
                 shellGestureStartDeferred = false;
                 if (!startShellGesture()) {
                     if (!armLegacyBusyFallback(
@@ -1918,11 +2113,20 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 }
                 if (!startShellGesture(
                         gestureOwner, lastX, lastY, openHandoffEpoch)) {
-                    gestureSuppressed = true;
-                    moduleLog(Log.WARN, TAG,
-                            "Suppressed ended " + openDescription
-                                    + " handoff after Shell rejected navigation"
-                                    + identityDescription);
+                    if (!armLegacyBusyFallback(
+                            "Shell rejected ended " + openDescription
+                                    + " handoff")) {
+                        gestureSuppressed = true;
+                        moduleLog(Log.WARN, TAG,
+                                "Suppressed ended " + openDescription
+                                        + " handoff after Shell rejected navigation"
+                                        + identityDescription);
+                    } else {
+                        moduleLog(Log.WARN, TAG,
+                                "Preserved ended " + openDescription
+                                        + " handoff as legacy BACK"
+                                        + identityDescription);
+                    }
                     return;
                 }
                 ShellGestureSession session = activeShellSession;
@@ -2006,6 +2210,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 clearLocalGestureState();
                 return false;
             }
+            if (waitingForPriorPostCommit && !shellGestureStarted) {
+                return finishGestureWaitingForPriorPostCommit(
+                        event, allowTrigger);
+            }
             if (!shellGestureStarted) {
                 cancelLocalGesture(event, "released before back intent qualified");
                 return true;
@@ -2056,6 +2264,46 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     + ", aospNullNavigation=" + aospNullNavigationGesture
                     + ", shellSessionId=" + session.id
                     + ", edge=" + activeEdge);
+            clearLocalGestureState();
+            return true;
+        }
+
+        protected boolean finishGestureWaitingForPriorPostCommit(
+                MotionEvent event, boolean allowTrigger) throws Exception {
+            long priorSessionId = waitingPriorShellSessionId;
+            String panelStateBeforeRelease = readNativePanelState();
+            boolean panelReleaseDelivered =
+                    dispatchToEdgePlugin(event, activeEdge);
+            String panelStateAfterRelease = readNativePanelState();
+            Boolean nativePanelTrigger = resolveNativePanelReleaseTrigger(
+                    panelStateAfterRelease, panelReleaseDelivered);
+            Object releaseController = isShellOwnerCurrent(gestureOwner)
+                    ? gestureOwner.controller : null;
+            MiuiHomeAcceptedInputToken inputIdentity = acceptedInputIdentity;
+            long inputEpoch = gestureOwner == null
+                    ? 0L : gestureOwner.inputEpoch;
+            boolean trigger = allowTrigger && thresholdCrossed
+                    && priorSessionId != 0L
+                    && releaseController != null
+                    && isCurrentAcceptedInputIdentity(
+                    inputIdentity, activeEdge, releaseController, inputEpoch)
+                    && Boolean.TRUE.equals(nativePanelTrigger);
+            if (trigger) {
+                pendingLegacyAfterPriorSessionId = priorSessionId;
+                pendingLegacyAfterPriorController = releaseController;
+                pendingLegacyAfterPriorInputEpoch = inputEpoch;
+                pendingLegacyAfterPriorEdge = activeEdge;
+                pendingLegacyAfterPriorIdentity = inputIdentity;
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Finished gesture while waiting for prior post-commit"
+                            + ", priorShellSessionId=" + priorSessionId
+                            + ", nativePanelTrigger=" + nativePanelTrigger
+                            + ", triggerQueued=" + trigger
+                            + ", panelStateBeforeRelease="
+                            + panelStateBeforeRelease
+                            + ", panelStateAfterRelease="
+                            + panelStateAfterRelease);
             clearLocalGestureState();
             return true;
         }
@@ -2115,14 +2363,24 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 inputMonitorEpoch.incrementAndGet();
             }
             teardownMiuiStyleIndicator();
+            backPanelMaterialController.clear();
             if (pendingLauncherOpenBreakAttemptId != 0L) {
                 decrementLauncherOpenBreakCommandsInFlight();
             }
             pendingLauncherOpenBreakGeneration = 0L;
             pendingLauncherOpenBreakAttemptId = 0L;
+            clearPendingLegacyAfterPriorPostCommit();
             clearSystemUiReturnHomeCommitIdentity(
                     controller, 0L, "driverDetach");
             clearLocalGestureState();
+        }
+
+        protected void clearPendingLegacyAfterPriorPostCommit() {
+            pendingLegacyAfterPriorSessionId = 0L;
+            pendingLegacyAfterPriorController = null;
+            pendingLegacyAfterPriorInputEpoch = 0L;
+            pendingLegacyAfterPriorEdge = 0;
+            pendingLegacyAfterPriorIdentity = null;
         }
 
         protected boolean finishLauncherOpenBreakGesture(MotionEvent event,
@@ -2455,7 +2713,11 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 if (launcherOverviewGesture) {
                     recentsVisualOnlyGesture = true;
                 }
-                if (launcherCallbackOnly) {
+                // A MIUI shade sub-panel can temporarily remove its predictive callback while
+                // remaining the focused SystemUI surface. Over another app this already reaches
+                // the authenticated null-navigation fallback below; give the same exact fallback
+                // to the shade over Launcher Home instead of silently dropping the gesture.
+                if (launcherCallbackOnly && !launcherShadeGesture) {
                     cleanupRejectedShellGesture(session);
                     if (launcherOverviewGesture) {
                         moduleLog(Log.INFO, TAG, "Rejected null Recents BackNavigationInfo"
@@ -2491,8 +2753,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     }
                 }
                 if (authenticatedNullStart) {
-                    moduleLog(Log.INFO, TAG, "Continuing authenticated in-app gesture with AOSP "
-                            + "null-navigation fallback"
+                    moduleLog(Log.INFO, TAG, "Continuing authenticated "
+                            + (launcherShadeGesture ? "SystemUI shade" : "in-app")
+                            + " gesture with AOSP null-navigation fallback"
                             + ", input=" + shortObject(acceptedInputIdentity)
                             + ", edge=" + activeEdge);
                     return true;
@@ -2537,6 +2800,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected boolean prepareShellSessionSlotForStart() {
             ShellGestureSession completedSession;
+            boolean needsRecovery;
+            long sessionAgeMs;
             synchronized (backInputLifecycleLock) {
                 if (shellStartInFlight || shellOwnerUncertain) {
                     moduleLog(Log.WARN, TAG,
@@ -2549,17 +2814,113 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 if (completedSession == null) {
                     return true;
                 }
-                if (!completedSession.completionConsumed.get()) {
+                needsRecovery = !completedSession.completionConsumed.get();
+                sessionAgeMs = SystemClock.uptimeMillis()
+                        - completedSession.createdUptime;
+            }
+            // Never wait for the Shell executor while holding backInputLifecycleLock.
+            if (needsRecovery) {
+                if (sessionAgeMs < SHELL_ORPHANED_SESSION_RECOVERY_MS) {
                     moduleLog(Log.WARN, TAG,
                             "Rejected Shell start while another session owns the slot"
                                     + ", shellSessionId=" + completedSession.id
                                     + ", completionConsumed="
-                                    + completedSession.completionConsumed.get());
+                                    + completedSession.completionConsumed.get()
+                                    + ", ageMs=" + sessionAgeMs);
                     return false;
                 }
+                if (recoverOrphanedShellSessionBeforeStart(
+                        completedSession)) {
+                    return true;
+                }
+                moduleLog(Log.WARN, TAG,
+                        "Rejected Shell start while stale session is not recoverable"
+                                + ", shellSessionId=" + completedSession.id);
+                return false;
             }
             completeShellSessionOnMain(
                     completedSession, "retired-before-next-start");
+            synchronized (backInputLifecycleLock) {
+                return activeShellSession == null
+                        && !shellStartInFlight && !shellOwnerUncertain;
+            }
+        }
+
+        /**
+         * Recover only the terminal state observed after stock cleanup lost its final
+         * transition callback: no navigation, callback, gesture, post-commit animation or
+         * prepared transition remains, both trackers are initial, and only Xiaomi's stale
+         * close-request gate is still set. This runs once at the next gesture start, never on
+         * MOVE, so it adds no animation-frame overhead.
+         */
+        protected boolean recoverOrphanedShellSessionBeforeStart(
+                ShellGestureSession session) {
+            if (session == null || session.completionConsumed.get()
+                    || !session.releaseQueued.get()
+                    || SystemClock.uptimeMillis() - session.createdUptime
+                    < SHELL_ORPHANED_SESSION_RECOVERY_MS) {
+                return false;
+            }
+            AtomicBoolean recovered = new AtomicBoolean();
+            boolean inspected = executeShellBlocking(session.executor, () -> {
+                try {
+                    if (activeShellSession != session
+                            || readField(session.controller,
+                            "mBackNavigationInfo") != null
+                            || readField(session.controller,
+                            "mBackAnimationFinishedCallback") != null
+                            || Boolean.TRUE.equals(readField(
+                            session.controller,
+                            "mPostCommitAnimationInProgress"))
+                            || Boolean.TRUE.equals(readField(
+                            session.controller, "mBackGestureStarted"))
+                            || !isTrackerInitial(readField(
+                            session.controller, "mCurrentTracker"))
+                            || !isTrackerInitial(readField(
+                            session.controller, "mQueuedTracker"))) {
+                        return;
+                    }
+                    Object transitionHandler = readField(
+                            session.controller, "mBackTransitionHandler");
+                    boolean preparedStateClear = readField(
+                            transitionHandler, "mPrepareOpenTransition") == null
+                            && readField(transitionHandler,
+                            "mClosePrepareTransition") == null
+                            && readField(transitionHandler,
+                            "mOnAnimationFinishCallback") == null
+                            && readField(transitionHandler,
+                            "mFinishOpenTransaction") == null
+                            && readField(transitionHandler,
+                            "mFinishOpenTransitionCallback") == null
+                            && readField(transitionHandler,
+                            "mOpenTransitionInfo") == null;
+                    if (!preparedStateClear || !Boolean.TRUE.equals(readField(
+                            transitionHandler,
+                            "mCloseTransitionRequested"))) {
+                        return;
+                    }
+                    writeField(transitionHandler,
+                            "mCloseTransitionRequested", Boolean.FALSE);
+                    recovered.set(true);
+                } catch (Throwable throwable) {
+                    moduleLog(Log.WARN, TAG,
+                            "Failed to inspect orphaned Shell session before next start",
+                            throwable);
+                }
+            }, "recoverOrphanedSessionBeforeStart");
+            if (!inspected || !recovered.get()) {
+                return false;
+            }
+            moduleLog(Log.WARN, TAG,
+                    "Recovered orphaned Shell session before next gesture"
+                            + ", shellSessionId=" + session.id
+                            + ", ageMs=" + (SystemClock.uptimeMillis()
+                            - session.createdUptime));
+            if (!session.completionConsumed.compareAndSet(false, true)) {
+                return false;
+            }
+            completeShellSessionOnMain(
+                    session, "orphaned-before-next-start");
             synchronized (backInputLifecycleLock) {
                 return activeShellSession == null
                         && !shellStartInFlight && !shellOwnerUncertain;
@@ -2781,6 +3142,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             gestureActive = false;
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
+            waitingForPriorPostCommit = false;
+            waitingPriorShellSessionId = 0L;
             gestureSuppressed = false;
             legacyInterruptGesture = false;
             legacyBusyFallbackGesture = false;
@@ -2951,6 +3314,94 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             clearSystemUiReturnHomeCommitIdentity(
                     session.controller, session.id,
                     "shellFinished:" + reason);
+            if (pendingLegacyAfterPriorSessionId == session.id) {
+                new Handler(Looper.getMainLooper()).postDelayed(
+                        () -> dispatchLegacyBackAfterPriorPostCommit(
+                                session.id),
+                        SHELL_POST_COMMIT_HANDOFF_SETTLE_MS);
+            } else if (waitingForPriorPostCommit
+                    && waitingPriorShellSessionId == session.id) {
+                new Handler(Looper.getMainLooper()).postDelayed(
+                        () -> resumePredictiveBackAfterPriorPostCommit(
+                                session.id),
+                        SHELL_POST_COMMIT_HANDOFF_SETTLE_MS);
+            }
+        }
+
+        protected void dispatchLegacyBackAfterPriorPostCommit(
+                long completedSessionId) {
+            if (pendingLegacyAfterPriorSessionId != completedSessionId) {
+                return;
+            }
+            Object releaseController = pendingLegacyAfterPriorController;
+            long inputEpoch = pendingLegacyAfterPriorInputEpoch;
+            int releaseEdge = pendingLegacyAfterPriorEdge;
+            MiuiHomeAcceptedInputToken inputIdentity =
+                    pendingLegacyAfterPriorIdentity;
+            pendingLegacyAfterPriorSessionId = 0L;
+            pendingLegacyAfterPriorController = null;
+            pendingLegacyAfterPriorInputEpoch = 0L;
+            pendingLegacyAfterPriorEdge = 0;
+            pendingLegacyAfterPriorIdentity = null;
+            boolean exact = !gestureActive && activeShellSession == null
+                    && isShellOwnerCurrent(new ShellOwner(
+                    releaseController, shellExecutor, inputEpoch))
+                    && isCurrentAcceptedInputIdentity(
+                    inputIdentity, releaseEdge,
+                    releaseController, inputEpoch);
+            if (exact) {
+                injectLegacyBackKey(releaseController);
+            }
+            moduleLog(exact ? Log.INFO : Log.WARN, TAG,
+                    "Dispatched queued legacy BACK after prior post-commit"
+                            + ", previousShellSessionId="
+                            + completedSessionId
+                            + ", dispatched=" + exact
+                            + ", settleDelayMs="
+                            + SHELL_POST_COMMIT_HANDOFF_SETTLE_MS);
+        }
+
+        protected void resumePredictiveBackAfterPriorPostCommit(
+                long completedSessionId) {
+            if (!gestureActive || gestureSuppressed
+                    || !waitingForPriorPostCommit
+                    || waitingPriorShellSessionId != completedSessionId
+                    || !shellGestureStartDeferred || !thresholdCrossed
+                    || shellGestureStarted || legacyBusyFallbackGesture) {
+                return;
+            }
+            waitingForPriorPostCommit = false;
+            waitingPriorShellSessionId = 0L;
+            shellGestureStartDeferred = false;
+            try {
+                if (!isShellOwnerCurrent(gestureOwner)
+                        || !isCurrentAcceptedInputIdentity(
+                        acceptedInputIdentity, activeEdge,
+                        gestureOwner.controller, gestureOwner.inputEpoch)
+                        || !startShellGesture(
+                        gestureOwner, lastX, lastY, 0L)) {
+                    armLegacyBusyFallback(
+                            "Shell not ready after prior post-commit completion");
+                    return;
+                }
+                moduleLog(Log.INFO, TAG,
+                        "Resumed current predictive back after prior post-commit"
+                                + ", previousShellSessionId="
+                                + completedSessionId
+                                + ", currentShellSessionId="
+                                + (activeShellSession == null ? 0L
+                                : activeShellSession.id)
+                                + ", settleDelayMs="
+                                + SHELL_POST_COMMIT_HANDOFF_SETTLE_MS);
+            } catch (Throwable throwable) {
+                armLegacyBusyFallback(
+                        "Failed current predictive start after prior post-commit");
+                moduleLog(Log.ERROR, TAG,
+                        "Failed to resume current predictive back after prior post-commit"
+                                + ", previousShellSessionId="
+                                + completedSessionId,
+                        throwable);
+            }
         }
 
         protected boolean queueShellReleaseTransaction(ShellGestureSession session,
@@ -3747,6 +4198,40 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG, "Failed to prepare native AOSP back panel", throwable);
             }
+            try {
+                Object panelView = readField(plugin, "mView");
+                if (panelView instanceof View) {
+                    // The custom HyperOS indicator hides this native View, so material belongs
+                    // only to the visible AOSP panel and is restored before switching skins.
+                    // Read once at gesture start. RemotePreferences change callbacks are not
+                    // guaranteed on every LSPosed/HyperOS build; never read this during MOVE.
+                    boolean materialEnabled = readHyperOsBooleanPreference(
+                            PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_MATERIAL,
+                            PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_MATERIAL);
+                    int blurRadius = PredictiveBackPreferences.clampAospBackPanelBlurRadius(
+                            readHyperOsIntPreference(
+                                    PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_BLUR_RADIUS,
+                                    PredictiveBackPreferences
+                                            .DEFAULT_AOSP_BACK_PANEL_BLUR_RADIUS));
+                    int transparency = PredictiveBackPreferences
+                            .clampAospBackPanelTransparencyPercent(
+                                    readHyperOsIntPreference(
+                                            PredictiveBackPreferences
+                                                .KEY_AOSP_BACK_PANEL_TRANSPARENCY_PERCENT,
+                                            PredictiveBackPreferences
+                                                .DEFAULT_AOSP_BACK_PANEL_TRANSPARENCY_PERCENT));
+                    boolean highlightEnabled = readHyperOsBooleanPreference(
+                            PredictiveBackPreferences.KEY_AOSP_BACK_PANEL_HIGHLIGHT,
+                            PredictiveBackPreferences.DEFAULT_AOSP_BACK_PANEL_HIGHLIGHT);
+                    cachedAospBackPanelMaterialEnabled = materialEnabled;
+                    backPanelMaterialController.reconcile((View) panelView,
+                            materialEnabled && !isHyperOsIndicatorEnabled(), blurRadius,
+                            transparency, highlightEnabled);
+                }
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG,
+                        "Failed to reconcile native BackPanel material", throwable);
+            }
         }
 
         protected boolean prepareMiuiStyleIndicator(int edge) {
@@ -3888,7 +4373,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         }
 
         protected boolean prepareMiuiStyleHaptics() {
-            if (!isHyperOsHapticsEnabled()) {
+            boolean custom = isCustomHapticsEnabled();
+            if (!custom && !isHyperOsHapticsEnabled()) {
                 return false;
             }
             try {
@@ -3902,10 +4388,14 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                 }
                             });
                 }
-                if (!miuiHapticHelper.isSupported()) {
+                miuiHapticHelper.setCustomFeedback(custom, getCustomHapticsPreset());
+                if (custom ? !miuiHapticHelper.isCustomSupported()
+                        : !miuiHapticHelper.isSupported()) {
                     return false;
                 }
                 miuiHapticHelper.setEnhancedMode(isHyperOsHapticsEnhancedEnabled());
+                miuiHapticHelper.setStrengthPercent(
+                        getHyperOsHapticsStrengthPercent());
                 MiuiStyleBackArrowOverlay overlay = miuiStyleOverlay;
                 if (overlay != null) {
                     overlay.setHapticListener(() -> {

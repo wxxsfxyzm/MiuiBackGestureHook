@@ -34,7 +34,7 @@ post-commit CLOSE animation.
 Preserve the Xiaomi-native in-app Activity OPEN interruption path alongside the AOSP
 predictive-back path.
 
-- Check for a reversible running Xiaomi OPEN transition before calling
+- Check for a pending or active Xiaomi OPEN transition before calling
   `BackAnimationController.onGestureStarted(...)`.
 - Do not pause or manually animate the running OPEN animators; let Xiaomi finish or reverse
   them through its native OPEN/CLOSE merge path.
@@ -44,7 +44,7 @@ predictive-back path.
   start; cancellation, reverse-end, replacement, or stale input/owner identity must not hand off.
 - Commit interruption gestures with a normal BACK. If OPEN has ended or Xiaomi rejects the
   merge, ordinary CLOSE fallback is expected.
-- When no reversible OPEN exists, preserve the existing AOSP predictive-back path.
+- When no pending or active OPEN exists, preserve the existing AOSP predictive-back path.
 - Capture the transition/animator set on
   `DefaultTransitionHandler.startAnimation(...)`'s owner thread, verify animator state on
   `mAnimExecutor`, and publish a module-owned snapshot with immutable transition/animator
@@ -62,13 +62,12 @@ launcher interruption path.
   it on the next main-Looper turn after the StateManager start callback, guarded by the
   animation identity and generation; the synchronous callback state is premature.
 - Keep gesture input, the native `BackPanelController` indicator, and pilfering in SystemUI.
-- Snapshot the active MiuiHome generation on `ACTION_DOWN`. Accept a commit command only if
-  it still matches the active generation.
+- Snapshot the active MiuiHome generation on `ACTION_DOWN`, including in the synchronous
+  accepted-DOWN identity so it cannot lose a race with the settled-state broadcast.
 - Use explicit identity-sharing broadcasts in both directions. Validate the shared caller
   package and verify that the sending UID owns it.
-- At commit, recheck native availability before `breakOpenAnim()`. An accepted command must
-  not also send BACK. A missing receiver or explicit rejection gets exactly one ordinary
-  BACK fallback; cancellation sends no command.
+- A committed launcher OPEN gesture emits exactly one ordinary BACK so Xiaomi's native enter
+  animation receives the legacy interruption signal; cancellation emits none.
 - When a reusable `CLOSE_TO_HOME` animation is retargeted in place to `OPEN_FROM_HOME`,
   adopt that running animation under a fresh generation only after verifying the native
   reused-close/open state. Preserve command-time validation and normal end cleanup.
@@ -151,6 +150,15 @@ SystemUI touchable shield. Neutralize `GesturesBackTouchProcessor.onPointerEvent
 at its accepted-input boundary so the old GestureStub/`BackAnimationAdapter`, native arrow,
 injection, and direct OPEN-break path cannot race SystemUI. Keep the Xiaomi gesture-line
 progress callback blocked so a gesture claimed by SystemUI remains on the SystemUI/AOSP path.
+On idle launcher Home, including launcher-owned folder surfaces, do not publish a SystemUI
+accepted-DOWN token or neutralize the native processor. Preserve MiuiHome's own input route so
+an edge-origin workspace swipe remains usable and an open folder can consume native BACK.
+Prove this route from the live Launcher window holding focus; a resident Launcher Activity alone
+is not foreground evidence and would incorrectly disable every in-app SystemUI gesture.
+
+The temporary gesture-diagnostic preference is default-off and must remain cheap when disabled.
+Trace only stream boundaries, route decisions, threshold ownership, and exceptional identity
+changes; never emit per-MOVE logs or construct diagnostic messages while tracing is disabled.
 
 Same-activity and input rules:
 
@@ -547,10 +555,14 @@ pipeline:
   All paths wait for a matching MiuiHome accepted-DOWN token; ordinary in-app candidates
   pilfer and start deferred Shell navigation together at `8dp`. Native GestureStub touch
   regions and redirect state remain authoritative while its legacy processor stays
-  neutralized. When Shell is busy, the current behavior suppresses the new SystemUI gesture;
-  it does not implement AOSP `mQueuedTracker` semantics. Keep that exact physical stream
-  suppressed across Shell cleanup until its own `ACTION_UP` or `ACTION_CANCEL`; never reopen or
-  late-pilfer it after the navigation that caused the rejection finishes.
+  neutralized. When an older predictive animation, a focus-taking child window, or stale vendor
+  callback keeps Shell's navigation slot busy, an authenticated ordinary in-app candidate may
+  pilfer at the same `8dp` boundary and fall back for that physical stream to the native panel's
+  terminal decision plus exactly one legacy BACK. Do not reuse this fallback for launcher
+  callback-only probes, and do not bind it to the older Shell session.
+  If a focus-taking child window disappears after the current gesture has already started and
+  Shell resets its tracker/navigation identity, keep that same physical BackPanel stream alive
+  and promote it in place to the legacy fallback. Do not require the user to begin a new swipe.
 - Release handling reflectively reproduces the relevant `onGestureFinished()` transaction
   but does not call the complete private AOSP method. Preserve the Shell-executor ownership
   and runner-state rules above unless new evidence justifies changing this boundary.

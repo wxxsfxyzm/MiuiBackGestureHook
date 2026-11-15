@@ -4,6 +4,7 @@ import dev.codex.miuibackgesturehook.PredictiveBackPreferences;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.app.WallpaperManager;
 import android.content.BroadcastReceiver;
@@ -75,6 +76,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookEdgeBackGestureHandler(classLoader, true, true, true);
             hookAospBackPanelHaptic(classLoader);
             hookAospBackPanelViewHaptic(classLoader);
+            hookAospBackPanelBlurRendering(classLoader);
             hookNavigationBarControllerCreate(classLoader);
             hookNavigationBarControllerRemove(classLoader);
             hookNavigationBarControllerMode(classLoader);
@@ -1661,6 +1663,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             hookFreeformCrossActivityScrimCreation();
             hookCrossActivitySlideAnimation(classLoader,
                     true, true, true, true, true, true);
+            hookPostCommitAnimatorDurationCapture();
             hookPredictiveBackBackground(classLoader);
             moduleLog(Log.INFO, TAG, "Hooked Shell BackAnimationController AOSP path");
         } catch (Throwable throwable) {
@@ -2439,6 +2442,53 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
+    protected void hookAospBackPanelBlurRendering(ClassLoader classLoader) {
+        try {
+            Class<?> panelClass = Class.forName(BACK_PANEL_VIEW, false, classLoader);
+            Method onDraw = panelClass.getDeclaredMethod("onDraw", Canvas.class);
+            onDraw.setAccessible(true);
+            recordHookHandle(hook(onDraw)
+                    .setId("systemui_back_panel_android_background_blur")
+                    .intercept(this::drawAospBackPanelBlur));
+            moduleLog(Log.INFO, TAG,
+                    "Hooked AOSP BackPanel compositor background blur render pass");
+        } catch (Throwable throwable) {
+            moduleLog(Log.WARN, TAG,
+                    "Failed to hook AOSP BackPanel background blur render pass", throwable);
+        }
+    }
+
+    protected Object drawAospBackPanelBlur(XposedInterface.Chain chain) throws Throwable {
+        Object panel = chain.getThisObject();
+        Object canvas = chain.getArg(0);
+        if (panel instanceof View && canvas instanceof Canvas) {
+            backPanelMaterialController.drawBefore((View) panel, (Canvas) canvas);
+        }
+        return chain.proceed();
+    }
+
+    /**
+     * CrossActivityBackAnimation keeps its post-commit ValueAnimator in a local variable.
+     * Capture only the animator that immediately consumes our duration result so a later
+     * repeated gesture can shorten that exact running tail without touching ordinary animators.
+     */
+    protected void hookPostCommitAnimatorDurationCapture() {
+        try {
+            Method setDuration = ValueAnimator.class.getDeclaredMethod(
+                    "setDuration", long.class);
+            setDuration.setAccessible(true);
+            recordHookHandle(hook(setDuration)
+                    .setId("systemui_back_post_commit_animator_duration")
+                    .intercept(this::captureCrossActivityPostCommitAnimator));
+            moduleLog(Log.INFO, TAG,
+                    "Hooked exact cross-activity post-commit animator capture");
+        } catch (Throwable throwable) {
+            moduleLog(Log.ERROR, TAG,
+                    "Failed to hook cross-activity post-commit animator capture",
+                    throwable);
+        }
+    }
+
     /**
      * Customizes the native predictive-back color layer in the caller's pending transaction.
      * HyperOS slide mode keeps its established black tint. AOSP mode may either retain
@@ -2535,6 +2585,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             throws Throwable {
         Object animation = chain.getThisObject();
         miuixSlideAnimActive = false;
+        clearCapturedPostCommitAnimator(animation);
         freeformColorRootCandidate.set(null);
         FreeformColorRootAdoption adoption = freeformColorRootAdoption;
         if (adoption != null && adoption.animation == animation) {
@@ -2616,6 +2667,24 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected volatile boolean miuixSlideAnimActive;
     protected volatile AospBackgroundMaskState aospBackgroundMaskState;
 
+    protected static final class PendingPostCommitAnimatorCapture {
+        final Object animation;
+        final long durationMs;
+        final long armedUptime;
+
+        PendingPostCommitAnimatorCapture(
+                Object animation, long durationMs, long armedUptime) {
+            this.animation = animation;
+            this.durationMs = durationMs;
+            this.armedUptime = armedUptime;
+        }
+    }
+
+    protected final ThreadLocal<PendingPostCommitAnimatorCapture>
+            pendingPostCommitAnimatorCapture = new ThreadLocal<>();
+    protected volatile WeakReference<Object> activePostCommitAnimation;
+    protected volatile WeakReference<ValueAnimator> activePostCommitAnimator;
+
     protected static final class AospBackgroundMaskState {
         final Object animation;
         final int mode;
@@ -2678,6 +2747,8 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
     protected volatile FreeformColorRootAdoption freeformColorRootAdoption;
 
     protected static final long MIUIX_SLIDE_SETTLE_DURATION_MS = 400L;
+    protected static final long REPEATED_BACK_POST_COMMIT_REMAINING_MS = 120L;
+    protected static final long POST_COMMIT_ANIMATOR_CAPTURE_WINDOW_MS = 32L;
     protected static final float MIUIX_SLIDE_ENTERING_MIN_ALPHA = 0.9f;
     protected static final float MIUIX_SLIDE_PARALLAX_FRACTION = 0.25f;
     protected static final float MIUIX_SLIDE_SCRIM_OMEGA = 12.083f;
@@ -3022,7 +3093,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
             transaction.setLayer(layer, 1).setAlpha(layer, 1.0f);
             prepared = true;
             moduleLog(Log.INFO, TAG,
-                    "Enabled experimental HyperOS compositor wallpaper blur"
+                    "Enabled HyperOS compositor wallpaper blur"
                             + ", radius=100");
             return layer;
         } catch (Throwable throwable) {
@@ -3047,6 +3118,7 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
         }
     }
 
+    @SuppressLint("MissingPermission")
     protected Bitmap obtainAospWallpaperSnapshot(Context context) {
         WallpaperManager wallpaperManager = WallpaperManager.getInstance(context);
         int wallpaperId = wallpaperManager.getWallpaperId(WallpaperManager.FLAG_SYSTEM);
@@ -3454,10 +3526,102 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
 
     protected Object onCrossActivitySlideDuration(XposedInterface.Chain chain)
             throws Throwable {
+        Object result;
         if (miuixSlideAnimActive) {
-            return Long.valueOf(MIUIX_SLIDE_SETTLE_DURATION_MS);
+            result = Long.valueOf(MIUIX_SLIDE_SETTLE_DURATION_MS);
+        } else {
+            result = chain.proceed();
         }
-        return chain.proceed();
+        long durationMs = result instanceof Number
+                ? ((Number) result).longValue() : -1L;
+        if (durationMs > 0L) {
+            pendingPostCommitAnimatorCapture.set(
+                    new PendingPostCommitAnimatorCapture(
+                            chain.getThisObject(), durationMs,
+                            SystemClock.uptimeMillis()));
+        } else {
+            pendingPostCommitAnimatorCapture.remove();
+        }
+        return result;
+    }
+
+    protected Object captureCrossActivityPostCommitAnimator(
+            XposedInterface.Chain chain) throws Throwable {
+        PendingPostCommitAnimatorCapture pending =
+                pendingPostCommitAnimatorCapture.get();
+        if (pending == null) {
+            return chain.proceed();
+        }
+        pendingPostCommitAnimatorCapture.remove();
+        Object result = chain.proceed();
+        Object candidate = chain.getThisObject();
+        long requestedDuration = ((Number) chain.getArg(0)).longValue();
+        if (candidate instanceof ValueAnimator
+                && requestedDuration == pending.durationMs
+                && SystemClock.uptimeMillis() - pending.armedUptime
+                <= POST_COMMIT_ANIMATOR_CAPTURE_WINDOW_MS) {
+            activePostCommitAnimation = new WeakReference<>(pending.animation);
+            activePostCommitAnimator = new WeakReference<>((ValueAnimator) candidate);
+        }
+        return result;
+    }
+
+    protected void clearCapturedPostCommitAnimator(Object animation) {
+        WeakReference<Object> animationReference = activePostCommitAnimation;
+        if (animationReference != null && animationReference.get() == animation) {
+            activePostCommitAnimation = null;
+            activePostCommitAnimator = null;
+        }
+    }
+
+    @Override
+    protected void acceleratePriorPostCommitAnimation(
+            Executor shellExecutor, long shellSessionId) {
+        if (shellExecutor == null) {
+            return;
+        }
+        shellExecutor.execute(() -> {
+            WeakReference<Object> animationReference = activePostCommitAnimation;
+            WeakReference<ValueAnimator> animatorReference = activePostCommitAnimator;
+            Object animation = animationReference == null
+                    ? null : animationReference.get();
+            ValueAnimator animator = animatorReference == null
+                    ? null : animatorReference.get();
+            if (animation == null || animator == null
+                    || !animator.isStarted() || !animator.isRunning()) {
+                return;
+            }
+            try {
+                long oldDuration = animator.getDuration();
+                long oldPlayTime = animator.getCurrentPlayTime();
+                long oldRemaining = Math.max(0L, oldDuration - oldPlayTime);
+                if (oldDuration <= 0L
+                        || oldRemaining <= REPEATED_BACK_POST_COMMIT_REMAINING_MS) {
+                    return;
+                }
+                float fraction = Math.max(0.0f, Math.min(0.999f,
+                        oldPlayTime / (float) oldDuration));
+                long acceleratedDuration = Math.max(1L, Math.round(
+                        REPEATED_BACK_POST_COMMIT_REMAINING_MS
+                                / (1.0f - fraction)));
+                long acceleratedPlayTime = Math.max(0L, Math.min(
+                        acceleratedDuration - 1L,
+                        Math.round(fraction * acceleratedDuration)));
+                animator.setDuration(acceleratedDuration);
+                animator.setCurrentPlayTime(acceleratedPlayTime);
+                moduleLog(Log.INFO, TAG,
+                        "Accelerated prior predictive-back post-commit tail"
+                                + ", shellSessionId=" + shellSessionId
+                                + ", oldRemainingMs=" + oldRemaining
+                                + ", newRemainingMs="
+                                + (acceleratedDuration - acceleratedPlayTime));
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG,
+                        "Failed to accelerate prior predictive-back post-commit tail"
+                                + ", shellSessionId=" + shellSessionId,
+                        throwable);
+            }
+        });
     }
 
     protected void applyMiuixSlidePostCommitFrame(Object animation, float linear)
@@ -5131,6 +5295,15 @@ public abstract class SystemUiHookRuntime extends SystemUiInputRuntime {
                             + ", editing=" + miuiLauncherEditing
                             + ", uid=" + senderUid
                             + ", package=" + senderPackage);
+                }
+                if (intent.hasExtra(EXTRA_FOCUSED_EXPANDED_SMALL_WINDOW)) {
+                    miuiFocusedExpandedSmallWindow = intent.getBooleanExtra(
+                            EXTRA_FOCUSED_EXPANDED_SMALL_WINDOW, false);
+                    moduleLog(Log.INFO, TAG,
+                            "MiuiHome focused expanded small-window state changed"
+                                    + ", focused=" + miuiFocusedExpandedSmallWindow
+                                    + ", uid=" + senderUid
+                                    + ", package=" + senderPackage);
                 }
                 if (intent.hasExtra(EXTRA_LAUNCHER_OPEN_BREAK_AVAILABLE)
                         && intent.hasExtra(EXTRA_LAUNCHER_OPEN_ACTIVE)) {

@@ -1662,6 +1662,10 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
             Object previewTarget;
             SurfaceControl previewLeash;
             String previewTargetSource;
+            Object statusBarTarget;
+            SurfaceControl statusBarLeash;
+            final Rect statusBarStartRect = new Rect();
+            SurfaceControl.Transaction statusBarTransaction;
             boolean previewInitialized;
             float initialTouchY;
             int swipeEdge;
@@ -1708,6 +1712,7 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
             volatile long unifiedNativeCommitAttempt;
             volatile long unifiedNativeCancelAttempt;
             volatile long unifiedNativeCancelTimeoutAttempt;
+            volatile int unifiedNativeCancelTimeoutRetries;
             volatile long unifiedNativeExternalTerminationAttempt;
             volatile long unifiedNativeActiveAnimToEpoch;
             volatile long unifiedNativeCancelAnimToEpoch;
@@ -1802,6 +1807,27 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
                         closingLeash = (SurfaceControl) leash;
                     }
                 } catch (Throwable ignored) {
+                }
+                if (nonApps != null) {
+                    for (Object target : nonApps) {
+                        // WindowManager.LayoutParams.TYPE_STATUS_BAR is hidden from the SDK.
+                        if (readIntFieldOrDefault(target, "windowType", -1) != 2000) {
+                            continue;
+                        }
+                        try {
+                            Object leash = readField(target, "leash");
+                            Rect bounds = resolveRemoteAnimationBounds(target);
+                            if (leash instanceof SurfaceControl
+                                    && ((SurfaceControl) leash).isValid()
+                                    && bounds != null && !bounds.isEmpty()) {
+                                statusBarTarget = target;
+                                statusBarLeash = (SurfaceControl) leash;
+                                statusBarStartRect.set(bounds);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        break;
+                    }
                 }
                 return closingLeash != null;
             }
