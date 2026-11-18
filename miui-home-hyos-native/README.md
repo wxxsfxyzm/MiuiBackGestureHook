@@ -96,15 +96,13 @@ python miui-home-hyos-native/safe_lsposed_native_deploy.py --action capture --se
 
 ## Resolver verification
 
-The launcher profile generator and offline verifiers remain available because
-they validate the LSPosed payload itself:
+There are no static launcher profiles: every launcher hook is resolved from
+the mapped `libapp_launcher.so` at runtime. The offline verifier mirrors the
+side-boundary resolver against a captured library and checks that corrupted
+optional extensions fail closed without damaging the base profile:
 
 ```text
-python miui-home-hyos-native/generate-launcher-profiles.py --manifest miui-home-hyos-native/launcher-profiles.json --output miui-home-hyos-native/generated/launcher_profiles.generated.h
-
-python miui-home-hyos-native/verify-launcher-profiles.py --manifest miui-home-hyos-native/launcher-profiles.json --library <profile-id>=<libapp_launcher.so-path>
-
-python miui-home-hyos-native/verify-runtime-profile.py --manifest miui-home-hyos-native/launcher-profiles.json --library <profile-id>=<libapp_launcher.so-path>
+python miui-home-hyos-native/verify-runtime-profile.py --library <libapp_launcher.so-path>
 ```
 
 Local Xiaomi binaries and reverse-engineering workspaces remain ignored and

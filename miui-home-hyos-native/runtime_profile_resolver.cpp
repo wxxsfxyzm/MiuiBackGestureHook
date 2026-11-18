@@ -1830,19 +1830,8 @@ namespace miui_home_runtime_profile {
         uintptr_t edge_offset = 0u;
         if (!ResolveSide(view, imports, &side_offset, &edge_offset,
                 &diagnostics->side_candidate_count)) {
-            // 8.01.02.6144 keeps the validated launcher entry at 0x91def8 but
-            // rewrites the wrapper prologue/call spacing. Its unique side handler
-            // remains the same MotionEvent graph at 0x654804 with edge field 0xf4;
-            // use that bounded candidate only for this exact entry shape.
-            const uintptr_t entry_address = reinterpret_cast<uintptr_t>(
-                    app_entry_point);
-            if (entry_address != reinterpret_cast<uintptr_t>(base) + 0x91def8u ||
-                    !Contains(view, 0x654804u, 0x108u, PF_R | PF_X)) {
-                diagnostics->stage = ResolveStage::kRejectedSideBoundary;
-                return false;
-            }
-            side_offset = 0x654804u;
-            edge_offset = 0xf4u;
+            diagnostics->stage = ResolveStage::kRejectedSideBoundary;
+            return false;
         }
         diagnostics->side_handler_offset = side_offset;
 
@@ -1900,8 +1889,6 @@ namespace miui_home_runtime_profile {
         storage->profile.entry_offset = entry_offset;
         storage->profile.identity_fingerprints = &storage->identity_fingerprint;
         storage->profile.identity_fingerprint_count = 1u;
-        storage->profile.business_topology =
-                miui_home_profiles::BusinessHookTopology::kSideBoundaryOnly;
         storage->profile.side_handler_offset = side_offset;
         storage->profile.side_handler_prologue = storage->side_prologue;
         storage->profile.side_handler_prologue_size =
@@ -1941,61 +1928,6 @@ namespace miui_home_runtime_profile {
             storage->profile.xiaoai_bundle_bool_return_offset =
                     xiaoai_boolean_return;
         }
-        diagnostics->stage = ResolveStage::kComplete;
-        return true;
-    }
-
-    bool ResolveContextualSearchOverlay(
-            const uint8_t *base,
-            const miui_home_profiles::LauncherProfile *base_profile,
-            ResolutionStorage *storage,
-            ResolutionDiagnostics *diagnostics) {
-        if (base == nullptr || base_profile == nullptr || storage == nullptr ||
-                diagnostics == nullptr) {
-            return false;
-        }
-        memset(storage, 0, sizeof(*storage));
-        memset(diagnostics, 0, sizeof(*diagnostics));
-        diagnostics->stage = ResolveStage::kParsingElf;
-
-        ElfView view{};
-        if (!ParseElf(base, &view)) {
-            diagnostics->stage = ResolveStage::kRejectedElf;
-            return false;
-        }
-        diagnostics->stage = ResolveStage::kResolvingImports;
-        RequiredImports imports{};
-        if (!ResolveImports(view, &imports) ||
-                !ResolveContextualImports(view, &imports)) {
-            diagnostics->stage = ResolveStage::kRejectedImports;
-            return false;
-        }
-
-        diagnostics->stage = ResolveStage::kResolvingContextualSearch;
-        uintptr_t handler = 0u;
-        uintptr_t invoke = 0u;
-        bool completion_external = false;
-        if (!ResolveContextualSearch(view, imports, &handler,
-                &completion_external, &invoke, diagnostics)) {
-            return false;
-        }
-        memcpy(storage->contextual_long_press_prologue, base + handler,
-                kContextualPrologueSize);
-        memcpy(storage->contextual_search_invoke_prologue, base + invoke,
-                kContextualPrologueSize);
-        storage->profile = *base_profile;
-        storage->profile.contextual_long_press_handler_offset = handler;
-        storage->profile.contextual_long_press_completion_external =
-                completion_external ? 1u : 0u;
-        storage->profile.contextual_long_press_handler_prologue =
-                storage->contextual_long_press_prologue;
-        storage->profile.contextual_long_press_handler_prologue_size =
-                kContextualPrologueSize;
-        storage->profile.contextual_search_invoke_offset = invoke;
-        storage->profile.contextual_search_invoke_prologue =
-                storage->contextual_search_invoke_prologue;
-        storage->profile.contextual_search_invoke_prologue_size =
-                kContextualPrologueSize;
         diagnostics->stage = ResolveStage::kComplete;
         return true;
     }

@@ -2,12 +2,6 @@ cmake_minimum_required(VERSION 3.22)
 
 project(miui_home_hyos_native LANGUAGES CXX ASM)
 
-if(NOT DEFINED LAUNCHER_PROFILE_INCLUDE_DIR OR
-    NOT EXISTS "${LAUNCHER_PROFILE_INCLUDE_DIR}/launcher_profiles.generated.h")
-    message(FATAL_ERROR
-        "Generate launcher_profiles.generated.h before configuring CMake")
-endif()
-
 if(NOT ANDROID)
     message(FATAL_ERROR "miui_home_hyos_native must use the Android NDK toolchain")
 endif()
@@ -36,7 +30,6 @@ add_library(${MIUI_HOME_NATIVE_TARGET} SHARED ${MIUI_HOME_NATIVE_SOURCES})
 
 target_include_directories(${MIUI_HOME_NATIVE_TARGET} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${LAUNCHER_PROFILE_INCLUDE_DIR}
 )
 
 target_compile_features(${MIUI_HOME_NATIVE_TARGET} PRIVATE cxx_std_17)

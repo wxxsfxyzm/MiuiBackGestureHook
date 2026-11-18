@@ -2,7 +2,6 @@
 #include "dart_runtime_resolver.h"
 #include "dart_state_publication.h"
 #include "launcher_profiles.h"
-#include "launcher_profiles.generated.h"
 #include "runtime_profile_resolver.h"
 #include "contextual_motion_gate.h"
 
@@ -199,12 +198,9 @@ using ContextualLongPressInputFn = void (*)(void*, uintptr_t, void*, void*);
 using MotionEventFloatFn = float (*)(void*);
 using MotionEventIndexedFloatFn = float (*)(void*, int32_t);
 using InputMonitorPilferFn = void (*)(void*);
-using GestureStubPointerHandlerFn = void (*)(void*, void*, void*, uint32_t);
-using GestureBackTouchProcessorFn = void (*)(void*, void*, void*);
 using GestureStubBackHandlerFn = void (*)(void*, void*);
 using ContextualLongPressHandlerFn = void (*)(void*, uint32_t);
 using ContextualSearchInvokeFn = uint8_t (*)(uint32_t);
-using DrawerStateHandlerFn = void (*)(int64_t, uint8_t*, uint32_t, uint32_t);
 
 struct RString {
     char* data;
@@ -275,8 +271,6 @@ void* g_launcher_handle = nullptr;
 void* g_original_motion_get_action = nullptr;
 void* g_original_motion_get_action_masked = nullptr;
 void* g_original_input_monitor_pilfer = nullptr;
-void* g_original_gesture_stub_pointer_handler = nullptr;
-void* g_original_gesture_back_touch_processor = nullptr;
 void* g_original_gesture_stub_back_handler = nullptr;
 void* g_original_contextual_long_press_handler = nullptr;
 void* g_original_sf_anim_start = nullptr;
@@ -293,7 +287,6 @@ struct ReturnHomeHandoffRecord {
 pthread_mutex_t g_return_home_handoff_lock = PTHREAD_MUTEX_INITIALIZER;
 ReturnHomeHandoffRecord g_return_home_handoff{};
 constexpr int64_t kReturnHomeHandoffMaxAgeMs = 1500;
-void* g_original_drawer_state_handler = nullptr;
 void* g_dart_app_handle = nullptr;
 uint8_t* g_dart_app_base = nullptr;
 uint32_t g_dart_drawer_install_in_flight = 0;
@@ -320,8 +313,6 @@ void* g_motion_get_y = nullptr;
 uint8_t* g_launcher_base = nullptr;
 const miui_home_profiles::LauncherProfile* g_launcher_profile = nullptr;
 miui_home_runtime_profile::ResolutionStorage g_dynamic_profile_storage{};
-miui_home_runtime_profile::ResolutionStorage g_contextual_overlay_storage{};
-__attribute__((used)) volatile uint32_t g_contextual_overlay_state = 0;
 miui_home_dart_profile::ResolutionStorage g_dart_profile_storage{};
 __attribute__((used)) miui_home_dart_profile::ResolutionDiagnostics
         g_dart_profile_diagnostics{};
@@ -374,15 +365,6 @@ __attribute__((used)) volatile uint32_t g_arbiter_state_passthrough_count = 0;
 __attribute__((used)) volatile uint32_t g_accepted_processor_down_count = 0;
 __attribute__((used)) volatile uint32_t g_accepted_processor_publish_count = 0;
 __attribute__((used)) volatile uint32_t g_gesture_processor_suppressed_count = 0;
-__attribute__((used)) volatile uint32_t g_gesture_processor_entry_count = 0;
-__attribute__((used)) volatile uint32_t g_inner_gesture_type_last = 0;
-__attribute__((used)) volatile uint32_t g_inner_gesture_type_1_count = 0;
-__attribute__((used)) volatile uint32_t g_inner_gesture_type_2_count = 0;
-__attribute__((used)) volatile uint32_t g_outer_down_post_type_last = 0;
-__attribute__((used)) volatile uint32_t g_outer_down_post_type_0_count = 0;
-__attribute__((used)) volatile uint32_t g_outer_down_post_type_1_count = 0;
-__attribute__((used)) volatile uint32_t g_outer_down_post_type_2_count = 0;
-__attribute__((used)) volatile uint32_t g_outer_down_post_type_3_count = 0;
 __attribute__((used)) volatile uint32_t g_enable_systemui_ownership = 1;
 __attribute__((used)) volatile uint32_t g_stub_back_handler_count = 0;
 __attribute__((used)) volatile uint32_t g_stub_back_action_last = 0xffffffffu;
@@ -394,8 +376,6 @@ __attribute__((used)) volatile uint32_t g_stub_back_edge_last = 0xffffffffu;
 __attribute__((used)) volatile uint32_t
         g_gesture_processor_boundary_return_count = 0;
 __attribute__((used)) volatile uint32_t g_pilfer_hook_count = 0;
-__attribute__((used)) volatile uint32_t
-        g_owned_stream_pilfer_suppressed_count = 0;
 __attribute__((used)) volatile uint32_t g_motion_down_capture_count = 0;
 __attribute__((used)) volatile uint32_t g_contextual_feature_hook_state = 0;
 __attribute__((used)) volatile uint32_t g_contextual_feature_query_count = 0;
@@ -534,7 +514,6 @@ struct PendingDownIdentity {
 };
 
 struct OwnedBackStreamIdentity {
-    uintptr_t monitor;
     uintptr_t motion_event;
     int64_t generation;
     PendingDownIdentity down;
@@ -544,7 +523,6 @@ struct OwnedBackStreamIdentity {
 thread_local PendingDownIdentity g_pending_down{};
 thread_local bool g_systemui_owns_back_stream = false;
 thread_local OwnedBackStreamIdentity g_owned_back_stream{};
-thread_local uintptr_t g_last_motion_event = 0u;
 thread_local uintptr_t g_last_dart_maintenance_down = 0u;
 
 template <typename T>
@@ -916,80 +894,6 @@ const miui_home_profiles::LauncherProfile* ResolveLauncherProfile(
     }
     auto* base = static_cast<uint8_t*>(info.dli_fbase);
     const miui_home_profiles::LauncherProfile* matched = nullptr;
-    for (const auto* profile : miui_home_profiles::kProfiles) {
-        if (profile != nullptr &&
-                MatchesLauncherProfile(base, app_entry_point, *profile)) {
-            if (matched != nullptr) return nullptr;
-            matched = profile;
-        }
-    }
-    if (matched != nullptr) {
-        __android_log_print(ANDROID_LOG_INFO, kLogTag,
-                "launcher static profile matched: id=%s entry=0x%zx base=%p",
-                matched->id, matched->entry_offset, base);
-
-        // Static profiles intentionally contain only immutable launcher
-        // identity and the side boundary. New Xiaomi builds may retain the
-        // contextual-search graph while changing its offsets, so resolve the
-        // optional graph independently and overlay it without weakening the
-        // already validated static profile.
-        const bool contextual_missing =
-                matched->contextual_long_press_handler_offset == 0u &&
-                matched->contextual_search_invoke_offset == 0u;
-        if (contextual_missing) {
-            uint32_t expected_overlay = 0u;
-            if (__atomic_compare_exchange_n(
-                        &g_contextual_overlay_state, &expected_overlay,
-                        uint32_t{1}, false, __ATOMIC_ACQ_REL,
-                        __ATOMIC_ACQUIRE)) {
-                miui_home_runtime_profile::ResolutionDiagnostics diagnostics{};
-                const bool overlay =
-                        miui_home_runtime_profile::ResolveContextualSearchOverlay(
-                                base, matched, &g_contextual_overlay_storage,
-                                &diagnostics);
-                __atomic_store_n(&g_dynamic_contextual_support_candidate_count,
-                        diagnostics.contextual_support_candidate_count,
-                        __ATOMIC_RELAXED);
-                __atomic_store_n(&g_dynamic_contextual_invoke_candidate_count,
-                        diagnostics.contextual_invoke_candidate_count,
-                        __ATOMIC_RELAXED);
-                __atomic_store_n(
-                        &g_dynamic_contextual_long_press_candidate_count,
-                        diagnostics.contextual_long_press_candidate_count,
-                        __ATOMIC_RELAXED);
-                __atomic_store_n(&g_dynamic_contextual_resolved,
-                        diagnostics.contextual_resolved, __ATOMIC_RELAXED);
-                __atomic_store_n(&g_dynamic_contextual_search_invoke_offset,
-                        diagnostics.contextual_search_invoke_offset,
-                        __ATOMIC_RELAXED);
-                __atomic_store_n(
-                        &g_dynamic_contextual_long_press_handler_offset,
-                        diagnostics.contextual_long_press_handler_offset,
-                        __ATOMIC_RELAXED);
-                __atomic_store_n(&g_contextual_overlay_state,
-                        static_cast<uint32_t>(diagnostics.stage),
-                        __ATOMIC_RELEASE);
-                if (overlay) {
-                    matched = &g_contextual_overlay_storage.profile;
-                    Log(ANDROID_LOG_INFO,
-                        "resolved contextual-search overlay for static launcher profile");
-                } else {
-                    __android_log_print(
-                            ANDROID_LOG_WARN, kLogTag,
-                            "contextual-search overlay unavailable: stage=%u support=%u invoke=%u long_press=%u",
-                            static_cast<uint32_t>(diagnostics.stage),
-                            diagnostics.contextual_support_candidate_count,
-                            diagnostics.contextual_invoke_candidate_count,
-                            diagnostics.contextual_long_press_candidate_count);
-                }
-            } else if (__atomic_load_n(&g_contextual_overlay_state,
-                                       __ATOMIC_ACQUIRE) ==
-                    static_cast<uint32_t>(
-                            miui_home_runtime_profile::ResolveStage::kComplete)) {
-                matched = &g_contextual_overlay_storage.profile;
-            }
-        }
-    }
     const auto* current = AtomicLoad(&g_launcher_profile);
     if (matched == nullptr && current == nullptr) {
         uint32_t expected_state = static_cast<uint32_t>(
@@ -1094,15 +998,7 @@ const miui_home_profiles::LauncherProfile* CurrentLauncherProfile() {
 
 bool NeedsDartFeatureResolution(
         const miui_home_profiles::LauncherProfile* profile) {
-    return profile != nullptr &&
-            profile->business_topology ==
-                    miui_home_profiles::BusinessHookTopology::
-                            kSideBoundaryOnly &&
-            (StringsEqual(profile->id, "runtime-side-v1") ||
-             (
-            profile->drawer_state_handler_offset == 0u &&
-            profile->drawer_state_handler_prologue == nullptr &&
-            profile->drawer_state_handler_prologue_size == 0u));
+    return profile != nullptr;
 }
 
 const miui_home_profiles::LauncherProfile* CurrentDartFeatureProfile() {
@@ -1744,10 +1640,6 @@ bool SendNativeBroadcast(const char* action, void* extras) {
 
 constexpr uint64_t kDartObservationStateMask = uint64_t{3};
 
-uint64_t PackDartStateObservation(uint64_t owner_epoch, uint32_t state) {
-    return (owner_epoch << 2u) | state;
-}
-
 uint32_t DartStateObservationValue(uint64_t observation) {
     return static_cast<uint32_t>(observation & kDartObservationStateMask);
 }
@@ -1796,35 +1688,6 @@ void PublishDrawerStateForCurrentGeneration() {
         Log(ANDROID_LOG_WARN, "native drawer state broadcast failed");
     }
     AtomicStore(&g_drawer_state_publish_in_flight, uint32_t{0});
-}
-
-void HookDrawerStateHandler(int64_t port, uint8_t* data, uint32_t length,
-                            uint32_t capacity) {
-    DrawerStateHandlerFn original = reinterpret_cast<DrawerStateHandlerFn>(
-            AtomicLoad(&g_original_drawer_state_handler));
-    const bool valid = data != nullptr && length == 1u && capacity == 1u &&
-            data[0] <= 1u;
-    const uint32_t observed = valid
-            ? (data[0] == 0u ? uint32_t{1} : uint32_t{2})
-            : uint32_t{0};
-    if (original != nullptr) {
-        original(port, data, length, capacity);
-    }
-    // The FRB wrapper owns and may free data. Capture its one-byte bool before
-    // the original call, but publish only after Xiaomi has queued the state.
-    if (!valid) {
-        Log(ANDROID_LOG_WARN, "ignored malformed native drawer-state bridge call");
-        return;
-    }
-    if (!EnsureDartStateOwnerForCurrentProcess()) return;
-    const uint64_t owner_epoch = AtomicLoad(&g_dart_state_owner_epoch);
-    __atomic_store_n(&g_drawer_state_observation,
-                     PackDartStateObservation(owner_epoch, observed),
-                     __ATOMIC_RELEASE);
-    // The legacy FRB producer shares the Dart dispatcher's receipt ordering.
-    __atomic_fetch_or(&g_dart_state_publish_pending, kDartDrawerPending,
-                      __ATOMIC_RELEASE);
-    WakeDartStatePublisher();
 }
 
 void PublishOverviewStateForCurrentGeneration() {
@@ -2386,8 +2249,7 @@ bool HandleRuntimeStatusQuery(void* intent) {
             StringsEqual(profile->id, "runtime-side-v1");
     const bool contextual_dynamic = profile_resolved &&
             profile->contextual_long_press_handler_offset != 0u &&
-            profile->contextual_search_invoke_offset != 0u &&
-            (dynamic_profile || profile == &g_contextual_overlay_storage.profile);
+            profile->contextual_search_invoke_offset != 0u && dynamic_profile;
     const uint32_t business_state = AtomicLoad(&g_business_hook_state);
     const uint32_t bridge_state = AtomicLoad(&g_arbiter_bridge_hook_state);
     const auto* feature_profile = CurrentDartFeatureProfile();
@@ -2396,7 +2258,6 @@ bool HandleRuntimeStatusQuery(void* intent) {
             NeedsDartFeatureResolution(profile);
     const bool drawer_required = profile_resolved &&
             (dart_features_required ||
-             feature_profile->drawer_state_handler_offset != 0u ||
              feature_profile->dart_drawer_transition_complete_offset != 0u);
     const bool overview_required = profile_resolved &&
             (dart_features_required ||
@@ -2696,39 +2557,6 @@ bool SameDownIdentity(const PendingDownIdentity& first,
             first.source == second.source && first.edge == second.edge;
 }
 
-bool CurrentMotionMatchesOwnedStream(void* monitor) {
-    if (!g_systemui_owns_back_stream || !g_owned_back_stream.valid ||
-            monitor == nullptr || g_last_motion_event == 0u) {
-        return false;
-    }
-    MotionEventLongFn get_down_time = reinterpret_cast<MotionEventLongFn>(
-            AtomicLoad(&g_motion_get_down_time));
-    MotionEventIntFn get_device_id = reinterpret_cast<MotionEventIntFn>(
-            AtomicLoad(&g_motion_get_device_id));
-    MotionEventIntFn get_source = reinterpret_cast<MotionEventIntFn>(
-            AtomicLoad(&g_motion_get_source));
-    if (get_down_time == nullptr || get_device_id == nullptr ||
-            get_source == nullptr) {
-        return false;
-    }
-    void* event = reinterpret_cast<void*>(g_last_motion_event);
-    const PendingDownIdentity& down = g_owned_back_stream.down;
-    // MotionEvent.getId() identifies one MotionEvent object, not the whole
-    // pointer stream. MOVE/UP/CANCEL therefore have different event IDs from
-    // the authenticated DOWN. Stream continuity is the immutable downTime,
-    // device and source tuple; eventId remains part of DOWN authentication
-    // only.
-    const bool same_stream = get_down_time(event) == down.down_time &&
-            get_device_id(event) == down.device_id &&
-            get_source(event) == down.source;
-    if (!same_stream) return false;
-    const uintptr_t monitor_identity = reinterpret_cast<uintptr_t>(monitor);
-    if (g_owned_back_stream.monitor == 0u) {
-        g_owned_back_stream.monitor = monitor_identity;
-    }
-    return g_owned_back_stream.monitor == monitor_identity;
-}
-
 bool CurrentEventMatchesOwnedStream(void* event) {
     if (!g_systemui_owns_back_stream || !g_owned_back_stream.valid ||
             event == nullptr) {
@@ -2751,8 +2579,6 @@ bool CurrentEventMatchesOwnedStream(void* event) {
 }
 
 void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
-    uintptr_t caller_base = 0u;
-    const miui_home_profiles::LauncherProfile* caller_profile = nullptr;
     InputMonitorPilferFn original = nullptr;
     for (uint32_t index = 0u; index < kLauncherInputSlotCount; ++index) {
         LauncherInputHookSlot& slot = g_launcher_input_slots[index];
@@ -2761,8 +2587,6 @@ void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
         if (AtomicLoad(&slot.state) == uint32_t{3} && profile != nullptr &&
                 return_pc >= base &&
                 return_pc - base < profile->image_span) {
-            caller_base = base;
-            caller_profile = profile;
             original = reinterpret_cast<InputMonitorPilferFn>(
                     AtomicLoad(&slot.original_pilfer));
             break;
@@ -2773,37 +2597,6 @@ void HandleInputMonitorPilfer(void* monitor, uintptr_t return_pc) {
                 AtomicLoad(&g_original_input_monitor_pilfer));
     }
     __atomic_fetch_add(&g_pilfer_hook_count, uint32_t{1}, __ATOMIC_RELAXED);
-    const uintptr_t offset_base = caller_base != 0u
-            ? caller_base : reinterpret_cast<uintptr_t>(g_launcher_base);
-    if (caller_profile == nullptr) caller_profile = CurrentLauncherProfile();
-    const intptr_t return_offset = offset_base == 0u
-            ? intptr_t{-1}
-            : static_cast<intptr_t>(return_pc - offset_base);
-
-    const bool exact_primary_return = offset_base != 0u &&
-            caller_profile != nullptr &&
-            caller_profile->accepted_pilfer_return_offset != 0u &&
-            return_offset == static_cast<intptr_t>(
-                    caller_profile->accepted_pilfer_return_offset);
-    const bool exact_caller_fingerprint = caller_profile != nullptr &&
-            caller_profile->accepted_pilfer_caller != nullptr &&
-            caller_profile->accepted_pilfer_caller_size != 0u &&
-            return_pc >= 8u &&
-            memcmp(reinterpret_cast<const void*>(return_pc - 8u),
-                   caller_profile->accepted_pilfer_caller,
-                   caller_profile->accepted_pilfer_caller_size) == 0;
-    const bool ordinary_back_boundary = exact_primary_return ||
-            exact_caller_fingerprint;
-    if ((ordinary_back_boundary ||
-            (caller_profile != nullptr &&
-             caller_profile->home_pilfer_return_offset != 0u &&
-             return_offset == static_cast<intptr_t>(
-                    caller_profile->home_pilfer_return_offset))) &&
-            CurrentMotionMatchesOwnedStream(monitor)) {
-        __atomic_fetch_add(&g_owned_stream_pilfer_suppressed_count,
-                           uint32_t{1}, __ATOMIC_RELAXED);
-        return;
-    }
     if (original != nullptr) original(monitor);
 }
 
@@ -2876,7 +2669,6 @@ void HookGestureStubBackHandler(void* stub_window, void* event) {
             __atomic_fetch_add(&g_accepted_processor_publish_count,
                                uint32_t{1}, __ATOMIC_RELAXED);
             g_systemui_owns_back_stream = true;
-            g_owned_back_stream.monitor = 0u;
             g_owned_back_stream.motion_event =
                     reinterpret_cast<uintptr_t>(event);
             g_owned_back_stream.generation =
@@ -2912,79 +2704,6 @@ void HookGestureStubBackHandler(void* stub_window, void* event) {
         g_systemui_owns_back_stream = false;
         g_owned_back_stream.valid = false;
     }
-}
-
-void HookGestureStubPointerHandler(void* stub, void* event,
-                                   void* state, uint32_t mode) {
-    __atomic_fetch_add(&g_gesture_processor_entry_count, uint32_t{1},
-                       __ATOMIC_RELAXED);
-    GestureStubPointerHandlerFn original =
-            reinterpret_cast<GestureStubPointerHandlerFn>(
-                    AtomicLoad(&g_original_gesture_stub_pointer_handler));
-    MotionEventIntFn get_action_masked =
-            reinterpret_cast<MotionEventIntFn>(
-                    AtomicLoad(&g_original_motion_get_action_masked));
-    const int32_t action = event != nullptr && get_action_masked != nullptr
-            ? get_action_masked(event) : -1;
-
-    if (action == 0) {
-        // This outer routine is the shared GestureInputMonitor dispatcher,
-        // not a side-only GestureStub entry. It sees Home as well as Back.
-        // Retain transparent classification evidence and identity continuity,
-        // but never claim from this shared path. The side-only GestureStubView
-        // handler owns publication. Always run the unified Rust borrow unlock.
-        CaptureMotionAction(event, action);
-    }
-
-    if (original != nullptr) original(stub, event, state, mode);
-    if (action == 0 && state != nullptr) {
-        const uint32_t post_type = *reinterpret_cast<const uint32_t*>(
-                reinterpret_cast<const uint8_t*>(state) + 0x140u);
-        __atomic_store_n(&g_outer_down_post_type_last, post_type,
-                         __ATOMIC_RELAXED);
-        volatile uint32_t* counter = nullptr;
-        switch (post_type) {
-            case 0u: counter = &g_outer_down_post_type_0_count; break;
-            case 1u: counter = &g_outer_down_post_type_1_count; break;
-            case 2u: counter = &g_outer_down_post_type_2_count; break;
-            case 3u: counter = &g_outer_down_post_type_3_count; break;
-            default: break;
-        }
-        if (counter != nullptr) {
-            __atomic_fetch_add(counter, uint32_t{1}, __ATOMIC_RELAXED);
-        }
-    }
-    if (AtomicLoad(&g_arbiter_bridge_hook_state) == uint32_t{3} &&
-            AtomicLoad(&g_systemui_arbiter_generation) <= 0) {
-        TryQuerySystemUiArbiter(2u);
-    }
-}
-
-void HookGestureBackTouchProcessor(void* processor, void* event, void* state) {
-    GestureBackTouchProcessorFn original =
-            reinterpret_cast<GestureBackTouchProcessorFn>(
-                    AtomicLoad(&g_original_gesture_back_touch_processor));
-    const auto* profile = CurrentLauncherProfile();
-    const uint32_t gesture_type = processor == nullptr || profile == nullptr ||
-            profile->gesture_type_field_offset == 0u
-            ? uint32_t{0}
-            : *reinterpret_cast<const uint32_t*>(
-                    reinterpret_cast<const uint8_t*>(processor) +
-                    profile->gesture_type_field_offset);
-    __atomic_store_n(&g_inner_gesture_type_last, gesture_type,
-                     __ATOMIC_RELAXED);
-    if (gesture_type == 1u) {
-        __atomic_fetch_add(&g_inner_gesture_type_1_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-    } else if (gesture_type == 2u) {
-        __atomic_fetch_add(&g_inner_gesture_type_2_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-    }
-
-    // The shared trigger_gesture dispatcher is Home/monitoring state, not the
-    // accepted side Back boundary. Keep it fully native even for an owned
-    // GestureStubView stream.
-    if (original != nullptr) original(processor, event, state);
 }
 
 void CaptureMotionAction(void* event, int32_t action) {
@@ -3450,7 +3169,6 @@ int32_t HookMotionGetActionForSlot(void* event, uint32_t slot_index,
             AtomicLoad(&target));
     if (original == nullptr) return -1;
     const int32_t action = original(event);
-    g_last_motion_event = reinterpret_cast<uintptr_t>(event);
     if ((action & 0xff) == 0) {
         const uintptr_t down_identity = reinterpret_cast<uintptr_t>(event);
         if (g_last_dart_maintenance_down != down_identity) {
@@ -4475,41 +4193,8 @@ bool InstallDrawerStateHook(
         return dart_handle == nullptr ||
                 TryInstallDartDrawerStateHook(dart_handle, profile);
     }
-    const bool absent = profile->drawer_state_handler_offset == 0u &&
-            profile->drawer_state_handler_prologue == nullptr &&
-            profile->drawer_state_handler_prologue_size == 0u;
-    if (absent) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{2},
-                         __ATOMIC_RELEASE);
-        return true;
-    }
-    if (profile->drawer_state_handler_offset == 0u ||
-            profile->drawer_state_handler_prologue == nullptr ||
-            profile->drawer_state_handler_prologue_size == 0u ||
-            !MatchesCode(base, profile->drawer_state_handler_offset,
-                         profile->drawer_state_handler_prologue,
-                         profile->drawer_state_handler_prologue_size)) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{5},
-                         __ATOMIC_RELEASE);
-        Log(ANDROID_LOG_ERROR,
-            "native drawer-state route rejected profile fingerprint");
-        return false;
-    }
-    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{1},
+    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{2},
                      __ATOMIC_RELEASE);
-    if (InstallInlineHook(
-                base + profile->drawer_state_handler_offset,
-                reinterpret_cast<void*>(HookDrawerStateHandler),
-                &g_original_drawer_state_handler) != kHookSuccess ||
-            AtomicLoad(&g_original_drawer_state_handler) == nullptr) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        Log(ANDROID_LOG_ERROR, "native drawer-state hook failed");
-        return false;
-    }
-    __atomic_store_n(&g_drawer_state_hook_state, uint32_t{3},
-                     __ATOMIC_RELEASE);
-    Log(ANDROID_LOG_INFO, "installed exact native ALL_APPS state bridge");
     return true;
 }
 
@@ -4730,20 +4415,10 @@ bool InstallClaimedBusinessHooksForProfile(void* app_entry_point, bool repair) {
             base, profile->side_handler_offset,
             profile->side_handler_prologue,
             profile->side_handler_prologue_size);
-    const bool legacy_matches =
-            profile->business_topology !=
-                    miui_home_profiles::BusinessHookTopology::kLegacyThreeStage ||
-            (MatchesCode(base, profile->pointer_handler_offset,
-                         profile->pointer_handler_prologue,
-                         profile->pointer_handler_prologue_size) &&
-             MatchesCode(base, profile->touch_processor_offset,
-                         profile->touch_processor_prologue,
-                         profile->touch_processor_prologue_size));
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
-            "launcher profile fingerprints: id=%s side=0x%zx match=%d legacy=%d",
-            profile->id, profile->side_handler_offset,
-            side_matches ? 1 : 0, legacy_matches ? 1 : 0);
-    if (!side_matches || !legacy_matches) {
+            "launcher profile fingerprints: id=%s side=0x%zx match=%d",
+            profile->id, profile->side_handler_offset, side_matches ? 1 : 0);
+    if (!side_matches) {
         AtomicStore(&g_business_hook_state, uint32_t{5});
         Log(ANDROID_LOG_ERROR,
             "business probe rejected profile hook fingerprints");
@@ -4797,29 +4472,6 @@ bool InstallClaimedBusinessHooksForProfile(void* app_entry_point, bool repair) {
         Log(ANDROID_LOG_ERROR, "GestureStub Back handler hook failed");
         return false;
     }
-    if (profile->business_topology ==
-            miui_home_profiles::BusinessHookTopology::kLegacyThreeStage) {
-        // 4371 still has the two transparent diagnostic stages around the
-        // side-only boundary. They never claim a stream themselves.
-        if (InstallInlineHook(
-                    base + profile->touch_processor_offset,
-                    reinterpret_cast<void*>(HookGestureBackTouchProcessor),
-                    &g_original_gesture_back_touch_processor) != kHookSuccess ||
-                AtomicLoad(&g_original_gesture_back_touch_processor) == nullptr) {
-            AtomicStore(&g_business_hook_state, uint32_t{6});
-            Log(ANDROID_LOG_ERROR, "inner processor business hook failed");
-            return false;
-        }
-        if (InstallInlineHook(
-                    base + profile->pointer_handler_offset,
-                    reinterpret_cast<void*>(HookGestureStubPointerHandler),
-                    &g_original_gesture_stub_pointer_handler) != kHookSuccess ||
-                AtomicLoad(&g_original_gesture_stub_pointer_handler) == nullptr) {
-            AtomicStore(&g_business_hook_state, uint32_t{6});
-            Log(ANDROID_LOG_ERROR, "accepted-DOWN outer handler hook failed");
-            return false;
-        }
-    }
     if (!InstallContextualSearchLongPressHook(base, profile)) {
         // Contextual Search is an optional terminal route. Its exact profile
         // failure must leave Xiaomi's original closure intact without taking
@@ -4850,12 +4502,8 @@ bool InstallClaimedBusinessHooksForProfile(void* app_entry_point, bool repair) {
     }
     AtomicStore(&g_business_hook_state, uint32_t{3});
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
-            "%s profile %s with %s business hook",
-            profile->id, repair ? "repaired" : "installed",
-            profile->business_topology ==
-                    miui_home_profiles::BusinessHookTopology::kLegacyThreeStage
-                    ? "legacy diagnostics + side boundary"
-                    : "side boundary only");
+            "%s profile %s with side boundary only business hook",
+            profile->id, repair ? "repaired" : "installed");
     TryInstallArbiterBridge();
     return true;
 }
@@ -4881,14 +4529,6 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
             &g_launcher_input_slots[slot_index].profile);
     if (base == nullptr || base != g_launcher_base || profile == nullptr ||
             profile != CurrentLauncherProfile()) return;
-    const bool outer_original = MatchesCode(
-            base, profile->pointer_handler_offset,
-            profile->pointer_handler_prologue,
-            profile->pointer_handler_prologue_size);
-    const bool inner_original = MatchesCode(
-            base, profile->touch_processor_offset,
-            profile->touch_processor_prologue,
-            profile->touch_processor_prologue_size);
     const bool stub_back_handler_original = MatchesCode(
             base, profile->side_handler_offset,
             profile->side_handler_prologue,
@@ -4901,31 +4541,7 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
                     base, profile->contextual_long_press_handler_offset,
                     profile->contextual_long_press_handler_prologue,
                     profile->contextual_long_press_handler_prologue_size);
-    const bool drawer_hook_expected =
-            AtomicLoad(&g_drawer_state_hook_state) == uint32_t{3} &&
-            AtomicLoad(&g_original_drawer_state_handler) != nullptr &&
-            profile->drawer_state_handler_offset != 0u;
-    const bool drawer_handler_original = drawer_hook_expected &&
-            MatchesCode(base, profile->drawer_state_handler_offset,
-                        profile->drawer_state_handler_prologue,
-                        profile->drawer_state_handler_prologue_size);
-    const bool legacy = profile->business_topology ==
-            miui_home_profiles::BusinessHookTopology::kLegacyThreeStage;
-    if (!stub_back_handler_original &&
-            (!legacy || (!outer_original && !inner_original)) &&
-            !contextual_handler_original && !drawer_handler_original) {
-        return;
-    }
-    if (legacy && (outer_original != inner_original ||
-            outer_original != stub_back_handler_original)) {
-        __atomic_store_n(&g_business_repair_stage, uint32_t{6},
-                         __ATOMIC_RELEASE);
-        __atomic_fetch_add(&g_business_repair_failure_count, uint32_t{1},
-                           __ATOMIC_RELAXED);
-        Log(ANDROID_LOG_ERROR,
-            "refusing inconsistent one-sided Launcher business hook repair");
-        return;
-    }
+    if (!stub_back_handler_original && !contextual_handler_original) return;
     uint32_t expected_state = 3u;
     if (!__atomic_compare_exchange_n(&g_business_hook_state, &expected_state,
                                      uint32_t{1}, false,
@@ -4937,20 +4553,12 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
     __atomic_store_n(&g_business_repair_stage, uint32_t{1}, __ATOMIC_RELEASE);
     const int stub_back_handler_unhook = RemoveInlineHook(
             base + profile->side_handler_offset);
-    const int inner_unhook = legacy ? RemoveInlineHook(
-            base + profile->touch_processor_offset) : kHookSuccess;
-    const int outer_unhook = legacy ? RemoveInlineHook(
-            base + profile->pointer_handler_offset) : kHookSuccess;
     const int contextual_unhook = contextual_hook_expected
             ? RemoveInlineHook(
                     base + profile->contextual_long_press_handler_offset)
             : kHookSuccess;
-    const int drawer_unhook = drawer_hook_expected
-            ? RemoveInlineHook(base + profile->drawer_state_handler_offset)
-            : kHookSuccess;
-    if (stub_back_handler_unhook != kHookSuccess || inner_unhook != kHookSuccess ||
-            outer_unhook != kHookSuccess || contextual_unhook != kHookSuccess ||
-            drawer_unhook != kHookSuccess) {
+    if (stub_back_handler_unhook != kHookSuccess ||
+            contextual_unhook != kHookSuccess) {
         __atomic_store_n(&g_business_repair_stage, uint32_t{4},
                          __ATOMIC_RELEASE);
         AtomicStore(&g_business_hook_state, uint32_t{7});
@@ -4961,22 +4569,13 @@ void RepairBusinessHooksIfRemapped(uint32_t slot_index) {
         return;
     }
     __atomic_store_n(&g_business_repair_stage, uint32_t{2}, __ATOMIC_RELEASE);
-    AtomicStore(&g_original_gesture_back_touch_processor,
-                static_cast<void*>(nullptr));
     AtomicStore(&g_original_gesture_stub_back_handler,
-                static_cast<void*>(nullptr));
-    AtomicStore(&g_original_gesture_stub_pointer_handler,
                 static_cast<void*>(nullptr));
     AtomicStore(&g_original_contextual_long_press_handler,
                 static_cast<void*>(nullptr));
     AtomicStore(&g_contextual_search_invoke, static_cast<void*>(nullptr));
-    AtomicStore(&g_original_drawer_state_handler, static_cast<void*>(nullptr));
     if (profile->contextual_long_press_handler_offset != 0u) {
         __atomic_store_n(&g_contextual_long_press_hook_state, uint32_t{0},
-                         __ATOMIC_RELEASE);
-    }
-    if (profile->drawer_state_handler_offset != 0u) {
-        __atomic_store_n(&g_drawer_state_hook_state, uint32_t{0},
                          __ATOMIC_RELEASE);
     }
     const bool repaired = InstallClaimedBusinessHooksForProfile(

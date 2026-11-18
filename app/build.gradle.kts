@@ -122,7 +122,6 @@ android {
             cmake {
                 arguments += listOf(
                     "-DANDROID_STL=c++_static",
-                    "-DLAUNCHER_PROFILE_INCLUDE_DIR=${rootProject.file("miui-home-hyos-native/generated").absolutePath}",
                 )
                 targets += "miui_home_hyos_lsp"
             }

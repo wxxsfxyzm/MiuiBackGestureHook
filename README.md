@@ -43,7 +43,7 @@ validated native profile cannot be established.
 | Platform | Required components | Launcher support |
 | --- | --- | --- |
 | Android 16 | LSPosed | SystemUI gesture path |
-| Android 17 / HyperOS 4+ | Internal LSPosed with HYOS-spawner support | `4371` static profile; validated newer builds use the runtime resolver |
+| Android 17 / HyperOS 4+ | Internal LSPosed with HYOS-spawner support | Launcher hooks are resolved at runtime from the mapped MiuiHome image |
 
 The native entry is arm64-v8a only. Unsupported or ambiguous layouts fail closed.
 LSPosed's enabled/scope state and HYOS injection own spawner compatibility; the

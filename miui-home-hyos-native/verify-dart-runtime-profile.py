@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Verify launcher profile RVAs and fingerprints against local ELF files."""
+"""Offline mirror of the mapped Dart AOT launcher-state resolver."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import struct
 from pathlib import Path
@@ -12,14 +11,6 @@ from pathlib import Path
 
 PT_LOAD = 1
 PF_X = 1
-
-
-def parse_int(value: str) -> int:
-    return int(value, 0)
-
-
-def parse_bytes(value: str) -> bytes:
-    return bytes.fromhex(value)
 
 
 def load_segments(data: bytes) -> list[tuple[int, int, int, int, int]]:
@@ -382,233 +373,15 @@ def resolve_dart_runtime_profile(
     }
 
 
-def verify_bytes(
-    profile_id: str,
-    label: str,
-    rva: int,
-    expected: bytes,
-    image: bytes,
-    segments: list[tuple[int, int, int, int, int]],
-) -> None:
-    file_offset = rva_to_file_offset(
-        rva, len(expected), segments, require_executable=True
-    )
-    actual = image[file_offset : file_offset + len(expected)]
-    if actual != expected:
-        raise ValueError(
-            f"{profile_id} {label} mismatch at RVA 0x{rva:x}: "
-            f"expected {expected.hex()}, got {actual.hex()}"
-        )
-
-
-def verify_profile(profile: dict, library_path: Path) -> None:
-    image = library_path.read_bytes()
-    profile_id = profile["id"]
-    digest = hashlib.sha256(image).hexdigest()
-    if digest.lower() != profile["library_sha256"].lower():
-        raise ValueError(
-            f"{profile_id} library SHA-256 mismatch: expected "
-            f"{profile['library_sha256']}, got {digest}"
-        )
-    segments = load_segments(image)
-    for fingerprint in profile["identity_fingerprints"]:
-        verify_bytes(
-            profile_id,
-            f"identity/{fingerprint['name']}",
-            parse_int(fingerprint["offset"]),
-            parse_bytes(fingerprint["bytes"]),
-            image,
-            segments,
-        )
-    for label in (
-        "side_handler",
-        "pointer_handler",
-        "touch_processor",
-        "drawer_state",
-    ):
-        hook = profile.get(label)
-        if hook is None:
-            continue
-        expected = parse_bytes(hook["bytes"])
-        verify_bytes(
-            profile_id,
-            label,
-            parse_int(hook["offset"]),
-            expected,
-            image,
-            segments,
-        )
-    print(f"{profile_id}: PASS {library_path} sha256={digest}")
-
-
-def verify_dart_profile(
-    profile: dict, reference: dict, library_path: Path
-) -> None:
-    image = library_path.read_bytes()
-    digest = hashlib.sha256(image).hexdigest()
-    if digest.lower() != reference["library_sha256"].lower():
-        raise ValueError(
-            f"{profile['id']} Dart library SHA-256 mismatch: expected "
-            f"{reference['library_sha256']}, got {digest}"
-        )
-    segments = load_segments(image)
-    verify_bytes(
-        profile["id"], "dart_drawer_state/progress_end",
-        parse_int(reference["progress_end_offset"]),
-        parse_bytes(reference["progress_end_bytes"]), image, segments,
-    )
-    verify_bytes(
-        profile["id"], "dart_drawer_state/transition_complete",
-        parse_int(reference["transition_complete_offset"]),
-        parse_bytes(reference["transition_complete_bytes"]), image, segments,
-    )
-    build_offset = rva_to_file_offset(
-        parse_int(reference["snapshot_build_id_offset"]),
-        len(parse_bytes(reference["snapshot_build_id_bytes"])), segments,
-    )
-    expected_build_id = parse_bytes(reference["snapshot_build_id_bytes"])
-    if image[build_offset : build_offset + len(expected_build_id)] != expected_build_id:
-        raise ValueError(f"{profile['id']} Dart snapshot build ID mismatch")
-    for label in ("enter", "exit"):
-        verify_bytes(
-            profile["id"], f"dart_overview_state/{label}",
-            parse_int(reference[f"overview_{label}_offset"]),
-            parse_bytes(reference[f"overview_{label}_bytes"]), image, segments,
-        )
-    verify_bytes(
-        profile["id"], "dart_editing_state/query",
-        parse_int(reference["editing_query_offset"]),
-        parse_bytes(reference["editing_query_bytes"]), image, segments,
-    )
-    resolved = resolve_dart_runtime_profile(image, segments)
-    expected = {
-        "progress_end_offset": parse_int(reference["progress_end_offset"]),
-        "transition_complete_offset": parse_int(
-            reference["transition_complete_offset"]
-        ),
-        "all_apps_state_slot_offset": parse_int(
-            reference["all_apps_state_slot_offset"]
-        ),
-        "home_state_slot_offset": parse_int(
-            reference["home_state_slot_offset"]
-        ),
-        "overview_enter_offset": parse_int(
-            reference["overview_enter_offset"]
-        ),
-        "overview_exit_offset": parse_int(
-            reference["overview_exit_offset"]
-        ),
-        "editing_query_offset": parse_int(
-            reference["editing_query_offset"]
-        ),
-        "editing_query_return_offset_a": parse_int(
-            reference["editing_query_return_offset_a"]
-        ),
-        "editing_query_return_offset_b": parse_int(
-            reference["editing_query_return_offset_b"]
-        ),
-    }
-    if resolved != expected:
-        raise ValueError(
-            f"{profile['id']} Dart runtime resolver mismatch: "
-            f"expected {expected}, got {resolved}"
-        )
-    corrupted = bytearray(image)
-    drawer_file_offset = rva_to_file_offset(
-        resolved["progress_end_offset"], 4, segments, True
-    )
-    corrupted[drawer_file_offset] ^= 0x01
-    try:
-        resolve_dart_runtime_profile(bytes(corrupted), segments)
-    except ValueError:
-        pass
-    else:
-        raise ValueError(
-            f"{profile['id']} Dart resolver accepted a corrupted unique drawer"
-        )
-    print(f"{profile['id']}: PASS {library_path} sha256={digest}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=Path(__file__).with_name("launcher-profiles.json"),
-    )
-    parser.add_argument(
-        "--library",
-        action="append",
-        default=[],
-        metavar="PROFILE_ID=PATH",
-    )
-    parser.add_argument(
-        "--dart-library",
-        action="append",
-        default=[],
-        metavar="PROFILE_ID=PATH",
-    )
-    parser.add_argument(
-        "--resolve-dart-library",
-        action="append",
-        default=[],
-        type=Path,
-        metavar="PATH",
-        help=(
-            "resolve and print an arbitrary mapped-Dart ELF without a "
-            "manifest binding"
-        ),
-    )
+    parser.add_argument("--library", action="append", required=True, type=Path,
+                        metavar="PATH", help="mapped-Dart libapp.so to resolve")
     args = parser.parse_args()
-    if (
-        not args.library
-        and not args.dart_library
-        and not args.resolve_dart_library
-    ):
-        parser.error(
-            "at least one --library, --dart-library, or "
-            "--resolve-dart-library input is required"
-        )
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    profiles = {profile["id"]: profile for profile in manifest["profiles"]}
-    profile_references = {
-        profile["id"]: profile
-        for profile in (
-            manifest["profiles"]
-            + manifest.get("runtime_reference_profiles", [])
-        )
-    }
-    dart_references = {
-        profile["id"]: profile
-        for profile in manifest.get("dart_runtime_reference_profiles", [])
-    }
-    for binding in args.library:
-        profile_id, separator, raw_path = binding.partition("=")
-        if not separator or profile_id not in profiles:
-            raise ValueError(f"invalid --library binding: {binding}")
-        verify_profile(profiles[profile_id], Path(raw_path))
-    for binding in args.dart_library:
-        profile_id, separator, raw_path = binding.partition("=")
-        if (
-            not separator
-            or profile_id not in profile_references
-            or profile_id not in dart_references
-        ):
-            raise ValueError(f"invalid --dart-library binding: {binding}")
-        verify_dart_profile(
-            profile_references[profile_id],
-            dart_references[profile_id],
-            Path(raw_path),
-        )
-    for path in args.resolve_dart_library:
+    for path in args.library:
         image = path.read_bytes()
         resolved = resolve_dart_runtime_profile(image, load_segments(image))
-        print(
-            json.dumps(
-                {"library": str(path), "resolved": resolved},
-                sort_keys=True,
-            )
-        )
+        print(json.dumps({"library": str(path), "resolved": resolved}, sort_keys=True))
 
 
 if __name__ == "__main__":

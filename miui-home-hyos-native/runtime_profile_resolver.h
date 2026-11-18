@@ -61,16 +61,6 @@ bool ResolveSideBoundaryProfile(const uint8_t* base, void* app_entry_point,
                                 ResolutionStorage* storage,
                                 ResolutionDiagnostics* diagnostics);
 
-// Resolves only the optional Android 17 contextual-search terminal family
-// and overlays it onto an already-validated static launcher profile. This is
-// intentionally independent of the legacy runtime-singleton resolver: newer
-// launchers can retain the exact long-press graph while moving that singleton.
-bool ResolveContextualSearchOverlay(
-        const uint8_t* base,
-        const miui_home_profiles::LauncherProfile* base_profile,
-        ResolutionStorage* storage,
-        ResolutionDiagnostics* diagnostics);
-
 // Resolve the physical monitor that starts Xiaomi's native bottom-long-press
 // manager, before dispatch-disabled redirection can bypass further detector
 // delivery. Require both the manager's handler graph and this receiver's exact

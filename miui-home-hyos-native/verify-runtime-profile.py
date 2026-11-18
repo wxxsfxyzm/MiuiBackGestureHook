@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -779,39 +778,20 @@ def resolve(image: LoadedElf, entry: int) -> Resolution:
     )
 
 
-def parse_int(value: str) -> int:
-    return int(value, 0)
+def app_entry_point(path: Path) -> int:
+    with path.open("rb") as stream:
+        symbols = ELFFile(stream).get_section_by_name(".dynsym")
+        found = symbols.get_symbol_by_name("app_entry_point") if symbols else None
+    if not found or len(found) != 1:
+        raise ValueError(f"{path}: missing or duplicate app_entry_point")
+    return int(found[0]["st_value"])
 
 
-def verify(profile: dict, path: Path) -> None:
-    if profile["hook_topology"] != "side_boundary_only":
-        raise ValueError(f"{profile['id']} is not a side-boundary profile")
+def verify(path: Path) -> None:
     image = LoadedElf(path)
-    if image.digest.lower() != profile["library_sha256"].lower():
-        raise ValueError(f"{profile['id']} immutable library hash mismatch")
-    entry = parse_int(profile["entry_offset"])
+    label = f"{path} sha256={image.digest}"
+    entry = app_entry_point(path)
     result = resolve(image, entry)
-    contextual = profile.get("contextual_search")
-    abi = profile.get("abi", {})
-    expected = Resolution(
-        parse_int(profile["side_handler"]["offset"]),
-        parse_int(profile["side_handler"]["edge_field_offset"]),
-        parse_int(abi["runtime_pointer_offset"])
-        if "runtime_pointer_offset" in abi else result.runtime_pointer,
-        parse_int(abi["runtime_state_offset"])
-        if "runtime_state_offset" in abi else result.runtime_state,
-        result.runtime_confirmations,
-        parse_int(abi["rstring_vtable_offset"])
-        if "rstring_vtable_offset" in abi else result.rstring,
-        result.contextual_support if contextual else 0,
-        parse_int(contextual["invoke_offset"])
-        if contextual else result.contextual_invoke,
-        parse_int(contextual["long_press_handler_offset"])
-        if contextual else result.contextual_long_press,
-        result.xiaoai_boolean_return,
-    )
-    if result != expected:
-        raise ValueError(f"{profile['id']} resolution mismatch: {result} != {expected}")
 
     original = image.image[result.side]
     image.image[result.side] ^= 1
@@ -820,7 +800,7 @@ def verify(profile: dict, path: Path) -> None:
     except ValueError:
         pass
     else:
-        raise ValueError(f"{profile['id']} corrupted side boundary did not fail closed")
+        raise ValueError(f"{label} corrupted side boundary did not fail closed")
     finally:
         image.image[result.side] = original
 
@@ -844,7 +824,7 @@ def verify(profile: dict, path: Path) -> None:
                 or without_contextual.contextual_long_press != 0
             ):
                 raise ValueError(
-                    f"{profile['id']} optional contextual failure damaged base profile"
+                    f"{label} optional contextual failure damaged base profile"
                 )
         finally:
             image.image[result.contextual_long_press + contextual_tail] = original
@@ -865,13 +845,13 @@ def verify(profile: dict, path: Path) -> None:
                 or without_xiaoai.xiaoai_boolean_return != 0
             ):
                 raise ValueError(
-                    f"{profile['id']} optional XiaoAi failure damaged another resolver"
+                    f"{label} optional XiaoAi failure damaged another resolver"
                 )
         finally:
             image.image[result.xiaoai_boolean_return] = original
 
     print(
-        f"{profile['id']}: PASS side=0x{result.side:x} edge=0x{result.edge:x} "
+        f"{label}: PASS entry=0x{entry:x} side=0x{result.side:x} edge=0x{result.edge:x} "
         f"rstring=0x{result.rstring:x} runtime=0x{result.runtime_pointer:x}/"
         f"0x{result.runtime_state:x} confirmations={result.runtime_confirmations} "
         f"contextual=0x{result.contextual_long_press:x}/"
@@ -882,25 +862,10 @@ def verify(profile: dict, path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=Path(__file__).with_name("launcher-profiles.json"),
-    )
-    parser.add_argument("--library", action="append", required=True, metavar="ID=PATH")
+    parser.add_argument("--library", action="append", required=True, type=Path)
     args = parser.parse_args()
-    manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    profiles = {
-        profile["id"]: profile
-        for profile in (
-            manifest["profiles"] + manifest.get("runtime_reference_profiles", [])
-        )
-    }
-    for binding in args.library:
-        profile_id, separator, raw_path = binding.partition("=")
-        if not separator or profile_id not in profiles:
-            raise ValueError(f"invalid --library binding: {binding}")
-        verify(profiles[profile_id], Path(raw_path))
+    for path in args.library:
+        verify(path)
 
 
 if __name__ == "__main__":
