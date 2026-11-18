@@ -43,6 +43,12 @@ namespace miui_home_runtime_profile {
                 0x6db82bebu, 0x6d0123e9u, 0xa9027bfdu, 0xa9036ffcu,
                 0xa90467fau, 0xa9055ff8u, 0xa90657f6u, 0xa9074ff4u,
         };
+        // 8.01.03.308 widens the FP save-set to d8-d14 while keeping the same
+        // ordered MotionEvent graph and edge-byte load proved below.
+        constexpr uint32_t kSide308Prologue[] = {
+                0xfc160feeu, 0x6d0133edu, 0x6d022bebu, 0x6d0323e9u,
+                0xa9047bfdu, 0xa9056ffcu, 0xa90667fau, 0xa9075ff8u,
+        };
 
         constexpr uint32_t kEntryFamilyPrefix[] = {
                 0xd104c3ffu, 0xa90d7bfdu, 0xa90e6ffcu, 0xa90f67fau,
@@ -529,7 +535,10 @@ namespace miui_home_runtime_profile {
             const bool modern_shape = MatchesWords(
                     view, offset, kSide6144Prologue,
                     sizeof(kSide6144Prologue) / sizeof(kSide6144Prologue[0]));
-            if (!legacy_shape && !modern_shape) return false;
+            const bool wide_fp_shape = MatchesWords(
+                    view, offset, kSide308Prologue,
+                    sizeof(kSide308Prologue) / sizeof(kSide308Prologue[0]));
+            if (!legacy_shape && !modern_shape && !wide_fp_shape) return false;
             uintptr_t discovered_edge = 0u;
             bool edge_seen = false;
             // The 8.01.02.6144 build changed the native wrapper's save-set and moved

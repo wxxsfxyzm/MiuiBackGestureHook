@@ -39,6 +39,17 @@ SIDE_6144_PROLOGUE = struct.pack(
     0xA90657F6,
     0xA9074FF4,
 )
+SIDE_308_PROLOGUE = struct.pack(
+    "<8I",
+    0xFC160FEE,
+    0x6D0133ED,
+    0x6D022BEB,
+    0x6D0323E9,
+    0xA9047BFD,
+    0xA9056FFC,
+    0xA90667FA,
+    0xA9075FF8,
+)
 ENTRY_PREFIX = struct.pack(
     "<9I",
     0xD104C3FF,
@@ -230,7 +241,7 @@ def resolve_side(image: LoadedElf) -> tuple[int, int, int]:
     )
     for offset in image.executable_offsets(0x1C4):
         prologue = image.image[offset : offset + len(SIDE_PROLOGUE)]
-        if prologue not in (SIDE_PROLOGUE, SIDE_6144_PROLOGUE):
+        if prologue not in (SIDE_PROLOGUE, SIDE_6144_PROLOGUE, SIDE_308_PROLOGUE):
             continue
         edge = None
         call_index = 0
