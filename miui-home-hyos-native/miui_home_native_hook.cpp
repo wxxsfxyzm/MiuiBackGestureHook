@@ -402,6 +402,10 @@ __attribute__((used)) volatile uint32_t g_contextual_feature_query_count = 0;
 __attribute__((used)) volatile uint32_t g_contextual_feature_override_count = 0;
 __attribute__((used)) volatile uint32_t
         g_contextual_long_press_hook_state = 0;
+// Closure layout of the hooked Fn, latched from the same profile before the
+// inline hook is installed: 0 = completion Arc in word 0, 1 = callback only.
+__attribute__((used)) volatile uint32_t
+        g_contextual_long_press_completion_external = 0;
 __attribute__((used)) volatile uint32_t
         g_contextual_long_press_trigger_count = 0;
 __attribute__((used)) volatile uint32_t
@@ -3503,15 +3507,21 @@ void HookContextualLongPressHandler(void* closure, uint32_t trigger_mode) {
                 && AtomicLoad(&slot.original_contextual_input) != nullptr) observer_ready = true;
     // Off, an unknown native enum, or an unreadable closure retains the exact
     // original callback. The two validated native modes are MarkOnly/Feature.
+    // Word 0 is the always-present completion Arc only in the captured layout;
+    // in the external layout it is the optional callback and may be null.
+    const bool completion_captured =
+            AtomicLoad(&g_contextual_long_press_completion_external) == 0u;
     if (AtomicLoad(&g_contextual_search_enabled) == 0u || invoke == nullptr || !observer_ready
             || original == nullptr || trigger_mode > 1u || closure == nullptr
-            || AtomicLoad(reinterpret_cast<void**>(closure)) == nullptr) {
+            || (completion_captured
+                    && AtomicLoad(reinterpret_cast<void**>(closure)) == nullptr)) {
         __atomic_fetch_add(&g_contextual_long_press_passthrough_count, uint32_t{1}, __ATOMIC_RELAXED);
         if (original != nullptr) original(closure, trigger_mode);
         return;
     }
     // Run Xiaomi's normal Fn as MarkOnly: it publishes its own completion
-    // marker and forwards the same non-feature mode to its optional callback.
+    // marker (captured layout; the external layout publishes it elsewhere in
+    // both modes) and forwards the same non-feature mode to its optional callback.
     // That tail is a trigger callback, not a destructor: never call it with a
     // guessed one-argument ABI or accidentally launch XiaoAi beside CTS.
     original(closure, 0u);
@@ -3656,6 +3666,10 @@ bool InstallContextualSearchLongPressHook(
         return false;
     }
     __atomic_store_n(&g_contextual_long_press_hook_state, uint32_t{1},
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&g_contextual_long_press_completion_external,
+                     profile->contextual_long_press_completion_external != 0u
+                             ? uint32_t{1} : uint32_t{0},
                      __ATOMIC_RELEASE);
     AtomicStore(&g_contextual_search_invoke,
                 static_cast<void*>(

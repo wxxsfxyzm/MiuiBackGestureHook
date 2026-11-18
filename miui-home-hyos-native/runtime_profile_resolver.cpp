@@ -1356,9 +1356,10 @@ namespace miui_home_runtime_profile {
 
         bool IsContextualLongPressCandidate(const ElfView &view,
                 const RequiredImports &imports,
-                uintptr_t offset) {
+                uintptr_t offset, bool *completion_external) {
             uintptr_t fallback = 0u;
             uint32_t branch = 0u;
+            if (completion_external != nullptr) *completion_external = false;
             const bool legacy = MatchesWords(
                     view, offset, kContextualLongPressPrologue,
                     sizeof(kContextualLongPressPrologue) /
@@ -1395,11 +1396,41 @@ namespace miui_home_runtime_profile {
             // Bundle_drop fallback. Match the release store and closure dispatch as
             // one contiguous graph; this excludes unrelated FnOnce shims.
             uintptr_t xiaoai = 0u;
-            return MatchesWords(view, offset, kContextualLongPress6144Prologue,
+            const bool compact_frame = MatchesWords(
+                    view, offset, kContextualLongPress6144Prologue,
                     sizeof(kContextualLongPress6144Prologue) /
                             sizeof(kContextualLongPress6144Prologue[0])) &&
                     InstructionEquals(view, offset + 0x14u, 0x2a0103f3u) &&
                     InstructionEquals(view, offset + 0x18u, 0xaa0003f4u) &&
+                    InstructionEquals(view, offset + 0x74u, 0xf9400288u);
+            if (!compact_frame) return false;
+
+            // 8.01.03.308 shrinks the closure to the optional callback alone:
+            // completion moved to a separately registered long-press handler,
+            // so neither trigger mode stores it here. Prove the same callback
+            // dispatch at [x20, #0/#8] and the same XiaoAi/Bundle_drop fallback.
+            if (ReadInstruction(view, offset + 0x78u, &branch) &&
+                    (branch & 0xff00001fu) == 0xb4000008u &&
+                    InstructionEquals(view, offset + 0x7cu, 0xf9400689u) &&
+                    InstructionEquals(view, offset + 0x80u, 0x2a1303e1u) &&
+                    InstructionEquals(view, offset + 0x84u, 0xf940092au) &&
+                    InstructionEquals(view, offset + 0x88u, 0xf9401529u) &&
+                    InstructionEquals(view, offset + 0x8cu, 0xd100054au) &&
+                    InstructionEquals(view, offset + 0x90u, 0x927ced4au) &&
+                    InstructionEquals(view, offset + 0x94u, 0x8b0a0108u) &&
+                    InstructionEquals(view, offset + 0x98u, 0x91004100u) &&
+                    InstructionEquals(view, offset + 0x9cu, 0xd63f0120u) &&
+                    ReadInstruction(view, offset + 0xa4u, &branch) &&
+                    (branch & 0xfff8001fu) == 0x36000013u &&
+                    DecodeBlTarget(view, offset + 0xa8u, &xiaoai) &&
+                    xiaoai != offset &&
+                    ReadInstruction(view, offset + 0xacu, &branch) &&
+                    (branch & 0xff00001fu) == 0xb4000000u &&
+                    CallTargetsImport(view, offset + 0xb0u, imports.bundle_drop)) {
+                if (completion_external != nullptr) *completion_external = true;
+                return true;
+            }
+            return
                     InstructionEquals(view, offset + 0x74u, 0xf9400288u) &&
                     InstructionEquals(view, offset + 0x78u, 0x52800029u) &&
                     InstructionEquals(view, offset + 0x7cu, 0x91004108u) &&
@@ -1426,8 +1457,10 @@ namespace miui_home_runtime_profile {
         bool ResolveContextualLongPress(const ElfView &view,
                 const RequiredImports &imports,
                 uintptr_t *handler_offset,
+                bool *completion_external,
                 uint32_t *candidate_count) {
             uintptr_t matched = 0u;
+            bool matched_external = false;
             uint32_t matches = 0u;
             for (size_t segment_index = 0u;
                  segment_index < view.load_count; ++segment_index) {
@@ -1439,27 +1472,36 @@ namespace miui_home_runtime_profile {
                 const uintptr_t start = (load.start + 3u) & ~uintptr_t{3u};
                 for (uintptr_t offset = start; offset <= load.end - 0x140u;
                      offset += 4u) {
-                    if (!IsContextualLongPressCandidate(view, imports, offset)) {
+                    bool external = false;
+                    if (!IsContextualLongPressCandidate(view, imports, offset,
+                            &external)) {
                         continue;
                     }
                     matched = offset;
+                    matched_external = external;
                     ++matches;
                 }
             }
             if (candidate_count != nullptr) *candidate_count = matches;
-            if (matches != 1u || handler_offset == nullptr) return false;
+            if (matches != 1u || handler_offset == nullptr ||
+                    completion_external == nullptr) {
+                return false;
+            }
             *handler_offset = matched;
+            *completion_external = matched_external;
             return true;
         }
 
         bool ResolveContextualSearch(const ElfView &view,
                 const RequiredImports &imports,
                 uintptr_t *handler_offset,
+                bool *completion_external,
                 uintptr_t *invoke_offset,
                 ResolutionDiagnostics *diagnostics) {
             uintptr_t support = 0u;
             uintptr_t invoke = 0u;
             uintptr_t handler = 0u;
+            bool external = false;
             uint32_t support_count = 0u;
             uint32_t invoke_count = 0u;
             uint32_t handler_count = 0u;
@@ -1469,7 +1511,7 @@ namespace miui_home_runtime_profile {
                             ResolveContextualInvoke(view, support, &invoke,
                                     &invoke_count) &&
                             ResolveContextualLongPress(view, imports, &handler,
-                                    &handler_count);
+                                    &external, &handler_count);
             if (diagnostics != nullptr) {
                 diagnostics->contextual_support_candidate_count = support_count;
                 diagnostics->contextual_invoke_candidate_count = invoke_count;
@@ -1479,10 +1521,12 @@ namespace miui_home_runtime_profile {
                 diagnostics->contextual_long_press_handler_offset =
                         resolved ? handler : 0u;
             }
-            if (!resolved || handler_offset == nullptr || invoke_offset == nullptr) {
+            if (!resolved || handler_offset == nullptr ||
+                    completion_external == nullptr || invoke_offset == nullptr) {
                 return false;
             }
             *handler_offset = handler;
+            *completion_external = external;
             *invoke_offset = invoke;
             return true;
         }
@@ -1524,6 +1568,77 @@ namespace miui_home_runtime_profile {
             return true;
         }
 
+    }  // namespace
+
+    namespace {
+        constexpr uint32_t MovX(uint32_t destination, uint32_t source) {
+            return 0xaa0003e0u | (source << 16u) | destination;
+        }
+
+        constexpr uint32_t MovW(uint32_t destination, uint32_t source) {
+            return 0x2a0003e0u | (source << 16u) | destination;
+        }
+
+        bool IsCalleeSaved(uint32_t reg) { return reg >= 19u && reg <= 28u; }
+
+        // Reads `mov {x,w}dst, {x,w}source` and returns a callee-saved dst.
+        bool ReadMovRegister(const ElfView &view, uintptr_t offset, bool wide,
+                uint32_t source, uint32_t *destination) {
+            uint32_t instruction = 0u;
+            if (destination == nullptr || !ReadInstruction(view, offset, &instruction)
+                    || (instruction & 0xffffffe0u)
+                            != ((wide ? MovX(0u, source) : MovW(0u, source)))
+                    || !IsCalleeSaved(instruction & 0x1fu))
+                return false;
+            *destination = instruction & 0x1fu;
+            return true;
+        }
+
+        struct ReceiverArgumentSaves {
+            uint32_t token;
+            uint32_t receiver;
+            uint32_t event;
+        };
+
+        bool IsDistinctSavedRegister(uint32_t reg, const ReceiverArgumentSaves &saves) {
+            return IsCalleeSaved(reg) && reg != saves.token && reg != saves.receiver
+                    && reg != saves.event;
+        }
+
+        // Every instruction between the frame setup and getId must be one of
+        // the known argument/self saves; anything else rejects the candidate.
+        bool ResolveReceiverArgumentSaves(const ElfView &view, uintptr_t start,
+                uintptr_t end, ReceiverArgumentSaves *saves) {
+            uint32_t found[4] = {0u, 0u, 0u, 0u};  // x1, x2, x3 saves, x0 <- x3
+            for (uintptr_t offset = start; offset < end; offset += 4u) {
+                uint32_t instruction = 0u;
+                uint32_t reg = 0u;
+                if (!ReadInstruction(view, offset, &instruction)) return false;
+                if (instruction == MovX(0u, 3u)) {
+                    if (found[3]++ != 0u) return false;
+                } else if (ReadMovRegister(view, offset, true, 1u, &reg)) {
+                    if (found[0] != 0u) return false;
+                    found[0] = reg;
+                } else if (ReadMovRegister(view, offset, true, 2u, &reg)) {
+                    if (found[1] != 0u) return false;
+                    found[1] = reg;
+                } else if (ReadMovRegister(view, offset, true, 3u, &reg)) {
+                    if (found[2] != 0u) return false;
+                    found[2] = reg;
+                } else if (!ReadMovRegister(view, offset, true, 0u, &reg)
+                        && (instruction & 0xffc003e0u) != 0xa9400000u  // ldp xA, xB, [x0]
+                        && (instruction & 0xff8003e0u) != 0xd10003a0u) {  // sub xD, x29, #imm
+                    return false;
+                }
+            }
+            if (found[0] == 0u || found[1] == 0u || found[2] == 0u || found[3] != 1u
+                    || found[0] == found[1] || found[0] == found[2] || found[1] == found[2])
+                return false;
+            saves->token = found[0];
+            saves->receiver = found[1];
+            saves->event = found[2];
+            return true;
+        }
     }  // namespace
 
     static bool ResolveContextualLongPressDispatch(const uint8_t *base, uintptr_t *entry_offset) {
@@ -1629,19 +1744,23 @@ namespace miui_home_runtime_profile {
                 // gesture::input_consumer callback is a different input route.
                 // Prove this receiver by id -> action -> finish(receiver, token,
                 // id, true), its fourth-argument event and the direct manager call.
+                // Register allocation differs between launcher builds, so prove
+                // the argument data flow: token/receiver/event are saved into
+                // distinct callee-saved registers, the event feeds getId and
+                // getActionMasked, and finish receives (receiver, token, id, true).
+                ReceiverArgumentSaves saves{};
+                uint32_t id_reg = 0u, action_reg = 0u;
                 if (call < load.start + 64u || !CallTargetsImport(view, call, id_got)
-                        || !InstructionEquals(view, call - 24u, 0xa9405413u)
-                        || !InstructionEquals(view, call - 20u, 0xaa0303e0u)
-                        || !InstructionEquals(view, call - 16u, 0xaa0303f4u)
-                        || !InstructionEquals(view, call - 12u, 0xaa0203f7u)
-                        || !InstructionEquals(view, call - 8u, 0xaa0103f8u)
-                        || !InstructionEquals(view, call + 4u, 0x2a0003f9u)
-                        || !InstructionEquals(view, call + 8u, 0xaa1403e0u)
+                        || !ResolveReceiverArgumentSaves(view, call - 24u, call, &saves)
+                        || !ReadMovRegister(view, call + 4u, false, 0u, &id_reg)
+                        || !IsDistinctSavedRegister(id_reg, saves)
+                        || !InstructionEquals(view, call + 8u, MovX(0u, saves.event))
                         || !CallTargetsImport(view, call + 12u, action_got)
-                        || !InstructionEquals(view, call + 16u, 0x2a0003f6u)
-                        || !InstructionEquals(view, call + 20u, 0xaa1703e0u)
-                        || !InstructionEquals(view, call + 24u, 0xaa1803e1u)
-                        || !InstructionEquals(view, call + 28u, 0x2a1903e2u)
+                        || !ReadMovRegister(view, call + 16u, false, 0u, &action_reg)
+                        || !IsDistinctSavedRegister(action_reg, saves) || action_reg == id_reg
+                        || !InstructionEquals(view, call + 20u, MovX(0u, saves.receiver))
+                        || !InstructionEquals(view, call + 24u, MovX(1u, saves.token))
+                        || !InstructionEquals(view, call + 28u, MovW(2u, id_reg))
                         || !InstructionEquals(view, call + 32u, 0x52800023u)
                         || !CallTargetsImport(view, call + 36u, finish_got))
                     continue;
@@ -1670,7 +1789,7 @@ namespace miui_home_runtime_profile {
                 for (uintptr_t site = call + 40u; site < entry + 0x3000u; site += 4u) {
                     uintptr_t target = 0u;
                     if (DecodeBlTarget(view, site, &target) && target == dispatcher
-                            && InstructionEquals(view, site - 4u, 0xaa1403e1u))
+                            && InstructionEquals(view, site - 4u, MovX(1u, saves.event)))
                         ++dispatcher_calls;
                 }
                 if (!saved || dispatcher_calls != 1u) continue;
@@ -1750,10 +1869,12 @@ namespace miui_home_runtime_profile {
         diagnostics->stage = ResolveStage::kResolvingContextualSearch;
         uintptr_t contextual_long_press_handler = 0u;
         uintptr_t contextual_search_invoke = 0u;
+        bool contextual_completion_external = false;
         const bool contextual_search_resolved =
                 ResolveContextualImports(view, &imports) &&
                         ResolveContextualSearch(
                                 view, imports, &contextual_long_press_handler,
+                                &contextual_completion_external,
                                 &contextual_search_invoke, diagnostics);
         uintptr_t xiaoai_boolean_return = 0u;
         const bool xiaoai_resolved =
@@ -1803,6 +1924,8 @@ namespace miui_home_runtime_profile {
                     kContextualPrologueSize);
             storage->profile.contextual_long_press_handler_offset =
                     contextual_long_press_handler;
+            storage->profile.contextual_long_press_completion_external =
+                    contextual_completion_external ? 1u : 0u;
             storage->profile.contextual_long_press_handler_prologue =
                     storage->contextual_long_press_prologue;
             storage->profile.contextual_long_press_handler_prologue_size =
@@ -1851,8 +1974,9 @@ namespace miui_home_runtime_profile {
         diagnostics->stage = ResolveStage::kResolvingContextualSearch;
         uintptr_t handler = 0u;
         uintptr_t invoke = 0u;
-        if (!ResolveContextualSearch(view, imports, &handler, &invoke,
-                diagnostics)) {
+        bool completion_external = false;
+        if (!ResolveContextualSearch(view, imports, &handler,
+                &completion_external, &invoke, diagnostics)) {
             return false;
         }
         memcpy(storage->contextual_long_press_prologue, base + handler,
@@ -1861,6 +1985,8 @@ namespace miui_home_runtime_profile {
                 kContextualPrologueSize);
         storage->profile = *base_profile;
         storage->profile.contextual_long_press_handler_offset = handler;
+        storage->profile.contextual_long_press_completion_external =
+                completion_external ? 1u : 0u;
         storage->profile.contextual_long_press_handler_prologue =
                 storage->contextual_long_press_prologue;
         storage->profile.contextual_long_press_handler_prologue_size =

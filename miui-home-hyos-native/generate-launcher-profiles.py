@@ -260,6 +260,8 @@ def generate(manifest: dict) -> str:
                 "        0u,",
                 "        0u,",
                 "        0u,",
+                # Runtime contextual resolver fills the closure layout.
+                "        0u,",
                 "};",
                 "",
             )

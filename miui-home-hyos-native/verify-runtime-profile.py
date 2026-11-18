@@ -556,6 +556,27 @@ def resolve_contextual_long_press(image: LoadedElf) -> int:
         if image.image[offset : offset + len(prologue_bytes)] != prologue_bytes:
             if image.image[offset : offset + len(modern_prologue)] != modern_prologue:
                 continue
+            # 8.01.03.308: callback-only closure, completion is external.
+            if (
+                image.u32(offset + 0x14) == 0x2A0103F3
+                and image.u32(offset + 0x18) == 0xAA0003F4
+                and image.u32(offset + 0x74) == 0xF9400288
+                and image.u32(offset + 0x78) & 0xFF00001F == 0xB4000008
+                and all(
+                    image.u32(offset + relative) == word
+                    for relative, word in (
+                        (0x7C, 0xF9400689), (0x80, 0x2A1303E1), (0x84, 0xF940092A),
+                        (0x88, 0xF9401529), (0x8C, 0xD100054A), (0x90, 0x927CED4A),
+                        (0x94, 0x8B0A0108), (0x98, 0x91004100), (0x9C, 0xD63F0120),
+                    )
+                )
+                and image.u32(offset + 0xA4) & 0xFFF8001F == 0x36000013
+                and decode_bl(image, offset + 0xA8) not in (None, offset)
+                and image.u32(offset + 0xAC) & 0xFF00001F == 0xB4000000
+                and call_targets(image, offset + 0xB0, "Bundle_drop")
+            ):
+                matches.append(offset)
+                continue
             if (
                 image.u32(offset + 0x14) != 0x2A0103F3
                 or image.u32(offset + 0x18) != 0xAA0003F4

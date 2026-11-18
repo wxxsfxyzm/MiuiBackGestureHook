@@ -98,6 +98,12 @@ struct LauncherProfile {
     size_t dart_home_surface_notify_code_size;
     uintptr_t dart_home_surface_inactive_epilogue_offset;
     uintptr_t dart_home_surface_published_epilogue_offset;
+
+    // Runtime-only contextual long-press closure layout. Zero keeps the
+    // captured completion Arc in closure word 0; one means 8.01.03.308+, where
+    // the closure only holds the optional callback and completion lives in
+    // Xiaomi's separate long-press state.
+    uint32_t contextual_long_press_completion_external;
 };
 
 }  // namespace miui_home_profiles
