@@ -1,6 +1,8 @@
 # AGENTS.md
 
 This LSPosed API-102 module restores Xiaomi/MIUI back gestures and optional system-UI behavior.
+On Android 17 it supports both the native (Flutter) MiuiHome and an embedded Android 16 Java
+MiuiHome, selected by the user and switchable at runtime.
 
 ## Scope and decisions
 
@@ -21,27 +23,54 @@ This LSPosed API-102 module restores Xiaomi/MIUI back gestures and optional syst
   `.so`, or modify/truncate any mapped native payload.
 - Use `python3 miui-home-hyos-native/safe_lsposed_native_deploy.py` for every native APK
   update. It must prove API-102 hot reload without restarting SystemUI, replace only the exact
-  owning root `hyos_spawner`, and verify Launcher parentage, current APK mapping/inode,
-  native readiness and absence of new tombstones. Do not bypass a failed safety check.
+  owning root `hyos_spawner`, and verify absence of new tombstones. With a native launcher it
+  verifies spawner parentage, current APK mapping/inode and native readiness; with a Java
+  launcher it refuses a launcher running from the module's embedded copy and verifies one
+  launcher outside the spawner, an unmapped native entry and the re-attached Java bridge.
+  Do not bypass a failed safety check.
 - Do not use module-local marker files as native runtime gates, install a standalone native
   module/controller, or deploy while a retired standalone owner remains mapped.
 - Recover native crash loops through the deployment script's whole-APK rollback and exact
   spawner replacement, followed by one standard HOME start. Never clear launcher data or
   manipulate RescueParty properties. Reinstalling the launcher requires the user's request;
   persistent SafeLauncher after rollback/HOME recovery must be reported before further tests.
+- The embedded Java MiuiHome is a proprietary Xiaomi APK supplied only through the local
+  `javaHomeLauncherApk` build property. Never commit it, and never publish or hand out a build
+  that contains it; builds without it hide the launcher option and change nothing.
+- The Java launcher reaches PackageManager only through the parse redirect of
+  `/product/priv-app/MiuiHome` while the user selects it. Every redirect, scan-flag or allowlist
+  failure falls back to the stock path; never let an exception reach PackageManager.
+- The privileged-permission allowlist rule is user-approved for `com.miui.home` only and only
+  while the redirect is active: an unlisted privileged permission follows the
+  updated-system-app rule. Do not widen it to other packages, listed permissions or grants
+  beyond what an updated system app receives.
+- The hot switch changes only MiuiHome's data update (install the selected launcher or restore
+  the registered system image) after the user changes the selection, on system_server's own
+  identity. Back up launcher data before the first switch. A system_server crash loop, LSPosed
+  safe mode or a removed `system` scope must be reported before further tests.
 
 ## Platform and authentication
 
-- Android 16 may use launcher Java hooks. Android 17+ must keep MiuiHome in static scope for
-  the APK native entry, register no launcher-process Java hooks, and remove inherited Java
-  handles during hot reload. The native entry is exclusive to `com.miui.home`.
+- Android 16 may use launcher Java hooks. On Android 17+ the installed MiuiHome flavor decides:
+  a code-less (native) MiuiHome keeps the APK native entry, registers no launcher-process Java
+  hooks and removes inherited Java handles during hot reload; a dex (Java) MiuiHome uses the
+  Android 16 launcher contract and Java hooks. An unknown flavor fails closed to native. The
+  native entry is exclusive to `com.miui.home` and must stay inert in a Java launcher.
+- Key launcher-contract decisions (accepted-input tokens, launcher state, arbiter broadcasts,
+  status handshakes, contextual-search ownership) on the flavor and Android 17 SystemUI/Shell
+  API differences on the SDK. Processes outliving a launcher switch re-resolve the flavor after
+  MiuiHome package changes.
+- SystemUI may create the launcher's `swipe-up` gesture monitor only for the exact MiuiHome UID
+  of a Java MiuiHome on Android 17, on the default display, over the existing ISystemUiProxy
+  binder. Never grant MONITOR_INPUT or other permissions to the launcher.
 - POCO Java support is Android 16 only. Bind sender checks, resources and explicit targets
   to one selected launcher package per process generation; never trust both interchangeably.
 - Authenticate explicit cross-process broadcasts by exact shared caller package and sending-UID
   ownership; bind state to its current owner/generation and commands to their immutable session.
   Missing, malformed, stale or ambiguous state grants no capability; do not trust arbitrary UIDs.
-- Contextual-search platform calls belong to SystemUI on Android 16 and MiuiHome on Android
-  17+. Authenticate the Google provider callback independently against its exact package.
+- Contextual-search platform calls belong to SystemUI on Android 16 and with a Java MiuiHome,
+  and to MiuiHome with a native MiuiHome on Android 17+. Authenticate the Google provider
+  callback independently against its exact package.
 - Use the declared SDK/NDK toolchain and configured analysis tools. Prefer DexSQL for APK/DEX
   work; use only configured MCP servers for JADX/Ghidra, respecting global readiness rules.
   Do not enable disabled JADX without user direction or invoke local JADX/Ghidra as a fallback.
@@ -99,13 +128,23 @@ This LSPosed API-102 module restores Xiaomi/MIUI back gestures and optional syst
   their actual ClassLoader and cached reflection; compile-only stubs are for platform APIs.
 - Java hot reload must never unload or replace the native entry. A new native payload takes
   effect only through the clean framework-owned spawner replacement above.
+- The launcher switch listener, status receiver and Java-launcher swipe-up monitor belong to
+  one generation; release them before hot reload and register them again afterwards.
+- While the Java launcher runs as the redirected system image, its APK is the module's
+  extracted library. Reboot soon after updating or removing the module.
 
 ## Verification and delivery
 
 - Use Debug for iterative device tests and Release for final delivery. Run checks relevant to
   the changed behavior; broaden/repeat them only for a new change, failure or unresolved risk.
-- Before APK handoff, clean-build the requested variant, verify signing/alignment and use
-  the shared configured signing key. Keep keys and credentials out of source control.
+- Build every APK for handoff with `python3 scripts/build_variants.py`, which clean-builds
+  the public flavor (never embeds the Java MiuiHome) and the private `-javahome-private`
+  flavor together and verifies both; without a local Java MiuiHome APK it skips the private
+  flavor and says so. Do not hand over a plain `assembleRelease` output or skip a failed
+  check; use `--only` only when the user asks for a single flavor.
+- Use the shared configured signing key for both flavors and keep keys and credentials out of
+  source control. Native libraries stay stored and 16 KiB page-aligned (`zipalign -c -P 16 4`)
+  for LSPosed's in-APK loading; only the private flavor extracts them for the Java MiuiHome.
 - `versionCode` uses the Git commit count: rebuild after the final source commit before
   handing over an artifact. Preserve API-102 hot-reload verification after installation.
 - Keep native test revisions in separate stashes. Sign commits after required validation;

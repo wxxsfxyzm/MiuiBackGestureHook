@@ -75,6 +75,17 @@
     <string name="oneui_cross_task_animation_title">来自 One UI 的 CrossTask 动画</string>
     <string name="oneui_cross_task_animation_summary">返回到其他应用的任务时使用 One UI 过渡动画</string>
     <string name="return_home_icon_preview_title">返回桌面预览（实验性）</string>
+    <string name="launcher_implementation_title">桌面实现</string>
+    <string name="launcher_implementation_native">原生桌面</string>
+    <string name="launcher_implementation_java">Java 桌面</string>
+    <string name="launcher_implementation_native_summary">使用安卓 17 系统自带桌面，切换后桌面会立即重启。当前运行：%1$s</string>
+    <string name="launcher_implementation_java_summary">使用模块内置的 Java 桌面，切换后桌面会立即重启。当前运行：%1$s</string>
+    <string name="launcher_switch_native_title">切换到原生桌面</string>
+    <string name="launcher_switch_native_body">将切换到出厂版本的原生桌面，桌面会重启。更新过的桌面版本会丢失，但数据不受影响。</string>
+    <string name="launcher_switch_java_title">切换到 Java 桌面</string>
+    <string name="launcher_switch_java_body">如果更新过原生桌面，切换到 Java 桌面会移除该更新包，桌面数据不受影响。桌面会重启。</string>
+    <string name="launcher_switch_confirm">切换</string>
+    <string name="cancel">取消</string>
     <string name="return_home_icon_preview_summary">返回桌面时卡片跟手缩小，松手后飞回桌面图标</string>
     <string name="module_logging_title">详细模块日志</string>
     <string name="module_logging_summary">保留信息日志；关闭后仍保留警告和错误日志</string>

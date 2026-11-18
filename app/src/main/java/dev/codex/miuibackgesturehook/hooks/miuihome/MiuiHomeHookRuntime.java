@@ -3375,7 +3375,7 @@ public abstract class MiuiHomeHookRuntime extends MiuiHomeReturnHomeRuntime {
 
     protected void publishLegacyRuntimeStatusReply(Context context, Intent query,
                                                    long generation) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+        if (usesNativeMiuiHome()
                 || context == null || query == null || generation <= 0L
                 || !query.getBooleanExtra(EXTRA_STATUS_QUERY, false)) {
             return;
