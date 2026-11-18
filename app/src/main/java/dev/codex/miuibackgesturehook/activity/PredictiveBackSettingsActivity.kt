@@ -47,8 +47,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,9 +71,7 @@ import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
 import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
-import java.io.File
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -87,13 +83,9 @@ import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
-import androidx.compose.foundation.layout.Arrangement
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.glass.GlassDropdownPreference
-import top.yukonga.miuix.kmp.glass.GlassDialog
-import top.yukonga.miuix.kmp.glass.GlassDialogButton
-import top.yukonga.miuix.kmp.glass.GlassDialogButtonRole
 import top.yukonga.miuix.kmp.glass.GlassIconButton
 import top.yukonga.miuix.kmp.glass.GlassTopAppBar
 import top.yukonga.miuix.kmp.icon.MiuixIcons
@@ -564,12 +556,6 @@ private fun PredictiveBackSettingsScreen(
     var confirmedReturnHomeIconPreview by remember {
         mutableStateOf(PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW)
     }
-    var javaHomeLauncher by remember {
-        mutableStateOf(PredictiveBackPreferences.DEFAULT_JAVA_HOME_LAUNCHER)
-    }
-    var confirmedJavaHomeLauncher by remember {
-        mutableStateOf(PredictiveBackPreferences.DEFAULT_JAVA_HOME_LAUNCHER)
-    }
     var moduleLogging by remember { mutableStateOf(true) }
     var confirmedModuleLogging by remember { mutableStateOf(true) }
     var fullscreenDirectBack by remember {
@@ -615,8 +601,6 @@ private fun PredictiveBackSettingsScreen(
         returnHomeIconPreview = PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW
         confirmedReturnHomeIconPreview =
             PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW
-        javaHomeLauncher = PredictiveBackPreferences.DEFAULT_JAVA_HOME_LAUNCHER
-        confirmedJavaHomeLauncher = PredictiveBackPreferences.DEFAULT_JAVA_HOME_LAUNCHER
         moduleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         confirmedModuleLogging = PredictiveBackPreferences.DEFAULT_MODULE_LOGGING
         fullscreenDirectBack = PredictiveBackPreferences.DEFAULT_FULLSCREEN_DIRECT_BACK
@@ -705,10 +689,6 @@ private fun PredictiveBackSettingsScreen(
                         PredictiveBackPreferences.KEY_RETURN_HOME_ICON_PREVIEW,
                         PredictiveBackPreferences.DEFAULT_RETURN_HOME_ICON_PREVIEW,
                     ),
-                    remotePreferences.getBoolean(
-                        PredictiveBackPreferences.KEY_JAVA_HOME_LAUNCHER,
-                        PredictiveBackPreferences.DEFAULT_JAVA_HOME_LAUNCHER,
-                    ),
                 )
                 Triple(remotePreferences, flags, hapticEffect)
             }
@@ -733,8 +713,6 @@ private fun PredictiveBackSettingsScreen(
             confirmedRestoreStatusBarFollow = loaded.second[7]
             returnHomeIconPreview = loaded.second[8]
             confirmedReturnHomeIconPreview = loaded.second[8]
-            javaHomeLauncher = loaded.second[9]
-            confirmedJavaHomeLauncher = loaded.second[9]
         } catch (_: Throwable) {
             configurationError = configurationErrorMessage
         } finally {
@@ -883,15 +861,6 @@ private fun PredictiveBackSettingsScreen(
             { confirmedReturnHomeIconPreview = it },
         )
     }
-    val persistJavaHomeLauncher: (Boolean) -> Unit = { requestedEnabled ->
-        persistBooleanPreference(
-            PredictiveBackPreferences.KEY_JAVA_HOME_LAUNCHER,
-            requestedEnabled,
-            { javaHomeLauncher = it },
-            { confirmedJavaHomeLauncher },
-            { confirmedJavaHomeLauncher = it },
-        )
-    }
     val persistOneUiCrossTaskAnimation: (Boolean) -> Unit = { requestedEnabled ->
         persistBooleanPreference(
             PredictiveBackPreferences.KEY_ONEUI_CROSS_TASK_ANIMATION,
@@ -1022,7 +991,6 @@ private fun PredictiveBackSettingsScreen(
                         oneUiCrossTaskAnimation = oneUiCrossTaskAnimation,
                         fullscreenDirectBack = fullscreenDirectBack,
                         returnHomeIconPreview = returnHomeIconPreview,
-                        javaHomeLauncher = javaHomeLauncher,
                         configurationEnabled = configurationEnabled,
                         onHyperOsIndicatorToggle = persistHyperOsIndicator,
                         onHyperOsIndicatorBlurToggle = persistHyperOsIndicatorBlur,
@@ -1032,7 +1000,6 @@ private fun PredictiveBackSettingsScreen(
                         onOneUiCrossTaskAnimationToggle = persistOneUiCrossTaskAnimation,
                         onFullscreenDirectBackToggle = persistFullscreenDirectBack,
                         onReturnHomeIconPreviewToggle = persistReturnHomeIconPreview,
-                        onJavaHomeLauncherToggle = persistJavaHomeLauncher,
                         onOpenGestureTriggerSettings = onOpenGestureTriggerSettings,
                         backdrop = topBarBackdrop,
                         modifier = Modifier
@@ -1139,7 +1106,6 @@ private fun SideGestureGroupCard(
     oneUiCrossTaskAnimation: Boolean,
     fullscreenDirectBack: Boolean,
     returnHomeIconPreview: Boolean,
-    javaHomeLauncher: Boolean,
     configurationEnabled: Boolean,
     onHyperOsIndicatorToggle: (Boolean) -> Unit,
     onHyperOsIndicatorBlurToggle: (Boolean) -> Unit,
@@ -1149,7 +1115,6 @@ private fun SideGestureGroupCard(
     onOneUiCrossTaskAnimationToggle: (Boolean) -> Unit,
     onFullscreenDirectBackToggle: (Boolean) -> Unit,
     onReturnHomeIconPreviewToggle: (Boolean) -> Unit,
-    onJavaHomeLauncherToggle: (Boolean) -> Unit,
     onOpenGestureTriggerSettings: () -> Unit,
     backdrop: Backdrop,
     modifier: Modifier = Modifier,
@@ -1260,100 +1225,13 @@ private fun SideGestureGroupCard(
             },
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
-            val context = LocalContext.current
-            // A selection change is applied only after its confirmation dialog.
-            var pendingJavaLauncher by remember { mutableStateOf<Boolean?>(null) }
-            val javaLauncherEmbedded = remember {
-                File(context.applicationInfo.nativeLibraryDir, JAVA_LAUNCHER_LIBRARY).isFile
-            }
-            // The switch restarts MiuiHome a few seconds after the selection changes.
-            val runningJavaLauncher by produceState<Boolean?>(null, javaHomeLauncher) {
-                repeat(10) {
-                    value = withContext(Dispatchers.IO) { isRunningJavaLauncher(context) }
-                    delay(1000)
-                }
-            }
-            if (javaLauncherEmbedded) GlassDropdownPreference(
-                backdrop = backdrop,
-                items = listOf(
-                    stringResource(R.string.launcher_implementation_native),
-                    stringResource(R.string.launcher_implementation_java),
-                ),
-                selectedIndex = if (javaHomeLauncher) 1 else 0,
-                title = stringResource(R.string.launcher_implementation_title),
-                summary = stringResource(
-                    if (javaHomeLauncher) {
-                        R.string.launcher_implementation_java_summary
-                    } else {
-                        R.string.launcher_implementation_native_summary
-                    },
-                    when (runningJavaLauncher) {
-                        true -> stringResource(R.string.launcher_implementation_java)
-                        false -> stringResource(R.string.launcher_implementation_native)
-                        null -> "…"
-                    },
-                ),
+            SwitchPreference(
+                title = stringResource(R.string.return_home_icon_preview_title),
+                summary = stringResource(R.string.return_home_icon_preview_summary),
+                checked = returnHomeIconPreview,
                 enabled = configurationEnabled,
-                onSelectedIndexChange = { selectedIndex ->
-                    val wantJava = selectedIndex == 1
-                    if (wantJava != javaHomeLauncher) pendingJavaLauncher = wantJava
-                },
+                onCheckedChange = onReturnHomeIconPreviewToggle,
             )
-            GlassDialog(
-                show = pendingJavaLauncher != null,
-                backdrop = backdrop,
-                title = stringResource(
-                    if (pendingJavaLauncher == true) {
-                        R.string.launcher_switch_java_title
-                    } else {
-                        R.string.launcher_switch_native_title
-                    },
-                ),
-                summary = stringResource(
-                    if (pendingJavaLauncher == true) {
-                        R.string.launcher_switch_java_body
-                    } else {
-                        R.string.launcher_switch_native_body
-                    },
-                ),
-                onDismissRequest = { pendingJavaLauncher = null },
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    GlassDialogButton(
-                        onClick = { pendingJavaLauncher = null },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(
-                            text = stringResource(R.string.cancel),
-                            style = MiuixTheme.textStyles.button,
-                        )
-                    }
-                    GlassDialogButton(
-                        onClick = {
-                            val target = pendingJavaLauncher
-                            pendingJavaLauncher = null
-                            if (target != null) onJavaHomeLauncherToggle(target)
-                        },
-                        modifier = Modifier.weight(1f),
-                        role = GlassDialogButtonRole.Primary,
-                    ) {
-                        Text(
-                            text = stringResource(R.string.launcher_switch_confirm),
-                            style = MiuixTheme.textStyles.button,
-                        )
-                    }
-                }
-            }
-            // The Android 17 preview patch targets the native launcher only.
-            if (!javaHomeLauncher) {
-                SwitchPreference(
-                    title = stringResource(R.string.return_home_icon_preview_title),
-                    summary = stringResource(R.string.return_home_icon_preview_summary),
-                    checked = returnHomeIconPreview,
-                    enabled = configurationEnabled,
-                    onCheckedChange = onReturnHomeIconPreviewToggle,
-                )
-            }
         }
     }
 }
@@ -1432,14 +1310,4 @@ private fun ContextualSearchNavigationCard(
             onClick = onClick,
         )
     }
-}
-
-private const val JAVA_LAUNCHER_LIBRARY = "libjavahome_launcher.so"
-
-/** A dex MiuiHome is the Java launcher; the Android 17 native launcher ships no code. */
-private fun isRunningJavaLauncher(context: Context): Boolean? = try {
-    val info = context.packageManager.getApplicationInfo("com.miui.home", 0)
-    (info.flags and android.content.pm.ApplicationInfo.FLAG_HAS_CODE) != 0
-} catch (_: Throwable) {
-    null
 }

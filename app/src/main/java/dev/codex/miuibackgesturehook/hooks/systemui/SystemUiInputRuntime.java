@@ -591,11 +591,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 moduleLog(Log.INFO, TAG,
                         "Claimed navigation-handle long press for contextual search"
                                 + ", displayId=" + displayId);
-                // SystemUI owns this trigger, so it also emits the post-success feedback the
-                // native launcher path receives through MODULE_CONTEXTUAL_SEARCH_TRIGGERED.
-                if (invokeContextualSearchService()) {
-                    playContextualSearchHaptic(navigationView.getContext());
-                }
+                invokeContextualSearchService();
             } catch (Throwable throwable) {
                 moduleLog(Log.WARN, TAG,
                         "Failed to claim contextual-search long press", throwable);
@@ -1134,7 +1130,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean handleMotionEvent(MotionEvent event) {
             int action = event.getActionMasked();
             if (action != MotionEvent.ACTION_DOWN && gestureCandidate
-                    && usesNativeMiuiHome()
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
                     && downLauncherStateOwnerEpoch > 0L
                     && downLauncherStateOwnerEpoch
                     != miuiLauncherDartStateOwnerEpoch) {
@@ -1323,7 +1319,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && gestureCandidate
                     && !miuiHomeInputAccepted
                     && token.generation == systemUiInputArbiterGeneration
-                    && (!usesNativeMiuiHome()
+                    && (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN
                     || (token.launcherStateOwnerEpoch > 0L
                     && token.launcherStateOwnerEpoch
                     == downLauncherStateOwnerEpoch))
@@ -1597,7 +1593,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && !launcherShade
                     && miuiLauncherXiaoAiVisible;
             boolean launcherHomeSurface = launcherHome && displayId == 0
-                    && usesNativeMiuiHome()
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
                     && !launcherShade && !launcherXiaoAi && !miuiOverviewVisible
                     && miuiLauncherHomeSurfaceVisible;
             boolean launcherOpenBreak = displayId == 0
@@ -1622,7 +1618,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && !launcherOpenBreak
                     && !launcherDrawer;
             boolean launcherEditing = launcherHome
-                    && !usesNativeMiuiHome()
+                    && Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN
                     && !launcherShade
                     && !launcherXiaoAi
                     && miuiLauncherEditing
@@ -3712,7 +3708,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     && expectedInputMonitorEpoch == inputMonitorEpoch.get()
                     && expectedController == controller
                     && inputIdentity.generation == systemUiInputArbiterGeneration
-                    && (!usesNativeMiuiHome()
+                    && (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN
                     || (inputIdentity.launcherStateOwnerEpoch > 0L
                     && inputIdentity.launcherStateOwnerEpoch
                     == miuiLauncherDartStateOwnerEpoch))

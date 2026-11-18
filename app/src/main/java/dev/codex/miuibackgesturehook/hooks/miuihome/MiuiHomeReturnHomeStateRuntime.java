@@ -91,19 +91,8 @@ abstract class MiuiHomeReturnHomeStateRuntime extends SystemUiHookRuntime {
             this.shellBackAnimation = shellBackAnimation;
             this.classLoader = classLoader;
             this.context = context;
-            // Android 17 removed the departing target from BackMotionEvent after the flag
-            // shipped; a launcher process may not see the framework Flags class either.
-            this.removeDepartTargetFromMotion = !hasBackMotionDepartingTarget()
-                    || readWindowFlag("removeDepartTargetFromMotion", classLoader, false);
-        }
-
-        private boolean hasBackMotionDepartingTarget() {
-            try {
-                BackMotionEvent.class.getMethod("getDepartingAnimationTarget");
-                return true;
-            } catch (NoSuchMethodException missing) {
-                return false;
-            }
+            this.removeDepartTargetFromMotion = readWindowFlag(
+                    "removeDepartTargetFromMotion", classLoader, false);
         }
 
         protected abstract void dispatchShellBinderDeath();
