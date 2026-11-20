@@ -67,6 +67,7 @@ val hasEnvSigningConfig = listOf(
 android {
     namespace = "dev.codex.miuibackgesturehook"
     compileSdk = 37
+    compileSdkMinor = 2
     ndkVersion = "30.0.16138531"
 
     buildFeatures {
@@ -153,6 +154,8 @@ dependencies {
     implementation(libs.activity.compose)
     implementation(libs.compose.material.icons.extended)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.miuix.core.android)
+    implementation(libs.miuix.material.android)
     implementation(libs.miuix.blur.android)
     implementation(libs.miuix.glass.android)
     implementation(libs.miuix.glass.icons.android)

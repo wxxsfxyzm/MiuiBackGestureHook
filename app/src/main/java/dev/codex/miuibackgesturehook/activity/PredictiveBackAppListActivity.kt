@@ -13,13 +13,16 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.LruCache
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Image
@@ -36,9 +39,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -49,7 +52,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -64,22 +71,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -87,6 +101,7 @@ import androidx.core.graphics.drawable.toBitmap
 import dev.codex.miuibackgesturehook.ModuleApplication
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
+import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -96,37 +111,52 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
-import top.yukonga.miuix.kmp.basic.DropdownImpl
-import top.yukonga.miuix.kmp.basic.FloatingActionButton
+import top.yukonga.miuix.kmp.basic.DropdownEntry
+import top.yukonga.miuix.kmp.basic.DropdownItem
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
-import top.yukonga.miuix.kmp.basic.InputField
-import top.yukonga.miuix.kmp.basic.ListPopupColumn
-import top.yukonga.miuix.kmp.basic.ListPopupDefaults
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
-import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop
-import dev.codex.miuibackgesturehook.util.miuixBlurEffect
-import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
+import top.yukonga.miuix.kmp.glass.GlassDialog
+import top.yukonga.miuix.kmp.glass.GlassDialogButton
+import top.yukonga.miuix.kmp.glass.GlassDialogButtonRole
+import top.yukonga.miuix.kmp.glass.GlassDropdownPopup
+import top.yukonga.miuix.kmp.glass.GlassFloatingActionButton
+import top.yukonga.miuix.kmp.glass.GlassIconButton
+import top.yukonga.miuix.kmp.glass.GlassIconDropdownMenu
+import top.yukonga.miuix.kmp.glass.GlassPopupAnchor
+import top.yukonga.miuix.kmp.glass.GlassPopupDefaults
+import top.yukonga.miuix.kmp.glass.GlassPopupItem
+import top.yukonga.miuix.kmp.glass.GlassSearchOverlayDefaults
+import top.yukonga.miuix.kmp.glass.GlassTopAppBar
+import top.yukonga.miuix.kmp.glass.GlassTopAppBarDefaults
+import top.yukonga.miuix.kmp.glass.glass
+import top.yukonga.miuix.kmp.glass.glassPopupAnchor
+import top.yukonga.miuix.kmp.glass.glassPopupAnchorContent
+import top.yukonga.miuix.kmp.glass.glassPopupAnchorValue
+import top.yukonga.miuix.kmp.glass.rememberGlassPopupAnchor
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowUpDown
-import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.icon.extended.More
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import top.yukonga.miuix.kmp.icon.glass.ChevronBackward
+import top.yukonga.miuix.kmp.icon.glass.Close
+import top.yukonga.miuix.kmp.icon.glass.More
+import top.yukonga.miuix.kmp.icon.glass.Search
+import top.yukonga.miuix.kmp.material.GlassDefaults
+import top.yukonga.miuix.kmp.material.GlassShape
+import top.yukonga.miuix.kmp.material.GlassStyle
+import top.yukonga.miuix.kmp.material.drawGlassShadow
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
-import top.yukonga.miuix.kmp.window.WindowListPopup
 import kotlin.time.Duration.Companion.milliseconds
 
 class PredictiveBackAppListActivity :
@@ -152,13 +182,17 @@ class PredictiveBackAppListActivity :
         setContent {
             val colors = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
             MiuixTheme(colors = colors) {
-                PredictiveBackAppListScreen(
-                    service = xposedService,
-                    serviceStateObserved = serviceStateObserved,
-                    appListPermissionGranted = appListPermissionGranted,
-                    appListPermissionSupported = appListPermissionSupported,
-                    onClose = { finish() },
-                )
+                // Root dialog host, kept outside the page's backdrop recording so glass
+                // dialogs sample the page without sampling themselves.
+                Scaffold(contentWindowInsets = WindowInsets(0)) {
+                    PredictiveBackAppListScreen(
+                        service = xposedService,
+                        serviceStateObserved = serviceStateObserved,
+                        appListPermissionGranted = appListPermissionGranted,
+                        appListPermissionSupported = appListPermissionSupported,
+                        onClose = { finish() },
+                    )
+                }
             }
         }
         if (appListPermissionSupported && !appListPermissionGranted) {
@@ -225,6 +259,16 @@ private const val GET_INSTALLED_APPS_PERMISSION =
 private const val APPLICATION_PREDICTIVE_BACK_ENABLE_FLAG = 1 shl 3
 private const val APPLICATION_PREDICTIVE_BACK_DUMP_PREFIX =
     "enableOnBackInvokedCallback="
+
+private val SearchListTopGap = 8.dp
+
+private data class OrderOption(val labelResId: Int, val type: AppOrderType)
+
+private val orderOptions = listOf(
+    OrderOption(R.string.sort_by_label, AppOrderType.Label),
+    OrderOption(R.string.sort_by_package_name, AppOrderType.PackageName),
+    OrderOption(R.string.sort_by_install_time, AppOrderType.FirstInstallTime),
+)
 
 private val applicationPrivateFlagsExtField by lazy(LazyThreadSafetyMode.PUBLICATION) {
     runCatching { ApplicationInfo::class.java.getField("privateFlagsExt") }.getOrNull()
@@ -306,11 +350,30 @@ private fun PredictiveBackAppListScreen(
                     lazyListState.firstVisibleItemScrollOffset > 0
         }
     }
+    val isContentScrolled by remember { derivedStateOf { lazyListState.canScrollBackward } }
+    // The list starts SearchListTopGap below the bar, so the search pill is only overlapped
+    // past that gap.
+    val searchGapPx = with(LocalDensity.current) { SearchListTopGap.toPx() }
+    val searchHasOverlap by remember(searchGapPx) {
+        derivedStateOf {
+            lazyListState.firstVisibleItemIndex > 0 ||
+                    lazyListState.firstVisibleItemScrollOffset > searchGapPx
+        }
+    }
+    val hapticFeedback = LocalHapticFeedback.current
+    val glassStyle = GlassDefaults.style(isSystemInDarkTheme())
     val layoutDirection = LocalLayoutDirection.current
     val horizontalSafeInsets = WindowInsets.safeDrawing
         .only(WindowInsetsSides.Horizontal)
         .asPaddingValues()
     val topBarBackdrop = rememberMiuixBlurBackdrop()
+    // Popups sample the whole page, bars included, through a separate backdrop.
+    val menuBackdrop = rememberMiuixBlurBackdrop()
+    val moreMenuAnchor = rememberGlassPopupAnchor()
+    var showMoreMenu by remember { mutableStateOf(false) }
+    val orderMenuAnchor = rememberGlassPopupAnchor()
+    var orderSelectorBounds by remember { mutableStateOf(Rect.Zero) }
+    var showOrderMenu by remember { mutableStateOf(false) }
 
     LaunchedEffect(
         appLoadGeneration,
@@ -548,327 +611,385 @@ private fun PredictiveBackAppListScreen(
         else -> null
     }
 
-    Scaffold(
-        topBar = {
-            Column(
-                modifier = Modifier
-                    .miuixBlurEffect(topBarBackdrop)
-                    .background(Color.Transparent),
-            ) {
-                TopAppBar(
-                    color = Color.Transparent,
+    val orderItems = orderOptions.map { stringResource(it.labelResId) }
+    val selectedOrderIndex = orderOptions.indexOfFirst { it.type == orderType }
+        .coerceAtLeast(0)
+    val onOrderIndexChange: (Int) -> Unit = { newIndex ->
+        val newOrderType = orderOptions[newIndex].type
+        orderTypeName = newOrderType.name
+        uiPreferences.edit()
+            .putString(UI_KEY_ORDER_TYPE, newOrderType.name)
+            .apply()
+    }
+    val menuEntries = rememberPredictiveBackMenuEntries(
+        orderInReverse = orderInReverse,
+        selectedFirst = selectedFirst,
+        showSystemApps = showSystemApps,
+        showPackageName = showPackageName,
+        onOrderInReverseChanged = { enabled ->
+            orderInReverse = enabled
+            uiPreferences.edit()
+                .putBoolean(UI_KEY_ORDER_REVERSED, enabled)
+                .apply()
+        },
+        onSelectedFirstChanged = { enabled ->
+            selectedFirst = enabled
+            uiPreferences.edit()
+                .putBoolean(UI_KEY_SELECTED_FIRST, enabled)
+                .apply()
+        },
+        onShowSystemAppsChanged = { enabled ->
+            showSystemApps = enabled
+            uiPreferences.edit()
+                .putBoolean(UI_KEY_SHOW_SYSTEM_APPS, enabled)
+                .apply()
+        },
+        onShowPackageNameChanged = { enabled ->
+            showPackageName = enabled
+            uiPreferences.edit()
+                .putBoolean(UI_KEY_SHOW_PACKAGE_NAME, enabled)
+                .apply()
+        },
+    )
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            modifier = Modifier
+                .fillMaxSize()
+                .layerBackdrop(menuBackdrop),
+            topBar = {
+                GlassTopAppBar(
+                    backdrop = topBarBackdrop,
+                    isContentScrolled = isContentScrolled,
+                    progressiveBlur = true,
+                    style = glassStyle,
                     scrollBehavior = scrollBehavior,
                     title = stringResource(R.string.predictive_back_apps_title),
                     navigationIcon = {
-                        IconButton(onClick = onClose) {
+                        GlassIconButton(onClick = onClose) {
                             Icon(
-                                imageVector = MiuixIcons.Regular.Back,
+                                imageVector = MiuixIcons.Glass.ChevronBackward,
+                                modifier = Modifier.size(24.dp),
+                                tint = MiuixTheme.colorScheme.onSurface,
                                 contentDescription = stringResource(R.string.back),
                             )
                         }
                     },
                     actions = {
-                        PredictiveBackTopAppBarActions(
-                            orderInReverse = orderInReverse,
-                            selectedFirst = selectedFirst,
-                            showSystemApps = showSystemApps,
-                            showPackageName = showPackageName,
-                            onOrderInReverseChanged = { enabled ->
-                                orderInReverse = enabled
-                                uiPreferences.edit()
-                                    .putBoolean(UI_KEY_ORDER_REVERSED, enabled)
-                                    .apply()
-                            },
-                            onSelectedFirstChanged = { enabled ->
-                                selectedFirst = enabled
-                                uiPreferences.edit()
-                                    .putBoolean(UI_KEY_SELECTED_FIRST, enabled)
-                                    .apply()
-                            },
-                            onShowSystemAppsChanged = { enabled ->
-                                showSystemApps = enabled
-                                uiPreferences.edit()
-                                    .putBoolean(UI_KEY_SHOW_SYSTEM_APPS, enabled)
-                                    .apply()
-                            },
-                            onShowPackageNameChanged = { enabled ->
-                                showPackageName = enabled
-                                uiPreferences.edit()
-                                    .putBoolean(UI_KEY_SHOW_PACKAGE_NAME, enabled)
-                                    .apply()
-                            },
+                        GlassIconButton(
+                            onClick = { showMoreMenu = !showMoreMenu },
+                            modifier = Modifier.glassPopupAnchor(
+                                anchor = moreMenuAnchor,
+                                cornerRadius = GlassTopAppBarDefaults.ButtonSize / 2,
+                                floating = isContentScrolled,
+                            ),
+                        ) {
+                            Icon(
+                                imageVector = MiuixIcons.Glass.More,
+                                contentDescription = stringResource(R.string.more_options),
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .glassPopupAnchorContent(moreMenuAnchor),
+                                tint = MiuixTheme.colorScheme.onSurface,
+                            )
+                        }
+                    },
+                    bottomContent = {
+                        GlassSearchBar(
+                            query = query,
+                            onQueryChange = { query = it },
+                            label = stringResource(R.string.predictive_back_search),
+                            backdrop = topBarBackdrop,
+                            hasOverlap = searchHasOverlap,
+                            style = glassStyle,
+                            modifier = Modifier
+                                .padding(
+                                    start = GlassSearchOverlayDefaults.HorizontalPadding +
+                                            horizontalSafeInsets.calculateStartPadding(
+                                                layoutDirection,
+                                            ),
+                                    end = GlassSearchOverlayDefaults.HorizontalPadding +
+                                            horizontalSafeInsets.calculateEndPadding(
+                                                layoutDirection,
+                                            ),
+                                )
+                                .padding(top = 6.dp, bottom = 8.dp),
                         )
                     },
                 )
-                Spacer(modifier = Modifier.size(6.dp))
-                InputField(
-                    query = query,
-                    onQueryChange = { query = it },
-                    onSearch = {},
-                    expanded = false,
-                    onExpandedChange = {},
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(
-                            start = 16.dp + horizontalSafeInsets.calculateStartPadding(
-                                layoutDirection,
-                            ),
-                            end = 16.dp + horizontalSafeInsets.calculateEndPadding(
-                                layoutDirection,
-                            ),
-                        )
-                        .padding(bottom = 8.dp),
-                    label = stringResource(R.string.predictive_back_search),
-                )
-                Card(
-                    modifier = Modifier
-                        .padding(
-                            start = 12.dp + horizontalSafeInsets.calculateStartPadding(
-                                layoutDirection,
-                            ),
-                            end = 12.dp + horizontalSafeInsets.calculateEndPadding(
-                                layoutDirection,
-                            ),
-                        )
-                        .padding(bottom = 8.dp),
-                    insideMargin = PaddingValues(0.dp),
+            },
+            floatingActionButton = {
+                AnimatedVisibility(
+                    visible = showFloating,
+                    enter = scaleIn(),
+                    exit = scaleOut(),
+                    modifier = Modifier.padding(bottom = 16.dp),
                 ) {
-                    ArrowPreference(
-                        title = stringResource(
-                            R.string.predictive_back_compatibility_entry,
-                        ),
-                        onClick = { showCompatibilityDialog = true },
-                    )
+                    GlassFloatingActionButton(
+                        modifier = Modifier.padding(end = 16.dp),
+                        onClick = {
+                            scope.launch {
+                                lazyListState.animateScrollToItem(0)
+                            }
+                        },
+                        backdrop = topBarBackdrop,
+                        style = glassStyle,
+                    ) {
+                        Icon(
+                            imageVector = ArrowUpIcon,
+                            contentDescription = null,
+                            tint = MiuixTheme.colorScheme.onPrimary,
+                        )
+                    }
                 }
-
-                data class OrderData(val labelResId: Int, val type: AppOrderType)
-
-                val orderOptions = remember {
-                    listOf(
-                        OrderData(R.string.sort_by_label, AppOrderType.Label),
-                        OrderData(R.string.sort_by_package_name, AppOrderType.PackageName),
-                        OrderData(R.string.sort_by_install_time, AppOrderType.FirstInstallTime),
+            },
+        ) { paddingValues ->
+            // Hosted by the activity's root Scaffold, outside the menuBackdrop recording.
+            GlassDialog(
+                show = showCompatibilityDialog,
+                backdrop = menuBackdrop,
+                title = stringResource(R.string.predictive_back_warning_title),
+                onDismissRequest = { showCompatibilityDialog = false },
+            ) {
+                Column {
+                    Text(
+                        text = stringResource(R.string.predictive_back_warning_body),
+                        style = MiuixTheme.textStyles.body2,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = stringResource(R.string.predictive_back_restart_note),
+                        style = MiuixTheme.textStyles.body2,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    GlassDialogButton(
+                        onClick = { showCompatibilityDialog = false },
+                        modifier = Modifier.fillMaxWidth(),
+                        role = GlassDialogButtonRole.Primary,
+                    ) {
+                        Text(
+                            text = stringResource(R.string.close),
+                            style = MiuixTheme.textStyles.button,
+                        )
+                    }
                 }
-                val dropdownItems = orderOptions.map { stringResource(it.labelResId) }
-                val selectedIndex = orderOptions.indexOfFirst { it.type == orderType }
-                    .coerceAtLeast(0)
+            }
+            if (appsLoading && apps.isEmpty()) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(
-                            start = 6.dp + horizontalSafeInsets.calculateStartPadding(
-                                layoutDirection,
-                            ),
-                            end = 6.dp + horizontalSafeInsets.calculateEndPadding(
-                                layoutDirection,
-                            ),
-                        )
-                        .padding(bottom = 6.dp),
+                        .fillMaxSize()
+                        .padding(paddingValues),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    MiuixDropdown(
-                        items = dropdownItems,
-                        selectedIndex = selectedIndex,
-                        onSelectedIndexChange = { newIndex ->
-                            val newOrderType = orderOptions[newIndex].type
-                            orderTypeName = newOrderType.name
-                            uiPreferences.edit()
-                                .putString(UI_KEY_ORDER_TYPE, newOrderType.name)
-                                .apply()
-                        },
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        InfiniteProgressIndicator()
+                        Text(
+                            text = stringResource(R.string.predictive_back_loading_apps),
+                            style = MiuixTheme.textStyles.main,
+                        )
+                    }
                 }
-            }
-        },
-        floatingActionButton = {
-            AnimatedVisibility(
-                visible = showFloating,
-                enter = scaleIn(),
-                exit = scaleOut(),
-                modifier = Modifier.padding(bottom = 16.dp),
-            ) {
-                FloatingActionButton(
-                    modifier = Modifier.padding(end = 16.dp),
-                    containerColor = MiuixTheme.colorScheme.surface,
-                    onClick = {
-                        scope.launch {
-                            lazyListState.animateScrollToItem(0)
+            } else {
+                PullToRefresh(
+                    isRefreshing = appsLoading,
+                    onRefresh = {
+                        if (!appsLoading) {
+                            appsLoading = true
+                            appLoadGeneration += 1L
                         }
                     },
-                ) {
-                    Icon(
-                        imageVector = ArrowUpIcon,
-                        contentDescription = null,
-                        tint = MiuixTheme.colorScheme.primary,
-                    )
-                }
-            }
-        },
-    ) { paddingValues ->
-        OverlayDialog(
-            show = showCompatibilityDialog,
-            title = stringResource(R.string.predictive_back_warning_title),
-            onDismissRequest = { showCompatibilityDialog = false },
-        ) {
-            Column {
-                Text(
-                    text = stringResource(R.string.predictive_back_warning_body),
-                    style = MiuixTheme.textStyles.body2,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.predictive_back_restart_note),
-                    style = MiuixTheme.textStyles.body2,
-                )
-                Spacer(Modifier.height(16.dp))
-                TextButton(
-                    text = stringResource(R.string.close),
-                    onClick = { showCompatibilityDialog = false },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-        if (appsLoading && apps.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    InfiniteProgressIndicator()
-                    Text(
-                        text = stringResource(R.string.predictive_back_loading_apps),
-                        style = MiuixTheme.textStyles.main,
-                    )
-                }
-            }
-        } else {
-            PullToRefresh(
-                isRefreshing = appsLoading,
-                onRefresh = {
-                    if (!appsLoading) {
-                        appsLoading = true
-                        appLoadGeneration += 1L
-                    }
-                },
-                modifier = Modifier.fillMaxSize(),
-                topAppBarScrollBehavior = scrollBehavior,
-                contentPadding = paddingValues,
-                refreshTexts = listOf(
-                    stringResource(R.string.pull_to_refresh_hint1),
-                    stringResource(R.string.pull_to_refresh_hint2),
-                    stringResource(R.string.pull_to_refresh_hint3),
-                    stringResource(R.string.pull_to_refresh_hint4),
-                ),
-            ) {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .consumeWindowInsets(paddingValues)
-                        .layerBackdrop(topBarBackdrop)
-                        .scrollEndHaptic()
-                        .overScrollVertical()
-                        .nestedScroll(scrollBehavior.nestedScrollConnection),
-                    state = lazyListState,
-                    contentPadding = PaddingValues(
-                        start = horizontalSafeInsets.calculateStartPadding(layoutDirection),
-                        top = paddingValues.calculateTopPadding() + 8.dp,
-                        end = horizontalSafeInsets.calculateEndPadding(layoutDirection),
-                        bottom = paddingValues.calculateBottomPadding(),
+                    modifier = Modifier.fillMaxSize(),
+                    topAppBarScrollBehavior = scrollBehavior,
+                    contentPadding = paddingValues,
+                    refreshTexts = listOf(
+                        stringResource(R.string.pull_to_refresh_hint1),
+                        stringResource(R.string.pull_to_refresh_hint2),
+                        stringResource(R.string.pull_to_refresh_hint3),
+                        stringResource(R.string.pull_to_refresh_hint4),
                     ),
-                    overscrollEffect = null,
                 ) {
-                    if (statusMessage != null) {
-                        item(key = "configuration_status") {
-                            StatusCard(
-                                message = statusMessage.text,
-                                severity = statusMessage.severity,
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .consumeWindowInsets(paddingValues)
+                            .layerBackdrop(topBarBackdrop)
+                            .scrollEndHaptic()
+                            .overScrollVertical()
+                            .nestedScroll(scrollBehavior.nestedScrollConnection),
+                        state = lazyListState,
+                        contentPadding = PaddingValues(
+                            start = horizontalSafeInsets.calculateStartPadding(layoutDirection),
+                            top = paddingValues.calculateTopPadding() + SearchListTopGap,
+                            end = horizontalSafeInsets.calculateEndPadding(layoutDirection),
+                            bottom = paddingValues.calculateBottomPadding(),
+                        ),
+                        overscrollEffect = null,
+                    ) {
+                        // The compatibility entry and order selector scroll with the list;
+                        // only the search pill stays pinned in the bar.
+                        item(key = "compatibility_entry") {
+                            Card(
                                 modifier = Modifier
                                     .padding(horizontal = 12.dp)
                                     .padding(bottom = 8.dp),
-                            )
-                        }
-                    }
-                    if (appsError != null) {
-                        item(key = "apps_error") {
-                            StatusCard(
-                                message = appsError.orEmpty(),
-                                severity = AppListCardSeverity.Error,
-                                modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .padding(bottom = 8.dp),
-                            )
-                        }
-                    }
-                    if (visibleApps.isEmpty()) {
-                        item(key = "empty") {
-                            EmptyRow()
-                        }
-                    } else {
-                        itemsIndexed(
-                            items = visibleApps,
-                            key = { _, app -> app.packageName },
-                            contentType = { _, _ -> "app_item" },
-                        ) { index, app ->
-                            val cardRadius = CardDefaults.CornerRadius
-                            val shape = when {
-                                visibleApps.size == 1 -> RoundedCornerShape(cardRadius)
-                                index == 0 -> RoundedCornerShape(
-                                    topStart = cardRadius,
-                                    topEnd = cardRadius,
-                                    bottomStart = 0.dp,
-                                    bottomEnd = 0.dp,
-                                )
-
-                                index == visibleApps.lastIndex -> RoundedCornerShape(
-                                    topStart = 0.dp,
-                                    topEnd = 0.dp,
-                                    bottomStart = cardRadius,
-                                    bottomEnd = cardRadius,
-                                )
-
-                                else -> RoundedCornerShape(0.dp)
-                            }
-                            val checked = app.packageName in selectedPackages
-                            MiuixAppItem(
-                                modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .zIndex(-index.toFloat())
-                                    .animateItem(
-                                        fadeInSpec = null,
-                                        fadeOutSpec = null,
-                                        placementSpec = spring(
-                                            stiffness = Spring.StiffnessMediumLow,
-                                            visibilityThreshold =
-                                                IntOffset.VisibilityThreshold,
-                                        ),
+                                insideMargin = PaddingValues(0.dp),
+                            ) {
+                                ArrowPreference(
+                                    title = stringResource(
+                                        R.string.predictive_back_compatibility_entry,
                                     ),
-                                app = app,
-                                iconCache = iconCache,
-                                iconSize = iconSize,
-                                checked = checked,
-                                enabled = configurationEnabled,
-                                shape = shape,
-                                showPackageName = showPackageName,
-                                onToggle = { isChecked ->
-                                    persistSelection(
-                                        if (isChecked) {
-                                            selectedPackages + app.packageName
-                                        } else {
-                                            selectedPackages - app.packageName
-                                        },
-                                    )
+                                    onClick = { showCompatibilityDialog = true },
+                                )
+                            }
+                        }
+                        item(key = "order_selector", contentType = "order_selector") {
+                            GlassOrderSelector(
+                                text = orderItems[selectedOrderIndex],
+                                anchor = orderMenuAnchor,
+                                onClick = {
+                                    if (!showOrderMenu) {
+                                        hapticFeedback.performHapticFeedback(
+                                            HapticFeedbackType.ContextClick,
+                                        )
+                                    }
+                                    showOrderMenu = !showOrderMenu
                                 },
+                                onBoundsChange = { orderSelectorBounds = it },
+                                modifier = Modifier
+                                    .padding(horizontal = 6.dp)
+                                    .padding(bottom = 6.dp),
                             )
+                        }
+                        if (statusMessage != null) {
+                            item(key = "configuration_status") {
+                                StatusCard(
+                                    message = statusMessage.text,
+                                    severity = statusMessage.severity,
+                                    modifier = Modifier
+                                        .padding(horizontal = 12.dp)
+                                        .padding(bottom = 8.dp),
+                                )
+                            }
+                        }
+                        if (appsError != null) {
+                            item(key = "apps_error") {
+                                StatusCard(
+                                    message = appsError.orEmpty(),
+                                    severity = AppListCardSeverity.Error,
+                                    modifier = Modifier
+                                        .padding(horizontal = 12.dp)
+                                        .padding(bottom = 8.dp),
+                                )
+                            }
+                        }
+                        if (visibleApps.isEmpty()) {
+                            item(key = "empty") {
+                                EmptyRow()
+                            }
+                        } else {
+                            itemsIndexed(
+                                items = visibleApps,
+                                key = { _, app -> app.packageName },
+                                contentType = { _, _ -> "app_item" },
+                            ) { index, app ->
+                                val cardRadius = CardDefaults.CornerRadius
+                                val shape = when {
+                                    visibleApps.size == 1 -> RoundedCornerShape(cardRadius)
+                                    index == 0 -> RoundedCornerShape(
+                                        topStart = cardRadius,
+                                        topEnd = cardRadius,
+                                        bottomStart = 0.dp,
+                                        bottomEnd = 0.dp,
+                                    )
+
+                                    index == visibleApps.lastIndex -> RoundedCornerShape(
+                                        topStart = 0.dp,
+                                        topEnd = 0.dp,
+                                        bottomStart = cardRadius,
+                                        bottomEnd = cardRadius,
+                                    )
+
+                                    else -> RoundedCornerShape(0.dp)
+                                }
+                                val checked = app.packageName in selectedPackages
+                                MiuixAppItem(
+                                    modifier = Modifier
+                                        .padding(horizontal = 12.dp)
+                                        .zIndex(-index.toFloat())
+                                        .animateItem(
+                                            fadeInSpec = null,
+                                            fadeOutSpec = null,
+                                            placementSpec = spring(
+                                                stiffness = Spring.StiffnessMediumLow,
+                                                visibilityThreshold =
+                                                    IntOffset.VisibilityThreshold,
+                                            ),
+                                        ),
+                                    app = app,
+                                    iconCache = iconCache,
+                                    iconSize = iconSize,
+                                    checked = checked,
+                                    enabled = configurationEnabled,
+                                    shape = shape,
+                                    showPackageName = showPackageName,
+                                    onToggle = { isChecked ->
+                                        persistSelection(
+                                            if (isChecked) {
+                                                selectedPackages + app.packageName
+                                            } else {
+                                                selectedPackages - app.packageName
+                                            },
+                                        )
+                                    },
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+        // Popups sample the whole page, bars included, so they are hosted outside the Scaffold.
+        val glassVisuals = GlassPopupDefaults.visuals(style = glassStyle)
+        GlassDropdownPopup(
+            show = showOrderMenu,
+            onDismissRequest = { showOrderMenu = false },
+            anchorBounds = orderSelectorBounds,
+            backdrop = menuBackdrop,
+            anchor = orderMenuAnchor,
+            visuals = glassVisuals,
+        ) {
+            orderItems.forEachIndexed { index, text ->
+                GlassPopupItem(
+                    text = text,
+                    selected = index == selectedOrderIndex,
+                    onClick = {
+                        hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                        showOrderMenu = false
+                        onOrderIndexChange(index)
+                    },
+                )
+            }
+        }
+        GlassIconDropdownMenu(
+            show = showMoreMenu,
+            onDismissRequest = { showMoreMenu = false },
+            anchor = moreMenuAnchor,
+            anchorContent = {
+                Icon(
+                    imageVector = MiuixIcons.Glass.More,
+                    contentDescription = stringResource(R.string.more_options),
+                    modifier = Modifier.size(24.dp),
+                    tint = MiuixTheme.colorScheme.onSurface,
+                )
+            },
+            entries = menuEntries,
+            backdrop = menuBackdrop,
+            visuals = glassVisuals,
+            collapseOnSelection = false,
+        )
     }
 }
 
@@ -898,7 +1019,7 @@ private fun StatusCard(
 }
 
 @Composable
-private fun PredictiveBackTopAppBarActions(
+private fun rememberPredictiveBackMenuEntries(
     orderInReverse: Boolean,
     selectedFirst: Boolean,
     showSystemApps: Boolean,
@@ -907,96 +1028,184 @@ private fun PredictiveBackTopAppBarActions(
     onSelectedFirstChanged: (Boolean) -> Unit,
     onShowSystemAppsChanged: (Boolean) -> Unit,
     onShowPackageNameChanged: (Boolean) -> Unit,
-) {
-    val showMenu = remember { mutableStateOf(false) }
-    val hapticFeedback = LocalHapticFeedback.current
-    val menuOptions = remember(
+): List<DropdownEntry> {
+    val reverseText = stringResource(R.string.sort_by_reverse_order)
+    val selectedFirstText = stringResource(R.string.sort_by_selected_first)
+    val systemAppText = stringResource(R.string.sort_by_show_system_app)
+    val packageNameText = stringResource(R.string.sort_by_show_package_name)
+    return remember(
         orderInReverse,
         selectedFirst,
         showSystemApps,
         showPackageName,
+        reverseText,
+        selectedFirstText,
+        systemAppText,
+        packageNameText,
     ) {
         listOf(
-            R.string.sort_by_reverse_order to orderInReverse,
-            R.string.sort_by_selected_first to selectedFirst,
-            R.string.sort_by_show_system_app to showSystemApps,
-            R.string.sort_by_show_package_name to showPackageName,
-        )
-    }
-
-    WindowListPopup(
-        show = showMenu.value,
-        popupPositionProvider = ListPopupDefaults.ContextMenuPositionProvider,
-        alignment = PopupPositionProvider.Align.TopEnd,
-        onDismissRequest = { showMenu.value = false },
-    ) {
-        ListPopupColumn {
-            menuOptions.forEachIndexed { index, (labelResId, isSelected) ->
-                DropdownImpl(
-                    text = stringResource(labelResId),
-                    optionSize = menuOptions.size,
-                    isSelected = isSelected,
-                    onSelectedIndexChange = { selectedIndex ->
-                        when (selectedIndex) {
-                            0 -> onOrderInReverseChanged(!orderInReverse)
-                            1 -> onSelectedFirstChanged(!selectedFirst)
-                            2 -> onShowSystemAppsChanged(!showSystemApps)
-                            3 -> onShowPackageNameChanged(!showPackageName)
-                        }
-                        hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
-                    },
-                    index = index,
-                )
-            }
-        }
-    }
-
-    IconButton(
-        onClick = { showMenu.value = true },
-        holdDownState = showMenu.value,
-    ) {
-        Icon(
-            imageVector = MiuixIcons.Regular.More,
-            tint = MiuixTheme.colorScheme.onBackground,
-            contentDescription = stringResource(R.string.more_options),
+            DropdownEntry(
+                items = listOf(
+                    DropdownItem(
+                        text = reverseText,
+                        selected = orderInReverse,
+                        onClick = { onOrderInReverseChanged(!orderInReverse) },
+                    ),
+                    DropdownItem(
+                        text = selectedFirstText,
+                        selected = selectedFirst,
+                        onClick = { onSelectedFirstChanged(!selectedFirst) },
+                    ),
+                    DropdownItem(
+                        text = systemAppText,
+                        selected = showSystemApps,
+                        onClick = { onShowSystemAppsChanged(!showSystemApps) },
+                    ),
+                    DropdownItem(
+                        text = packageNameText,
+                        selected = showPackageName,
+                        onClick = { onShowPackageNameChanged(!showPackageName) },
+                    ),
+                ),
+            ),
         )
     }
 }
 
-// Copyright 2025, miuix-kotlin-multiplatform contributors
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * Inline search pill mirroring the [top.yukonga.miuix.kmp.glass.GlassSearchOverlay] pill,
+ * including its solid-to-glass transition once list content scrolls under it, but filtering
+ * the page list in place.
+ */
 @Composable
-private fun MiuixDropdown(
-    items: List<String>,
-    selectedIndex: Int,
-    onSelectedIndexChange: (Int) -> Unit,
+private fun GlassSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    label: String,
+    backdrop: LayerBackdrop,
+    hasOverlap: Boolean,
+    style: GlassStyle,
     modifier: Modifier = Modifier,
 ) {
-    val isDropdownExpanded = remember { mutableStateOf(false) }
-    val hapticFeedback = LocalHapticFeedback.current
+    val colors = MiuixTheme.colorScheme
+    val mutedColor = if (MiuixTheme.isDynamicColor) {
+        colors.onSurfaceVariantSummary
+    } else {
+        colors.disabledOnSurface
+    }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val shape = remember { GlassShape(GlassSearchOverlayDefaults.BarHeight / 2) }
+    val material = GlassSearchOverlayDefaults.material()
+    val stroke = GlassSearchOverlayDefaults.stroke()
+    val shadow = GlassSearchOverlayDefaults.shadow()
+    val materialProgress by animateFloatAsState(
+        targetValue = if (hasOverlap) 1f else 0f,
+        animationSpec = tween(450, easing = LinearEasing),
+        label = "appListSearchPillMaterial",
+    )
 
+    BasicTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = modifier
+            .fillMaxWidth()
+            .height(GlassSearchOverlayDefaults.BarHeight),
+        singleLine = true,
+        textStyle = MiuixTheme.textStyles.body1.copy(color = colors.onSurface),
+        cursorBrush = SolidColor(colors.primary),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { keyboard?.hide() }),
+        decorationBox = { field ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .drawBehind { drawGlassShadow(shape, shadow, materialProgress) }
+                    .background(colors.surfaceContainerHigh, CircleShape),
+            ) {
+                if (materialProgress > 0.001f) {
+                    Box(
+                        modifier = Modifier
+                            .matchParentSize()
+                            .graphicsLayer { alpha = materialProgress }
+                            .glass(
+                                backdrop = backdrop,
+                                shape = shape,
+                                style = style,
+                                material = material,
+                                stroke = stroke,
+                                shading = false,
+                            ),
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = MiuixIcons.Glass.Search,
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp),
+                        tint = mutedColor,
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (query.isEmpty()) {
+                            Text(
+                                text = label,
+                                color = mutedColor,
+                                style = MiuixTheme.textStyles.body1,
+                            )
+                        }
+                        field()
+                    }
+                    if (query.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onQueryChange("") },
+                            modifier = Modifier.size(24.dp),
+                        ) {
+                            Icon(
+                                imageVector = MiuixIcons.Glass.Close,
+                                contentDescription = stringResource(R.string.clear_search),
+                                modifier = Modifier.size(16.dp * (7f / 6f)),
+                                tint = mutedColor,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+// Copyright 2025, miuix-kotlin-multiplatform contributors
+// SPDX-License-Identifier: Apache-2.0
+/** Order selector with the classic dropdown look, anchoring a glass dropdown to its value. */
+@Composable
+private fun GlassOrderSelector(
+    text: String,
+    anchor: GlassPopupAnchor,
+    onClick: () -> Unit,
+    onBoundsChange: (Rect) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Box(modifier = modifier) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = {
-                        isDropdownExpanded.value = !isDropdownExpanded.value
-                        if (isDropdownExpanded.value) {
-                            hapticFeedback.performHapticFeedback(
-                                HapticFeedbackType.ContextClick,
-                            )
-                        }
-                    },
+                    onClick = onClick,
                 )
-                .padding(horizontal = 28.dp, vertical = 8.dp),
+                .padding(horizontal = 28.dp, vertical = 8.dp)
+                .onGloballyPositioned { onBoundsChange(it.boundsInWindow()) }
+                .glassPopupAnchorValue(anchor),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = items[selectedIndex],
+                text = text,
                 fontSize = MiuixTheme.textStyles.subtitle.fontSize,
                 fontWeight = FontWeight.Bold,
                 color = MiuixTheme.colorScheme.onBackgroundVariant,
@@ -1010,34 +1219,8 @@ private fun MiuixDropdown(
                 contentDescription = stringResource(R.string.toggle_dropdown),
             )
         }
-
-        WindowListPopup(
-            show = isDropdownExpanded.value,
-            alignment = PopupPositionProvider.Align.Start,
-            popupPositionProvider = DropdownWithStartMarginProvider,
-            onDismissRequest = { isDropdownExpanded.value = false },
-        ) {
-            ListPopupColumn {
-                items.forEachIndexed { index, text ->
-                    DropdownImpl(
-                        text = text,
-                        optionSize = items.size,
-                        isSelected = selectedIndex == index,
-                        index = index,
-                        onSelectedIndexChange = { newIndex ->
-                            hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
-                            onSelectedIndexChange(newIndex)
-                            isDropdownExpanded.value = false
-                        },
-                    )
-                }
-            }
-        }
     }
 }
-
-private val DropdownWithStartMarginProvider =
-    ListPopupDefaults.dropdownPositionProvider(12.dp, 8.dp)
 
 private val ArrowUpIcon: ImageVector by lazy {
     ImageVector.Builder(

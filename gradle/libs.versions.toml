@@ -6,7 +6,7 @@ dexkit = "2.3.0"
 activityCompose = "1.13.0"
 composeMaterialIconsExtended = "1.7.8"
 kotlinxCoroutines = "1.11.0"
-miuix = "0.9.4-b7a5f08f-SNAPSHOT"
+miuix = "0.9.5-188f2eb5-SNAPSHOT"
 
 [libraries]
 libxposed-api = { module = "io.github.libxposed:api", version.ref = "libxposed" }
@@ -15,6 +15,8 @@ dexkit = { module = "org.luckypray:dexkit", version.ref = "dexkit" }
 activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended", version.ref = "composeMaterialIconsExtended" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+miuix-core-android = { module = "top.yukonga.miuix.kmp:miuix-core-android", version.ref = "miuix" }
+miuix-material-android = { module = "top.yukonga.miuix.kmp:miuix-material-android", version.ref = "miuix" }
 miuix-blur-android = { module = "top.yukonga.miuix.kmp:miuix-blur-android", version.ref = "miuix" }
 miuix-glass-android = { module = "top.yukonga.miuix.kmp:miuix-glass-android", version.ref = "miuix" }
 miuix-glass-icons-android = { module = "top.yukonga.miuix.kmp:miuix-glass-icons-android", version.ref = "miuix" }

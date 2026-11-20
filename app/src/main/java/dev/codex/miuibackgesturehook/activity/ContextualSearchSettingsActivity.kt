@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import dev.codex.miuibackgesturehook.ModuleApplication
 import dev.codex.miuibackgesturehook.PredictiveBackPreferences
 import dev.codex.miuibackgesturehook.R
+import dev.codex.miuibackgesturehook.util.MiuixProgressiveAppBarSurface
 import dev.codex.miuibackgesturehook.util.rememberMiuixBlurBackdrop
 import io.github.libxposed.service.XposedService
 import java.util.concurrent.atomic.AtomicLong
@@ -432,28 +433,36 @@ private fun ContextualSearchSettingsScreen(
 
     Scaffold(
         topBar = {
-            GlassTopAppBar(
-                backdrop = topBarBackdrop,
-                isContentScrolled = isContentScrolled,
-                progressiveBlur = true,
-                scrollBehavior = scrollBehavior,
-                title = stringResource(R.string.contextual_search_title),
-                navigationIcon = {
-                    val layoutDirection = LocalLayoutDirection.current
-                    GlassIconButton(onClick = onClose) {
-                        Icon(
-                            imageVector = MiuixIcons.Glass.ChevronBackward,
-                            modifier = Modifier
-                                .size(24.dp)
-                                .graphicsLayer {
-                                    if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
-                                },
-                            tint = MiuixTheme.colorScheme.onSurface,
-                            contentDescription = stringResource(R.string.back),
-                        )
-                    }
-                },
-            )
+            // This page is usually shorter than the screen, so the bar's own band (which only
+            // shows once the list scrolls) would leave overscrolled content unblurred.
+            MiuixProgressiveAppBarSurface(backdrop = topBarBackdrop) { renderedBackdrop ->
+                GlassTopAppBar(
+                    backdrop = topBarBackdrop,
+                    isContentScrolled = isContentScrolled,
+                    backgroundAlpha = { 0f },
+                    scrollBehavior = scrollBehavior,
+                    title = stringResource(R.string.contextual_search_title),
+                    navigationIcon = {
+                        val layoutDirection = LocalLayoutDirection.current
+                        GlassIconButton(
+                            onClick = onClose,
+                            inheritTopBarMaterial = false,
+                            backdrop = renderedBackdrop,
+                        ) {
+                            Icon(
+                                imageVector = MiuixIcons.Glass.ChevronBackward,
+                                modifier = Modifier
+                                    .size(24.dp)
+                                    .graphicsLayer {
+                                        if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                                    },
+                                tint = MiuixTheme.colorScheme.onSurface,
+                                contentDescription = stringResource(R.string.back),
+                            )
+                        }
+                    },
+                )
+            }
         },
     ) { paddingValues ->
         Box(
