@@ -1201,6 +1201,16 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             if (!gestureCandidate) {
                 return false;
             }
+            if (!matchesCurrentPhysicalStream(event)) {
+                moduleLog(Log.WARN, TAG,
+                        "Ignored MOVE from a stale physical input stream"
+                                + ", eventDownTime=" + event.getDownTime()
+                                + ", currentDownTime=" + downTime
+                                + ", eventDeviceId=" + event.getDeviceId()
+                                + ", currentDeviceId=" + downDeviceId
+                                + ", edge=" + activeEdge);
+                return pilfered;
+            }
             if (!miuiHomeInputAccepted) {
                 replacePendingMotionEvent(event);
                 MiuiHomeAcceptedInputToken token = acceptedInputToken.get();
@@ -1375,6 +1385,17 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             if (!gestureCandidate) {
                 return false;
             }
+            if (!matchesCurrentPhysicalStream(event)) {
+                moduleLog(Log.WARN, TAG,
+                        "Ignored terminal event from a stale physical input stream"
+                                + ", action=" + event.getActionMasked()
+                                + ", eventDownTime=" + event.getDownTime()
+                                + ", currentDownTime=" + downTime
+                                + ", eventDeviceId=" + event.getDeviceId()
+                                + ", currentDeviceId=" + downDeviceId
+                                + ", edge=" + activeEdge);
+                return pilfered;
+            }
             if (!miuiHomeInputAccepted) {
                 resetCandidate();
                 return false;
@@ -1406,6 +1427,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             boolean handled = pilfered;
             resetCandidate();
             return handled;
+        }
+
+        protected boolean matchesCurrentPhysicalStream(MotionEvent event) {
+            return gestureCandidate
+                    && event.getDownTime() == downTime
+                    && event.getDeviceId() == downDeviceId
+                    && event.getSource() == downSource;
         }
 
         protected boolean nativeTransientBarsClaimedGesture() {
@@ -2211,6 +2239,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
 
         protected final class ShellGestureSession {
             final long id = systemUiShellGestureSessionIds.incrementAndGet();
+            final long gestureStreamId;
             final Object controller;
             final Executor executor;
             final long inputEpoch;
@@ -2231,11 +2260,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             final AtomicBoolean completionConsumed = new AtomicBoolean();
 
             ShellGestureSession(ShellOwner owner, ShellStartSnapshot start,
+                                long gestureStreamId,
                                 int edge, float startX, float startY,
                                 float linearDistance,
                                 float maxDistance, float nonLinearFactor,
                                 MiuiHomeAcceptedInputToken inputIdentity,
                                 RecentsOpenSession.Attempt recentsOpening) {
+                this.gestureStreamId = gestureStreamId;
                 this.recentsOpening = recentsOpening;
                 this.controller = owner.controller;
                 this.executor = owner.executor;
@@ -2267,6 +2298,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected boolean shellGestureStarted;
         protected boolean shellGestureStartDeferred;
         protected volatile boolean gestureSuppressed;
+        protected boolean shellSlotBlockedForStream;
         protected boolean legacyInterruptGesture;
         protected boolean aospNullNavigationGesture;
         protected Object legacyRunningOpenInfo;
@@ -2285,7 +2317,9 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
         protected MiuiHomeAcceptedInputToken acceptedInputIdentity;
         protected ShellOwner gestureOwner;
         protected final AtomicLong inputMonitorEpoch = new AtomicLong();
+        protected final AtomicLong gestureStreamIds = new AtomicLong();
         protected volatile boolean inputMonitorAttached;
+        protected volatile long activeGestureStreamId;
         protected int activeEdge;
         protected float downX;
         protected float downY;
@@ -2557,11 +2591,15 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                                  boolean launcherXiaoAiCandidate,
                                  boolean launcherDrawerCandidate,
                                  boolean launcherEditingCandidate) throws Exception {
+            activeGestureStreamId = gestureStreamIds.incrementAndGet();
+            boolean shellSlotReady =
+                    retireShellSessionForNewPhysicalStream(activeGestureStreamId);
             clearLegacyBackGuard("newPhysicalGesture");
             gestureActive = true;
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
             gestureSuppressed = false;
+            shellSlotBlockedForStream = false;
             legacyInterruptGesture = false;
             aospNullNavigationGesture = false;
             legacyRunningOpenInfo = null;
@@ -2618,6 +2656,13 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         + ", generation=" + launcherOpenBreakGeneration
                         + ", attempt=" + launcherOpenBreakAttemptId
                         + ", edge=" + activeEdge + ", x=" + downX + ", y=" + downY);
+                return true;
+            }
+            if (!shellSlotReady) {
+                gestureSuppressed = true;
+                shellSlotBlockedForStream = true;
+                moduleLog(Log.INFO, TAG, "Suppressed new physical stream while Shell slot is busy"
+                        + ", gestureStreamId=" + activeGestureStreamId);
                 return true;
             }
             if (launcherOverviewGesture || launcherShadeGesture
@@ -2907,8 +2952,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return false;
             }
             if (gestureSuppressed) {
-                dispatchToEdgePlugin(event, activeEdge);
-                clearControllerTriggerAfterVisualOnlyGesture();
+                if (!shellSlotBlockedForStream) {
+                    dispatchToEdgePlugin(event, activeEdge);
+                    clearControllerTriggerAfterVisualOnlyGesture();
+                }
                 clearLocalGestureState();
                 moduleLog(Log.INFO, TAG, "Finished suppressed SystemUI back gesture");
                 return true;
@@ -3213,6 +3260,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             float startX = downX;
             float startY = downY;
             int startEdge = activeEdge;
+            long startGestureStreamId = activeGestureStreamId;
             if (!prepareShellSessionSlotForStart()) {
                 return false;
             }
@@ -3308,7 +3356,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                         handleAbandonedShellStart(owner, startResult.get(),
                                 abandonedSession, linearDistance,
                                 maxDistance, nonLinearFactor,
-                                startX, startY, startEdge);
+                                startX, startY, startEdge,
+                                startGestureStreamId);
                     }
                 }
             };
@@ -3323,7 +3372,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     owner.executor.execute(() -> handleAbandonedShellStart(
                             owner, startResult.get(), abandonedSession,
                             linearDistance, maxDistance, nonLinearFactor,
-                            startX, startY, startEdge));
+                            startX, startY, startEdge,
+                            startGestureStreamId));
                     cleanupQueued = true;
                 } catch (Throwable cleanupFailure) {
                     moduleLog(Log.ERROR, TAG,
@@ -3352,7 +3402,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     handleAbandonedShellStart(owner, start,
                             abandonedSession, linearDistance,
                             maxDistance, nonLinearFactor,
-                            startX, startY, startEdge);
+                            startX, startY, startEdge,
+                            startGestureStreamId);
                 }
                 moduleLog(Log.ERROR, TAG,
                         "Rejected gesture after Shell blocking start timed out"
@@ -3366,7 +3417,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     handleAbandonedShellStart(owner, start,
                             abandonedSession, linearDistance,
                             maxDistance, nonLinearFactor,
-                            startX, startY, startEdge);
+                            startX, startY, startEdge,
+                            startGestureStreamId);
                 }
                 shellStartInFlight = false;
                 moduleLog(Log.ERROR, TAG, "Shell-owner gesture start failed",
@@ -3380,7 +3432,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return false;
             }
             ShellGestureSession session = new ShellGestureSession(
-                    owner, start, startEdge, startX, startY, linearDistance,
+                    owner, start, startGestureStreamId,
+                    startEdge, startX, startY, linearDistance,
                     maxDistance, nonLinearFactor, acceptedInputIdentity, recentsOpening);
             if (publishShellGestureSession(session)) {
                 shellOwnerUncertain = true;
@@ -3512,6 +3565,10 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                     moduleLog(Log.WARN, TAG,
                             "Rejected Shell start while another session owns the slot"
                                     + ", shellSessionId=" + completedSession.id
+                                    + ", shellGestureStreamId="
+                                    + completedSession.gestureStreamId
+                                    + ", activeGestureStreamId="
+                                    + activeGestureStreamId
                                     + ", completionConsumed="
                                     + completedSession.completionConsumed.get());
                     return false;
@@ -3523,6 +3580,67 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 return activeShellSession == null
                         && !shellStartInFlight && !shellOwnerUncertain;
             }
+        }
+
+        protected boolean retireShellSessionForNewPhysicalStream(long nextStreamId) {
+            ShellGestureSession session;
+            ShellSessionSlotPolicy.Action action;
+            synchronized (backInputLifecycleLock) {
+                session = activeShellSession;
+                action = ShellSessionSlotPolicy.beforeNewPhysicalStream(
+                        session != null,
+                        session == null ? 0L : session.gestureStreamId,
+                        nextStreamId,
+                        session != null && session.completionConsumed.get(),
+                        session != null && session.releaseQueued.get(),
+                        session != null && session.awaitingStockCleanup.get(),
+                        shellStartInFlight, shellOwnerUncertain,
+                        session != null && isShellSessionOwnerCurrent(session));
+            }
+            if (action == ShellSessionSlotPolicy.Action.KEEP) {
+                return activeShellSession == session;
+            }
+            if (action == ShellSessionSlotPolicy.Action.COMPLETE_PENDING) {
+                completeShellSessionOnMain(session,
+                        "completed-before-new-stream:" + nextStreamId);
+                return activeShellSession == null && !shellStartInFlight && !shellOwnerUncertain;
+            }
+            if (action == ShellSessionSlotPolicy.Action.FAIL_CLOSED) {
+                moduleLog(Log.WARN, TAG,
+                        "Kept prior Shell session before a new physical stream"
+                                + ", nextGestureStreamId=" + nextStreamId
+                                + ", " + describeActiveShellSession());
+                return false;
+            }
+            boolean completed = ShellSessionSlotPolicy.recover(session.releaseQueued,
+                    task -> executeShellBlocking(session.executor, task, "retireAbandonedSession"),
+                    () -> canRetireAbandonedShellSessionOnOwner(session),
+                    () -> completeShellSessionOnOwner(session, "retired-after-shell-ready"));
+            if (!completed) {
+                return false;
+            }
+            if (activeShellSession == session
+                    && !session.completionConsumed.get()) {
+                moduleLog(Log.INFO, TAG,
+                        "Retained abandoned Shell session after recovery check"
+                                + ", shellSessionId=" + session.id
+                                + ", nextGestureStreamId=" + nextStreamId
+                                + ", releaseQueued=" + session.releaseQueued.get()
+                                + ", awaitingStockCleanup="
+                                + session.awaitingStockCleanup.get());
+                return false;
+            }
+            if (activeShellSession == session) {
+                completeShellSessionOnMain(session,
+                        "retired-before-new-stream:" + nextStreamId);
+            }
+            moduleLog(Log.INFO, TAG,
+                    "Retired abandoned Shell session"
+                            + ", shellSessionId=" + session.id
+                            + ", shellGestureStreamId="
+                            + session.gestureStreamId
+                            + ", nextGestureStreamId=" + nextStreamId);
+            return activeShellSession == null && !shellStartInFlight && !shellOwnerUncertain;
         }
 
         protected boolean publishShellGestureSession(
@@ -3542,7 +3660,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                 AtomicReference<ShellGestureSession> abandonedSession,
                 float linearDistance, float maxDistance,
                 float nonLinearFactor, float startX, float startY,
-                int startEdge) {
+                int startEdge, long gestureStreamId) {
             if (start == null) {
                 shellStartInFlight = false;
                 shellOwnerUncertain = false;
@@ -3556,7 +3674,8 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             ShellGestureSession session = abandonedSession.get();
             if (session == null) {
                 ShellGestureSession candidate = new ShellGestureSession(
-                        owner, start, startEdge, startX, startY,
+                        owner, start, gestureStreamId,
+                        startEdge, startX, startY,
                         linearDistance, maxDistance, nonLinearFactor,
                         acceptedInputIdentity, null);
                 if (abandonedSession.compareAndSet(null, candidate)) {
@@ -3720,6 +3839,7 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
             shellGestureStarted = false;
             shellGestureStartDeferred = false;
             gestureSuppressed = false;
+            shellSlotBlockedForStream = false;
             legacyInterruptGesture = false;
             aospNullNavigationGesture = false;
             legacyRunningOpenInfo = null;
@@ -4428,6 +4548,36 @@ public abstract class SystemUiInputRuntime extends HookRuntimeCore {
                             + ", tracker=" + shortObject(session.tracker)
                             + ", navigation="
                             + shortObject(session.navigation));
+        }
+
+        protected boolean canRetireAbandonedShellSessionOnOwner(ShellGestureSession session) {
+            if (activeShellSession != session || session.completionConsumed.get()
+                    || shellStartInFlight || shellOwnerUncertain
+                    || !isShellSessionOwnerCurrent(session)) {
+                return false;
+            }
+            try {
+                Object transitionHandler = readField(session.controller,
+                        "mBackTransitionHandler");
+                recoverStaleCloseTransitionRequest(
+                        session.controller,
+                        readField(session.controller, "mCurrentTracker"),
+                        readField(session.controller, "mQueuedTracker"),
+                        readField(transitionHandler, "mOnAnimationFinishCallback"),
+                        session.id);
+                if (isShellStartReadyOnOwner(session.controller)) {
+                    return true;
+                }
+                moduleLog(Log.WARN, TAG, "Deferred abandoned Shell session recovery"
+                        + ", shellSessionId=" + session.id
+                        + ", state=" + describeShellStateOnOwner(session.controller));
+            } catch (Throwable throwable) {
+                moduleLog(Log.WARN, TAG,
+                        "Could not safely inspect abandoned Shell session"
+                                + ", shellSessionId=" + session.id,
+                        throwable);
+            }
+            return false;
         }
 
         protected void cancelFailedShellRelease(ShellGestureSession session,
